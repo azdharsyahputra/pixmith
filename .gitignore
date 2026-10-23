@@ -6,3 +6,4 @@ dist/
 qa/
 qa-out/
 .DS_Store
+desktop/target/

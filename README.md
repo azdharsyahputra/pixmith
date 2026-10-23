@@ -5,7 +5,7 @@
 
 Pixmith is a lightweight pixel-art editor. It reads and writes the `.aseprite` file format, so sprites can move between Pixmith and other tools that speak it.
 
-All editing lives in a platform-independent Rust core with a plain C ABI. Front ends are thin native shells around it: the first one is a SwiftUI/AppKit app for macOS, and the same core powers a command-line tool, `pixmith-cli`. Front ends for Windows and Linux are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-front-end-for-another-platform).
+All editing lives in a platform-independent Rust core with a plain C ABI. Front ends are thin shells around it: a SwiftUI/AppKit app for macOS, a cross-platform egui app for Windows, Linux and macOS (`desktop/`), and a command-line tool, `pixmith-cli`, all on the same core. More front ends are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-front-end-for-another-platform).
 
 Pixmith is original code, written from the public `.aseprite` file format specification. It is not affiliated with Aseprite.
 
@@ -31,17 +31,27 @@ Pixmith is original code, written from the public `.aseprite` file format specif
 
 ## Download
 
-The released app is the macOS front end. Grab `Pixmith-<version>.dmg` from [Releases](https://github.com/azdharsyahputra/pixmith/releases), open it and drag Pixmith to Applications. Builds are for Apple silicon Macs running macOS 13 or newer.
+Every build is on [Releases](https://github.com/azdharsyahputra/pixmith/releases):
 
-The app is not notarized yet, so the first launch is blocked by Gatekeeper. Right-click Pixmith in Applications and choose Open, then Open again, or run:
+| Platform | File | Notes |
+| --- | --- | --- |
+| macOS 13 or newer, Apple silicon | `Pixmith-<version>.dmg` | The native SwiftUI app. Open the disk image and drag Pixmith to Applications. |
+| Windows 10 or newer, x64 | `Pixmith-<version>-windows-x64.zip` | The egui app. Unzip anywhere and run `Pixmith.exe`; there is no installer. |
+| Linux, x64 | `Pixmith-<version>-linux-x64.tar.gz` | The egui app. Needs a desktop with OpenGL or Vulkan and X11 or Wayland. Unpack and run `./Pixmith`. |
+
+The Windows and Linux builds are the first phase of the egui front end (see [desktop/README.md](desktop/README.md) for what works); the macOS app is the complete one.
+
+The apps are not signed or notarized yet. On macOS, Gatekeeper blocks the first launch: right-click Pixmith in Applications and choose Open, then Open again, or run:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Pixmith.app
 ```
 
+On Windows, SmartScreen may warn about an unknown publisher: choose More info, then Run anyway.
+
 ## Build and run
 
-The core and `pixmith-cli` build anywhere Rust does (`cd core && cargo build --release`). The macOS app needs macOS 13 or newer and the Swift toolchain that ships with Xcode or the Command Line Tools.
+The core and `pixmith-cli` build anywhere Rust does (`cd core && cargo build --release`). The macOS app needs macOS 13 or newer and the Swift toolchain that ships with Xcode or the Command Line Tools. The egui desktop app builds on Windows, Linux and macOS with just Rust (`cd desktop && cargo run --release`; Linux needs a few system packages, listed in [desktop/README.md](desktop/README.md)).
 
 ```sh
 ./build.sh                  # builds core/ and app/, assembles build/Pixmith.app and build/pixmith-cli
@@ -257,7 +267,7 @@ Notes and limitations:
 
 ## Known limitations
 
-- The only graphical front end so far is the macOS app (13 or newer). The core and the CLI are portable.
+- The macOS app (13 or newer) is the complete front end. The egui app for Windows and Linux is in progress and does not have every feature yet; see [desktop/README.md](desktop/README.md). The core and the CLI are portable.
 - The GIF format has 1 bit of transparency and at most 255 colors per frame; frames with more colors are quantized.
 - GIF import turns every frame into a full-canvas cel; animated PNG and WebP cannot be imported.
 - Releases are ad-hoc signed unless you provide a Developer ID identity, so Gatekeeper asks you to approve the app on other Macs.
@@ -267,6 +277,7 @@ Notes and limitations:
 ```
 core/       Rust library (document model, file formats, every pixel operation, C ABI) and pixmith-cli
 app/        macOS front end, SwiftUI/AppKit (SwiftPM); Sources/PixmithCore holds the C headers for the core
+desktop/    cross-platform front end for Windows, Linux and macOS, Rust with egui; calls the core as a library
 scripts/    QA runner, Godot check, packaging and icon scripts
 docs/       architecture, Lua API, design references
 ```

@@ -1,6 +1,6 @@
 # Architecture
 
-Pixmith is two layers: a platform-independent Rust library that owns the document and every pixel operation behind a C ABI, and a native front end that shows it and turns input into calls on the library. The front end in this repository is a SwiftUI/AppKit app for macOS; front ends for other platforms would sit next to it and use the same headers.
+Pixmith is two layers: a platform-independent Rust library that owns the document and every pixel operation behind a C ABI, and a native front end that shows it and turns input into calls on the library. This repository has two front ends: a SwiftUI/AppKit app for macOS (`app/`) and a cross-platform egui app for Windows, Linux and macOS (`desktop/`); both use the same entry points. Front ends for other platforms would sit next to them.
 
 ```
 core/  (Rust, crate pixmith_core)          app/  (Swift package, macOS 13)
@@ -12,6 +12,19 @@ core/  (Rust, crate pixmith_core)          app/  (Swift package, macOS 13)
 ```
 
 `./build.sh` builds the static library (`cargo build --release`), builds the Swift package (which links `core/target/release/libpixmith_core.a`) and assembles `build/Pixmith.app`. `scripts/package.sh` does the same per architecture and packs a dmg.
+
+## Front ends
+
+| | `app/` (macOS) | `desktop/` (Windows, Linux, macOS) |
+| --- | --- | --- |
+| Language and UI | Swift, SwiftUI and AppKit | Rust, egui through eframe (wgpu), Phosphor icons, `rfd` for native file dialogs |
+| How it reaches the core | C headers in `Sources/PixmithCore`, linking `libpixmith_core.a` | `pixmith-core` as a Cargo path dependency, calling the same `pixmith_*` functions |
+| Document handle | `SpriteModel` wraps `OpaquePointer` | `Doc` (`desktop/src/doc.rs`) owns the `*mut Editor` and frees it on drop |
+| Design tokens | `DesignSystem/DesignSystem.swift` | `desktop/src/theme.rs`, same values |
+| Build | `./build.sh` | `cd desktop && cargo build --release` |
+| Release artifact | `Pixmith-<version>.dmg` | `Pixmith-<version>-windows-x64.zip`, `Pixmith-<version>-linux-x64.tar.gz` |
+
+The two apps are meant to be indistinguishable apart from the platform's native file dialogs and fonts. The desktop app keeps the same threading rules as the macOS app: one thread owns a `Doc`, and `unsafe` stays inside `doc.rs` and `calls/`, which expose safe methods grouped by the window region that uses them. `desktop/tests/screens.rs` renders the window headlessly so it can be compared with the macOS screenshots in `docs/design/screens/`. See [`desktop/README.md`](../desktop/README.md) for the build instructions and the current state.
 
 ## Core (`core/src`)
 
