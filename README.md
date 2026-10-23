@@ -8,6 +8,26 @@ All editing lives in a platform-independent Rust core with a plain C ABI. Front 
 
 Pixmith is original code, written from the public `.aseprite` file format specification. It is not affiliated with Aseprite.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="docs/design/screens/main-light@2x.png">
+    <img src="docs/design/screens/main-dark@2x.png" alt="Pixmith main window: tool rail, canvas, timeline and inspector">
+  </picture>
+</p>
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/design/screens/tilemap-autotile-dark.png" alt="Terrain brush auto-tiling a tilemap"></td>
+    <td width="33%"><img src="docs/design/screens/tween-dark.png" alt="Tween panel with dope sheet and motion path"></td>
+    <td width="33%"><img src="docs/design/screens/godot-export-dark.png" alt="Godot SpriteFrames export"></td>
+  </tr>
+  <tr>
+    <td align="center">Auto-tiling with terrains</td>
+    <td align="center">Tweening with a dope sheet</td>
+    <td align="center">One-click Godot 4 export</td>
+  </tr>
+</table>
+
 ## Download
 
 The released app is the macOS front end. Grab `Pixmith-<version>.dmg` from [Releases](https://github.com/azdharsyahputra/pixmith/releases), open it and drag Pixmith to Applications. Builds are for Apple silicon Macs running macOS 13 or newer.
