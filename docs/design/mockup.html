@@ -1,0 +1,233 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pixmith UI mockup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
+<style>
+:root{
+  --bg-canvas:#1b1b1d; --panel:#262628; --panel-2:#2e2e31; --field:#333336; --hover:#38383c;
+  --sep:#3a3a3e; --sep-soft:#303033; --text:#ececee; --text-2:#a3a3a8; --text-3:#75757b;
+  --accent:#3b8bff; --accent-soft:rgba(59,139,255,.18); --accent-line:rgba(59,139,255,.55);
+  --r-ctl:6px; --r-panel:8px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:1280px;height:800px;background:#000;font:12px/1.3 -apple-system,"SF Pro Text",system-ui,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden}
+.win{width:1280px;height:800px;background:var(--panel);display:grid;grid-template-columns:48px 1fr 272px;grid-template-rows:40px 40px 1fr 228px;border-radius:10px;overflow:hidden}
+.ti{font-size:16px;line-height:1}
+.icon-btn{width:28px;height:28px;border-radius:var(--r-ctl);display:inline-flex;align-items:center;justify-content:center;color:var(--text-2)}
+.icon-btn:hover,.icon-btn.hov{background:var(--hover);color:var(--text)}
+.icon-btn.on{background:var(--accent-soft);color:var(--accent)}
+.lbl{color:var(--text-2);font-size:11px}
+.field{height:24px;background:var(--field);border-radius:5px;display:inline-flex;align-items:center;padding:0 8px;gap:6px;color:var(--text);font-variant-numeric:tabular-nums}
+.field .k{color:var(--text-3);font-size:11px}
+.vsep{width:1px;height:20px;background:var(--sep);margin:0 6px}
+.sec-h{display:flex;align-items:center;height:36px;padding:0 8px 0 16px;font-weight:600;font-size:11px;letter-spacing:.01em}
+.sec-h .sp{flex:1}
+.sec{border-bottom:1px solid var(--sep-soft)}
+</style>
+</head>
+<body>
+<div class="win">
+
+  <!-- Title bar: traffic lights, document tabs, zoom, export -->
+  <div style="grid-column:1/4;display:flex;align-items:center;background:var(--panel);border-bottom:1px solid var(--sep-soft);padding:0 10px 0 14px;gap:8px">
+    <div style="display:flex;gap:8px;margin-right:14px">
+      <span style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></span>
+      <span style="width:12px;height:12px;border-radius:50%;background:#febc2e"></span>
+      <span style="width:12px;height:12px;border-radius:50%;background:#28c840"></span>
+    </div>
+    <div style="display:flex;align-items:center;gap:2px;height:40px">
+      <div style="height:28px;padding:0 10px 0 12px;border-radius:6px;background:var(--panel-2);display:flex;align-items:center;gap:8px">
+        <span>cookie.aseprite</span><span style="width:6px;height:6px;border-radius:50%;background:var(--text-2)"></span>
+      </div>
+      <div style="height:28px;padding:0 12px;border-radius:6px;display:flex;align-items:center;color:var(--text-2)">walk-cycle.aseprite</div>
+      <div class="icon-btn" style="width:24px;height:24px"><i class="ti ti-plus" style="font-size:14px"></i></div>
+    </div>
+    <div style="flex:1"></div>
+    <div class="field" style="background:transparent;color:var(--text-2)"><span>1000%</span><i class="ti ti-chevron-down" style="font-size:12px"></i></div>
+    <div style="height:28px;padding:0 12px;border-radius:6px;background:var(--accent);color:#fff;display:flex;align-items:center;gap:6px;font-weight:500"><i class="ti ti-upload" style="font-size:14px"></i>Export</div>
+  </div>
+
+  <!-- Left tool rail -->
+  <div style="grid-row:2/5;grid-column:1;background:var(--panel);border-right:1px solid var(--sep-soft);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:2px">
+    <div class="icon-btn"><i class="ti ti-marquee-2"></i></div>
+    <div class="icon-btn"><i class="ti ti-lasso"></i></div>
+    <div class="icon-btn"><i class="ti ti-wand"></i></div>
+    <div class="icon-btn"><i class="ti ti-arrows-move"></i></div>
+    <div style="width:20px;height:1px;background:var(--sep);margin:6px 0"></div>
+    <div class="icon-btn on"><i class="ti ti-pencil"></i></div>
+    <div class="icon-btn"><i class="ti ti-eraser"></i></div>
+    <div class="icon-btn"><i class="ti ti-bucket-droplet"></i></div>
+    <div class="icon-btn"><i class="ti ti-color-picker"></i></div>
+    <div class="icon-btn"><i class="ti ti-spray"></i></div>
+    <div style="width:20px;height:1px;background:var(--sep);margin:6px 0"></div>
+    <div class="icon-btn"><i class="ti ti-line"></i></div>
+    <div class="icon-btn"><i class="ti ti-square"></i></div>
+    <div class="icon-btn"><i class="ti ti-circle"></i></div>
+    <div class="icon-btn"><i class="ti ti-vector-spline"></i></div>
+    <div style="width:20px;height:1px;background:var(--sep);margin:6px 0"></div>
+    <div class="icon-btn"><i class="ti ti-typography"></i></div>
+    <div class="icon-btn"><i class="ti ti-slice"></i></div>
+    <div style="flex:1"></div>
+    <div style="position:relative;width:36px;height:36px;margin-bottom:4px">
+      <div style="position:absolute;right:0;bottom:0;width:22px;height:22px;border-radius:5px;background:#2a3566;box-shadow:0 0 0 1.5px var(--panel),0 0 0 2.5px var(--sep)"></div>
+      <div style="position:absolute;left:0;top:0;width:22px;height:22px;border-radius:5px;background:#e8a85f;box-shadow:0 0 0 1.5px var(--panel),0 0 0 2.5px var(--sep)"></div>
+    </div>
+    <div class="icon-btn" style="width:24px;height:20px"><i class="ti ti-arrows-exchange" style="font-size:13px"></i></div>
+  </div>
+
+  <!-- Context bar: options for the active tool only -->
+  <div style="grid-row:2;grid-column:2;display:flex;align-items:center;gap:6px;padding:0 12px;background:var(--panel);border-bottom:1px solid var(--sep-soft)">
+    <span style="font-weight:600;margin-right:6px">Pencil</span>
+    <div class="field"><span class="k">Size</span><span>1</span><span class="k">px</span></div>
+    <div style="display:flex;background:var(--field);border-radius:5px;padding:2px;gap:2px">
+      <div style="width:22px;height:20px;border-radius:4px;background:var(--hover);display:flex;align-items:center;justify-content:center"><i class="ti ti-square" style="font-size:12px"></i></div>
+      <div style="width:22px;height:20px;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-3)"><i class="ti ti-circle" style="font-size:12px"></i></div>
+    </div>
+    <div class="vsep"></div>
+    <div class="field" style="min-width:118px;justify-content:space-between"><span><span class="k">Ink</span>&nbsp; Simple</span><i class="ti ti-chevron-down" style="font-size:12px;color:var(--text-3)"></i></div>
+    <div class="vsep"></div>
+    <div class="icon-btn on" title="Pixel-perfect"><i class="ti ti-stairs"></i></div>
+    <div class="icon-btn" title="Mirror horizontally"><i class="ti ti-flip-vertical"></i></div>
+    <div class="icon-btn" title="Mirror vertically"><i class="ti ti-flip-horizontal"></i></div>
+    <div class="vsep"></div>
+    <div class="icon-btn" title="Pen pressure: size"><i class="ti ti-ballpen"></i></div>
+    <div class="icon-btn" title="Pen pressure: opacity"><i class="ti ti-droplet-half-2"></i></div>
+    <div style="flex:1"></div>
+    <span class="lbl">B</span>
+  </div>
+
+  <!-- Canvas -->
+  <div style="grid-row:3;grid-column:2;background:var(--bg-canvas);position:relative;display:flex;align-items:center;justify-content:center">
+    <div style="box-shadow:0 0 0 1px rgba(0,0,0,.5),0 8px 28px rgba(0,0,0,.35)">
+      <canvas id="art" width="336" height="336" style="display:block"></canvas>
+    </div>
+    <div style="position:absolute;left:12px;bottom:10px;display:flex;gap:6px">
+      <div class="field" style="height:22px;background:rgba(38,38,40,.9)"><span class="k">48 × 48</span></div>
+      <div class="field" style="height:22px;background:rgba(38,38,40,.9)"><i class="ti ti-pointer" style="font-size:12px;color:var(--text-3)"></i><span>24, 17</span></div>
+    </div>
+  </div>
+
+  <!-- Timeline: layers live here (single source), frames grid, tags -->
+  <div style="grid-row:4;grid-column:2;background:var(--panel);border-top:1px solid var(--sep);display:grid;grid-template-columns:200px 1fr;grid-template-rows:36px 1fr">
+    <div style="grid-column:1/3;display:flex;align-items:center;gap:2px;padding:0 8px;border-bottom:1px solid var(--sep-soft)">
+      <div class="icon-btn"><i class="ti ti-player-skip-back"></i></div>
+      <div class="icon-btn"><i class="ti ti-player-play"></i></div>
+      <div class="icon-btn"><i class="ti ti-player-skip-forward"></i></div>
+      <div class="field" style="margin-left:6px"><span>2</span><span class="k">/ 6</span></div>
+      <div class="field"><span>100</span><span class="k">ms</span></div>
+      <div class="vsep"></div>
+      <div class="icon-btn on" title="Loop tag"><i class="ti ti-repeat"></i></div>
+      <div class="icon-btn" title="Onion skin"><i class="ti ti-stack-2"></i></div>
+      <div style="flex:1"></div>
+      <div class="icon-btn" title="New frame"><i class="ti ti-square-plus"></i></div>
+      <div class="icon-btn" title="Duplicate frame"><i class="ti ti-copy"></i></div>
+      <div class="icon-btn" title="New tag"><i class="ti ti-tag"></i></div>
+      <div class="icon-btn" title="Delete frame"><i class="ti ti-trash"></i></div>
+    </div>
+    <div style="border-right:1px solid var(--sep-soft);display:flex;flex-direction:column">
+      <div style="height:40px;display:flex;align-items:flex-end;padding:0 8px 6px 12px;justify-content:space-between">
+        <span class="lbl" style="font-weight:600">Layers</span>
+        <div style="display:flex;gap:0"><div class="icon-btn" style="width:24px;height:24px"><i class="ti ti-plus" style="font-size:14px"></i></div><div class="icon-btn" style="width:24px;height:24px"><i class="ti ti-folder-plus" style="font-size:14px"></i></div></div>
+      </div>
+      <div id="layers"></div>
+    </div>
+    <div style="position:relative;overflow:hidden;background:repeating-linear-gradient(to right,transparent 0 31px,rgba(255,255,255,.035) 31px 32px) 8px 0/100% 100% no-repeat">
+      <div style="height:20px;position:relative;margin-left:8px">
+        <div style="position:absolute;left:0;top:4px;width:94px;height:14px;border-radius:4px;background:rgba(59,139,255,.28);color:#9cc4ff;font-size:10px;font-weight:600;padding:0 6px;line-height:14px">idle</div>
+        <div style="position:absolute;left:96px;top:4px;width:94px;height:14px;border-radius:4px;background:rgba(232,98,90,.28);color:#ffaca6;font-size:10px;font-weight:600;padding:0 6px;line-height:14px">blink</div>
+      </div>
+      <div id="frames" style="height:20px;display:flex;margin-left:8px"></div>
+      <div id="grid" style="margin-left:8px"></div>
+    </div>
+  </div>
+
+  <!-- Inspector -->
+  <div style="grid-row:2/5;grid-column:3;background:var(--panel);border-left:1px solid var(--sep-soft);display:flex;flex-direction:column">
+    <div class="sec">
+      <div class="sec-h">Color<span class="sp"></span><div class="icon-btn" style="width:24px;height:24px"><i class="ti ti-color-swatch" style="font-size:14px"></i></div></div>
+      <div style="padding:0 16px 14px;display:flex;flex-direction:column;gap:8px">
+        <div style="height:104px;border-radius:6px;position:relative;background:linear-gradient(to top,#000,transparent),linear-gradient(to right,#fff,hsl(32,95%,55%))">
+          <span style="position:absolute;left:68%;top:22%;width:12px;height:12px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.4)"></span>
+        </div>
+        <div style="height:8px;border-radius:4px;background:linear-gradient(to right,red,#ff0,lime,cyan,blue,#f0f,red);position:relative">
+          <span style="position:absolute;left:9%;top:-3px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.4)"></span>
+        </div>
+        <div style="display:flex;gap:6px">
+          <div class="field" style="flex:1"><span style="width:12px;height:12px;border-radius:3px;background:#e8a85f"></span><span>E8A85F</span></div>
+          <div class="field" style="width:64px"><span>100</span><span class="k">%</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="sec">
+      <div class="sec-h">Palette <span class="lbl" style="font-weight:400;margin-left:6px">32</span><span class="sp"></span>
+        <div class="icon-btn" style="width:24px;height:24px"><i class="ti ti-plus" style="font-size:14px"></i></div>
+        <div class="icon-btn" style="width:24px;height:24px"><i class="ti ti-dots" style="font-size:14px"></i></div>
+      </div>
+      <div id="pal" style="padding:0 16px 14px;display:grid;grid-template-columns:repeat(8,1fr);gap:3px"></div>
+    </div>
+    <div class="sec">
+      <div class="sec-h">Layer<span class="sp"></span><div class="icon-btn" style="width:24px;height:24px"><i class="ti ti-eye" style="font-size:14px"></i></div><div class="icon-btn" style="width:24px;height:24px"><i class="ti ti-lock-open" style="font-size:14px"></i></div></div>
+      <div style="padding:0 16px 14px;display:flex;flex-direction:column;gap:6px">
+        <div class="field" style="width:100%"><span>Outline</span></div>
+        <div style="display:flex;gap:6px">
+          <div class="field" style="flex:1;justify-content:space-between"><span>Normal</span><i class="ti ti-chevron-down" style="font-size:12px;color:var(--text-3)"></i></div>
+          <div class="field" style="width:76px"><i class="ti ti-droplet" style="font-size:12px;color:var(--text-3)"></i><span>100</span><span class="k">%</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="sec">
+      <div class="sec-h">Cel <span class="lbl" style="font-weight:400;margin-left:6px">Outline · frame 2</span></div>
+      <div style="padding:0 16px 14px;display:flex;gap:6px">
+        <div class="field" style="flex:1"><span class="k">Opacity</span><span>100</span><span class="k">%</span></div>
+        <div class="field" style="flex:1;color:var(--text-2)"><i class="ti ti-link" style="font-size:12px"></i><span>Linked</span></div>
+      </div>
+    </div>
+    <div class="sec" style="border-bottom:none;flex:1">
+      <div class="sec-h">Sprite</div>
+      <div style="padding:0 16px;display:grid;grid-template-columns:auto 1fr;row-gap:8px;column-gap:16px">
+        <span class="lbl">Size</span><span>48 × 48 px</span>
+        <span class="lbl">Color mode</span><span>RGBA</span>
+        <span class="lbl">Frames</span><span>6 · 600 ms</span>
+        <span class="lbl">Grid</span><span>16 × 16</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const pal=["#000000","#1d1d33","#3f2832","#743f39","#b86f50","#e8a85f","#f0c891","#f7e7c6","#ffe762","#a8e05f","#4cba5a","#2b8a6e","#25562e","#3b3d33","#2d2f3a","#45437a","#2a3566","#3d65c4","#4f9cf5","#73d6ec","#c7e3ff","#ffffff","#9badb7","#6b7280","#5a5a5a","#3f3f3f","#76428a","#ac3232","#d95763","#d77bba","#8f974a","#8a6f30"];
+const P=document.getElementById('pal');
+pal.forEach((c,i)=>{const d=document.createElement('div');d.style.cssText=`aspect-ratio:1;border-radius:3px;background:${c};box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)`+(i===5?';outline:2px solid var(--accent);outline-offset:1px':'');P.appendChild(d)});
+
+const layers=[["Shine",1,0],["Eyes",1,0],["Group 1",0,1],["Outline",0,0],["Body",0,0],["Background",0,0]];
+const L=document.getElementById('layers'),G=document.getElementById('grid'),F=document.getElementById('frames');
+for(let f=1;f<=24;f++){const d=document.createElement('div');d.textContent=f<=6?f:(f===7?'+':'');if(f===7){d.style.cssText='width:32px;text-align:center;line-height:20px;color:var(--text-3)';F.appendChild(d);continue}if(f>7){d.style.cssText='width:32px';F.appendChild(d);continue}d.style.cssText=`width:32px;text-align:center;font-size:11px;line-height:20px;font-variant-numeric:tabular-nums;color:${f===2?'var(--text)':'var(--text-3)'};${f===2?'font-weight:600':''}`;F.appendChild(d)}
+layers.forEach(([n,indent,group],i)=>{
+  const sel=n==="Outline";
+  const r=document.createElement('div');
+  r.style.cssText=`height:24px;display:flex;align-items:center;gap:8px;padding:0 8px 0 ${12+indent*16}px;${sel?'background:var(--accent-soft)':''}`;
+  r.innerHTML=(group?'<i class="ti ti-chevron-down" style="font-size:12px;color:var(--text-3);margin-left:-14px;margin-right:-6px"></i><i class="ti ti-folder" style="font-size:14px;color:var(--text-2)"></i>':'<span style="width:16px;height:16px;border-radius:3px;background:repeating-conic-gradient(#555 0 25%,#3a3a3a 0 50%) 0 0/8px 8px"></span>')+`<span style="flex:1;${sel?'color:var(--text);font-weight:500':'color:var(--text-2)'}">${n}</span><i class="ti ti-eye" style="font-size:13px;color:var(--text-3)"></i>`;
+  L.appendChild(r);
+  const g=document.createElement('div');g.style.cssText=`height:24px;display:flex;${sel?'background:var(--accent-soft)':''}`;
+  for(let f=1;f<=6;f++){const c=document.createElement('div');const cur=f===2;c.style.cssText=`width:32px;height:24px;display:flex;align-items:center;justify-content:center;${cur?'background:rgba(255,255,255,.04)':''}`;
+    if(!group){const link=(n==="Body"&&f>1);c.innerHTML=link?`<span style="width:${f===2?14:4}px;height:4px;border-radius:2px;background:var(--text-3)"></span>`:`<span style="width:10px;height:10px;border-radius:50%;background:${sel&&cur?'var(--accent)':'var(--text-2)'};${n==="Shine"&&f>3?'background:transparent;box-shadow:inset 0 0 0 1.5px var(--text-3)':''}"></span>`;}
+    g.appendChild(c)}
+  G.appendChild(g);
+});
+
+const cv=document.getElementById('art'),x=cv.getContext('2d'),S=7,N=48;
+for(let y=0;y<N;y++)for(let i=0;i<N;i++){x.fillStyle=((i>>2)+(y>>2))%2?'#3a3a3d':'#2f2f32';x.fillRect(i*S,y*S,S,S)}
+function px(i,y,c){x.fillStyle=c;x.fillRect(i*S,y*S,S,S)}
+const cx=23.5,cy=24.5,R=15;
+for(let y=0;y<N;y++)for(let i=0;i<N;i++){const d=Math.hypot(i-cx,y-cy);if(d<R-1)px(i,y,'#e8a85f');else if(d<R)px(i,y,'#1d1d33')}
+for(let y=0;y<N;y++)for(let i=0;i<N;i++){const d=Math.hypot(i-cx,y-cy);if(d<R-1&&d>R-4&&i>cx&&y>cy)px(i,y,'#b86f50')}
+[[18,20],[29,20]].forEach(([a,b])=>{for(let y=b;y<b+5;y++)for(let i=a;i<a+3;i++)px(i,y,'#1d1d33')});
+for(let y=13;y<16;y++)for(let i=14;i<18;i++)px(i,y,'#f7e7c6');
+for(let i=20;i<28;i++)px(i,31,'#743f39');px(19,30,'#743f39');px(28,30,'#743f39');
+x.strokeStyle='rgba(0,0,0,.18)';x.lineWidth=1;
+for(let k=0;k<=N;k+=1){x.beginPath();x.moveTo(k*S+.5,0);x.lineTo(k*S+.5,N*S);x.stroke();x.beginPath();x.moveTo(0,k*S+.5);x.lineTo(N*S,k*S+.5);x.stroke()}
+</script>
+</body>
+</html>

@@ -1,0 +1,247 @@
+# Pixmith
+
+Pixmith is a lightweight pixel-art editor for macOS. It reads and writes the `.aseprite` file format, so sprites can move between Pixmith and other tools that speak it. The editor is a native SwiftUI/AppKit app on top of a Rust core library; the same core powers a command-line tool, `pixmith-cli`.
+
+Pixmith is original code, written from the public `.aseprite` file format specification. It is not affiliated with Aseprite.
+
+## Build and run
+
+Requirements: macOS 13 or newer, a Rust toolchain (`cargo`), and the Swift toolchain that ships with Xcode or the Command Line Tools.
+
+```sh
+./build.sh                  # builds core/ and app/, assembles build/Pixmith.app and build/pixmith-cli
+open build/Pixmith.app
+
+cd core && cargo test       # Rust unit and CLI integration tests
+```
+
+``.aseprite`, `.ase` and `.png` files can be opened from the Open panel, from Finder (Open With), or by dropping them on the Dock icon. Animated GIFs and sprite sheets with JSON metadata are opened from File > Import.
+
+### End-to-end tests
+
+```sh
+./scripts/qa.sh             # builds and runs every scenario headlessly (about 66 scenarios, several minutes)
+./scripts/qa.sh tilemap/    # only the scenarios whose name contains "tilemap/"
+app/.build/debug/pixmith-qa --list
+```
+
+`pixmith-qa` drives the real app code (the model, the canvas view's mouse and key handlers, modal dialogs, file actions and the SwiftUI window) in an offscreen window, so it needs no Accessibility or Screen Recording permission and shows nothing on screen. PNG snapshots of key states go to `qa-out/` (`PIXMITH_QA_OUT`). Each scenario runs in its own process with a temporary `HOME` and `PIXMITH_SUPPORT_DIR`, so nothing touches your real autosave or script folders.
+
+Exit status, for CI: `0` every scenario passed; `1` at least one scenario failed, crashed or timed out (the failing checks are printed as `FAIL <scenario>: <what> (<file>:<line>)`); any other non-zero status means the Rust core or the runner failed to build. `PIXMITH_QA_TIMEOUT` sets the seconds allowed per scenario (default 180), `PIXMITH_QA_VERBOSE=1` prints scenario notes and `PIXMITH_JOBS` limits build parallelism.
+
+### Packaging
+
+```sh
+./scripts/package.sh        # writes dist/Pixmith-<version>.dmg
+```
+
+The script builds a universal (arm64 + x86_64) app when the Rust toolchain has both macOS targets. With `rustup` it installs the missing target; without it, it builds the native architecture only and prints a warning. The disk image contains `Pixmith.app`, `pixmith-cli` and an `Applications` shortcut. The app is signed ad-hoc unless you set:
+
+| Variable | Effect |
+| --- | --- |
+| `PIXMITH_SIGN_IDENTITY` | `codesign` identity, e.g. `Developer ID Application: Name (TEAMID)`; enables the hardened runtime. |
+| `PIXMITH_NOTARY_PROFILE` | `notarytool` keychain profile; submits the dmg and staples the ticket (needs `PIXMITH_SIGN_IDENTITY`). |
+| `PIXMITH_JOBS` | Parallel jobs for cargo and swift. |
+
+`./scripts/make-icon.sh` regenerates `assets/AppIcon.icns` from `scripts/make-icon.swift`.
+
+## Features
+
+**Drawing**
+- Pencil (optional pixel-perfect mode), eraser, flood fill (contiguous or global), eyedropper, line, rectangle, ellipse, polygon, Bezier curve, freehand contour, spray, gradient and text tools. Shapes can be filled or outlined; Shift constrains lines, squares and circles.
+- Square or round brushes of size 1-64, custom brushes captured from a selection, horizontal and vertical mirroring, pen pressure for size and opacity on tablets.
+- Ink modes: Simple, Alpha Compositing, Lock Alpha, Behind and Shading (steps along the palette). The right mouse button draws with the secondary color.
+- Text with a built-in 5x8 pixel font or a system font.
+
+**Selection and editing**
+- Rectangular marquee, magic wand, lasso and polygon lasso; hold Shift to add and Option to subtract; expand, contract, border, invert, select by color.
+- Move, nudge, flip, rotate, cut, copy and paste (floating paste), crop to selection, canvas resize.
+- Free Transform (Cmd-T): scale, rotate, skew and move with a live preview, including a RotSprite-style resampler.
+- Undo and redo that store only the pixels a step changed (up to 1 GiB of history per document; one step takes well under a millisecond on a 4096 x 4096 canvas), and a History panel (Option-Cmd-Y) that lists named steps and jumps to any of them. Multi-part operations are single undo steps.
+
+**Layers, frames and animation**
+- Layers and nested groups with opacity, visibility, blend modes, merge down, duplicate and drag-and-drop reordering.
+- Timeline with a cel grid: select ranges of cels, per-frame durations, frame reordering, linked cels, cel properties, onion skinning (optional tint) and a floating preview window.
+- Animation tags with forward, reverse and ping-pong directions and tag-aware playback.
+- Tilemap layers with tilesets: create, convert, rename, duplicate and delete tiles, share flipped copies, and a stamp mode.
+- Slices (including 9-patch centers and pivots) and user data (text, color) for the sprite, layers, cels, tags and slices.
+
+**Game development**
+- Godot 4 export: SpriteFrames `.tres` with an atlas PNG (trim, extrude, padding, one animation per tag) and an optional `AnimatedSprite2D` scene; TileSet `.tres` from tilemap layers with terrains, peering bits and flipped alternatives. Re-export keeps resource uids stable.
+- Auto-tiling: a terrain brush for tilemap layers with Sides, Corners and Blob (47-tile) sets, dual-grid tiling, several terrains with priorities, a 3x3 mask editor, templates and a report of missing masks.
+- Tweening: position, scale, rotation and opacity keys with easing presets and a Bezier curve editor, a dope sheet, on-canvas handles and motion path, and baking into frames.
+
+**Scripting**
+- Lua 5.4 scripts from the script folder (File > Scripts) with access to the sprite, layers, frames, cels, tags, slices, tilesets, selection and palette; a script runs as one undo step and an error leaves the document untouched. See [docs/LUA_API.md](docs/LUA_API.md).
+
+**Color and effects**
+- RGBA, grayscale and indexed color modes (with optional ordered dithering), palette from sprite (exact or quantized).
+- Palette editor: reorder, insert, duplicate and remove entries, color ramps, live entry editing that keeps indexed sprites consistent, built-in presets, GIMP `.gpl` and `.hex` import and export, sorting by hue or luminance.
+- FX menu: replace color, invert, desaturate, hue/saturation/lightness, brightness/contrast, color balance, curves, outline, drop shadow, remove isolated pixels, blur, sharpen, scale sprite.
+
+**View**
+- Zoom (menu, pinch, Command-scroll) that keeps the point under the cursor fixed, zoom to fit, pixel grid and custom grid, tiled preview in X, Y or both, reference image, status bar with cursor position, sprite size, frame and zoom.
+
+**Import and export**
+- Export a frame as PNG, an animated GIF (frame durations, transparency, scale), an animated PNG (APNG), a numbered PNG sequence, or a sprite sheet (horizontal, vertical or grid, padding, scale) with Aseprite-style JSON metadata.
+- Import a PNG as a new sprite, an animated GIF as a new sprite (frames and delays, disposal methods applied), a sprite sheet PNG as frames (by cell size), a sprite sheet with Aseprite JSON (array or hash format: frame rectangles, durations, trimmed frames, tags and slices), or a PNG as a new layer.
+- WebP is not supported; it needs an encoder this project does not bundle.
+
+**App**
+- Several documents open at once as tabs in one window, each with its own undo history, view and selection.
+- Modified indicator that clears when you undo back to the saved state, Save / Don't Save / Cancel prompts, Open Recent.
+- Autosave of unsaved work every 60 seconds to `~/Library/Application Support/Pixmith/Recovery`, offered for restoring after a crash.
+- Preferences (Command-,): default new sprite size, checkerboard and grid colors, default zoom, and keyboard shortcuts.
+
+## Keyboard shortcuts
+
+The single-key shortcuts below are the defaults. They can be rebound in Preferences > Keyboard, and Help > Keyboard Shortcuts lists the current bindings together with every menu shortcut. They work when no text field is being edited and no sheet is open.
+
+### Tools and actions (rebindable)
+
+| Key | Action |
+| --- | --- |
+| `B` | Pencil |
+| `E` | Eraser |
+| `G` | Fill |
+| `I` | Eyedropper |
+| `L` | Line |
+| `U` | Rectangle |
+| `O` or `Shift-U` | Ellipse |
+| `Shift-P` | Polygon (draw) |
+| `C` | Curve |
+| `D` | Contour (freehand) |
+| `A` | Spray |
+| `Shift-G` | Gradient |
+| `T` | Text |
+| `S` | Slice |
+| `M` | Rectangular marquee |
+| `W` | Magic wand |
+| `Q` | Lasso |
+| `P` | Polygon lasso |
+| `V` | Move |
+| `X` | Swap primary and secondary colors |
+| `[` / `]` | Smaller / larger brush |
+| `,` / `.` | Previous / next frame |
+| `Space` | Play or pause the animation |
+
+### Fixed keys and mouse
+
+| Input | Action |
+| --- | --- |
+| Arrow keys | Nudge the selection or move tool; `Shift` moves 10 pixels |
+| `Delete` | Delete the selected pixels |
+| `Return` | Commit a floating paste or close an open polygon |
+| `Esc` | Cancel a polygon or paste, then deselect |
+| `Option`-click | Pick a color from the canvas |
+| Right-click | Draw with the secondary color |
+| `Shift`-drag | Constrain lines, squares and circles |
+| `Cmd`-scroll, pinch | Zoom around the cursor |
+
+### Menus
+
+| Shortcut | Command |
+| --- | --- |
+| `Cmd-N` | New sprite |
+| `Cmd-O` | Open |
+| `Cmd-S` / `Shift-Cmd-S` | Save / Save As |
+| `Shift-Cmd-E` | Export PNG |
+| `Cmd-Z` / `Shift-Cmd-Z` | Undo / Redo |
+| `Cmd-X` / `Cmd-C` / `Cmd-V` | Cut / Copy / Paste |
+| `Cmd-T` | Free Transform |
+| `Cmd-A` | Select all |
+| `Cmd-D` | Deselect |
+| `Shift-Cmd-I` | Invert selection |
+| `Option-Cmd-B` | Select by color |
+| `Cmd-B` | Brush from selection |
+| `Shift-Cmd-N` | New layer |
+| `Option-Cmd-N` | New frame |
+| `Shift-Cmd-D` | Duplicate frame |
+| `Cmd-=` / `Cmd--` | Zoom in / out |
+| `Cmd-0` | Zoom to fit |
+| `Cmd-1` | Actual size |
+| `Cmd-'` | Toggle grid |
+| `Option-Cmd-P` | Preview window |
+| `Option-Cmd-Y` | History panel |
+| `Option-Cmd-,` | View options |
+| `Cmd-,` | Preferences |
+
+Other commands (export GIF, APNG, PNG sequence and sprite sheet, import, layer and cel properties, tags, slices and user data, tilemaps, palette, FX and color mode) live in the File, Sprite, Layer, Drawing, Palette, Tilemap and FX menus.
+
+## Command-line tool
+
+`pixmith-cli` inspects and exports `.aseprite` files without the app. It is built next to the app as `build/pixmith-cli`.
+
+```sh
+pixmith-cli info hero.aseprite              # size, frames, layers, tags
+pixmith-cli info --json hero.aseprite       # same as JSON (an array when given several files)
+
+pixmith-cli export hero.aseprite --png hero.png --frame 2 --scale 4
+pixmith-cli export hero.aseprite --gif hero.gif --scale 4
+pixmith-cli export hero.aseprite --apng hero-anim.png
+pixmith-cli export hero.aseprite --sheet sheet.png --layout grid --columns 4 --padding 1 --json sheet.json
+pixmith-cli export hero.aseprite --png-seq out/hero      # out/hero-001.png, out/hero-002.png, ...
+
+pixmith-cli export hero.aseprite --tag walk --gif walk.gif     # only the frames of one tag
+pixmith-cli export hero.aseprite --layer Body --png body.png   # only layers with this name
+
+# Batch: with several inputs every output path needs {name} (the input's name without extension).
+pixmith-cli export sprites/*.aseprite --png 'out/{name}.png' --scale 2
+```
+
+Frames are counted from 1, like the editor and the `-001.png` file names; the sprite sheet JSON follows Aseprite's format and counts from 0. Exit codes: `0` success, `1` a file could not be read or exported (the other files in a batch are still processed), `2` usage error. Run `pixmith-cli --help` for all options.
+
+### Godot 4 export
+
+File > Export to Godot… (and Re-export to Godot, Cmd-Shift-G) writes a SpriteFrames `.tres` plus an atlas PNG, and optionally a `.tscn` with an `AnimatedSprite2D`. Godot 4 only. The CLI does the same:
+
+```sh
+pixmith-cli export hero.aseprite --godot-root ~/game --godot-tres ~/game/art/hero.tres --trim --extrude --padding 1 --godot-tscn
+```
+
+Set Project Settings > Rendering > Textures > Default Texture Filter = Nearest in Godot, or pixel art looks blurry.
+
+`scripts/godot-check.sh` is an opt-in check against a real Godot: it exports fixture sprites into a throwaway project under `.scratch/`, runs Godot headless to import and load them, compares animation names, loop flags, frame timing, sizes and pixels, and lets Godot re-save a resource to check that uids survive a re-export. It skips with a message when Godot is not installed (install it with `brew install --cask godot`, or set `GODOT=/path/to/Godot`).
+
+## `.aseprite` compatibility
+
+Pixmith reads and writes RGBA, grayscale and indexed sprites with layers, groups, frames and durations, cels (raw, compressed and linked), tags, palettes, blend modes, layer opacity and visibility, tilemap layers with tilesets (in the sprite's own color mode), slices (with 9-patch centers and pivots) and user data on the sprite, layers, cels, tags and slices.
+
+Notes and limitations:
+- Cels are held as full-canvas buffers in memory. Cel positions are applied on load and cels are written back cropped to their content (an empty cel is kept as a single transparent pixel), so files round-trip visually but not byte for byte.
+- Group opacity and blend mode are honored only when the file header says they are valid (Aseprite 1.3 and later); older files store an unused 0 there, which would otherwise hide the group.
+- Indexed pixels that use a palette index beyond the stored palette get black palette entries so they survive saving.
+- Pixel ratio and grid settings are preserved. Tilesets that no layer uses are kept, as Aseprite keeps them.
+- Color profile, external-file and cel-extra chunks and cel z-indexes are not kept on save. Custom user-data properties are preserved as raw bytes but cannot be edited.
+- Blend modes follow Aseprite's output: normal blending is bit-exact on the reference files, and the other 18 modes are within 3 per channel (exact for opaque backdrops).
+- Diagonal tile flips are verified only for the case where all three flip flags are set; other combinations follow the Tiled convention.
+- Canvas size is limited to 65535 x 65535 pixels (files above 100 million pixels are rejected); the New Sprite dialog limits it to 4096.
+- Files are written through a temporary file, so a failed save never truncates the original.
+- The sprite sheet JSON importer ignores `meta.layers`, builds a single layer, and rejects rotated frames. An integer `meta.scale` of 2 or more is undone when all frame sizes and offsets are multiples of it.
+- Compatibility is tested against real files from other projects (see `core/tests/fixtures/aseprite/SOURCES.md`).
+
+## Known limitations
+
+- macOS only (13 or newer).
+- The GIF format has 1 bit of transparency and at most 255 colors per frame; frames with more colors are quantized.
+- GIF import turns every frame into a full-canvas cel; animated PNG and WebP cannot be imported.
+- Releases are ad-hoc signed unless you provide a Developer ID identity, so Gatekeeper asks you to approve the app on other Macs.
+
+## Project layout
+
+```
+core/       Rust library (document model, file formats, every pixel operation, C ABI) and pixmith-cli
+app/        SwiftUI/AppKit app (SwiftPM); Sources/PixmithCore holds the C headers for the core
+scripts/    QA runner, Godot check, packaging and icon scripts
+docs/       architecture, Lua API, design references
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces fit together.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE). Pixmith is not affiliated with Aseprite or Igara Studio; `.aseprite` support is written from the public file format specification.

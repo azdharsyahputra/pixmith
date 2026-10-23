@@ -1,0 +1,100 @@
+import SwiftUI
+
+/// Main window: a full-width title row (document tabs, zoom, export) above three columns: tool rail | canvas column |
+/// inspector. The canvas column stacks the tool's context bar, the canvas and the timeline.
+struct ContentView: View {
+    @ObservedObject var model: SpriteModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // The title row hosts `TabBar(model:)` (document tabs), the zoom control and Export.
+            TitleRow(model: model)
+            HStack(spacing: 0) {
+                ToolsPanel(model: model)
+                VStack(spacing: 0) {
+                    ContextBar(model: model)
+                    CanvasArea(model: model)
+                    TimelinePanel(model: model).id(model.activeSlotID)
+                }
+                SidePanel(model: model).id(model.activeSlotID)
+            }
+        }
+        .frame(minWidth: 1000, minHeight: 640)
+        .background(DSColor.panel)
+        .navigationTitle(model.windowTitle)
+        .pixmithFileDrop(model)
+        .pixmithFileHandling(model)
+        .sheet(isPresented: $model.showNewSheet) { NewSpriteSheet(model: model) }
+        .filterSheets(model: model)
+        .sheet(item: Binding(get: { model.renamingLayer.map(LayerID.init) },
+                             set: { model.renamingLayer = $0?.id })) { item in
+            RenameSheet(model: model, layer: item.id)
+        }
+        .sheet(item: $model.toolSheet) { ToolSheetView(model: model, sheet: $0) }
+        .textSheet(model: model)
+        .alert("Error", isPresented: Binding(get: { model.errorMessage != nil },
+                                             set: { if !$0 { model.errorMessage = nil } })) {
+            Button("OK") {}
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
+    }
+}
+
+private struct LayerID: Identifiable { let id: Int }
+
+/// The canvas with its quiet status chips (sprite size, cursor position) floating in the corner.
+struct CanvasArea: View {
+    @ObservedObject var model: SpriteModel
+    @ObservedObject private var info = StatusInfo.shared
+
+    private var position: String? {
+        guard let c = info.cursor, (0..<model.width).contains(c.x), (0..<model.height).contains(c.y) else { return nil }
+        return "\(c.x), \(c.y)"
+    }
+
+    var body: some View {
+        CanvasScroller(model: model)
+            .overlay(alignment: .bottomLeading) {
+                HStack(spacing: DS.Space.xs + 2) {
+                    DSOverlayChip(text: "\(model.width) × \(model.height)")
+                    DSOverlayChip(symbol: "cursorarrow", text: position ?? "–")
+                }
+                .padding(.leading, DS.Space.md)
+                .padding(.bottom, DS.Space.sm + 2)
+                .allowsHitTesting(false)
+            }
+    }
+}
+
+struct NewSpriteSheet: View {
+    @ObservedObject var model: SpriteModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var width = Prefs.newWidth
+    @State private var height = Prefs.newHeight
+
+    var body: some View {
+        DSDialog(title: "New Sprite", primary: "Create", width: 300, onPrimary: {
+            model.newSprite(width: min(max(width, 1), 4096), height: min(max(height, 1), 4096))
+            dismiss()
+        }, onCancel: { dismiss() }) {
+            DSFormRow(label: "Width") { DSNumberField("W", value: $width, range: 1...4096, unit: "px", width: 120) }
+            DSFormRow(label: "Height") { DSNumberField("H", value: $height, range: 1...4096, unit: "px", width: 120) }
+        }
+    }
+}
+
+struct RenameSheet: View {
+    @ObservedObject var model: SpriteModel
+    let layer: Int
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+
+    var body: some View {
+        DSDialog(title: "Rename Layer", primary: "Rename", primaryEnabled: !name.trimmingCharacters(in: .whitespaces).isEmpty,
+                 width: 300, onPrimary: { model.rename(layer, to: name); dismiss() }, onCancel: { dismiss() }) {
+            TextField("Name", text: $name).dsTextField()
+        }
+        .onAppear { name = model.layerName(layer) }
+    }
+}

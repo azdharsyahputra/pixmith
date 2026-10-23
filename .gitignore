@@ -1,0 +1,8 @@
+core/target/
+app/.build/
+build/
+dist/
+.scratch/
+qa/
+qa-out/
+.DS_Store

@@ -1,0 +1,33 @@
+[package]
+name = "pixmith-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+description = "Document model, pixel tools, file formats and C ABI behind the Pixmith pixel-art editor"
+license = "MIT"
+repository = "https://github.com/azdharsyahputra/pixmith"
+readme = "../README.md"
+keywords = ["pixel-art", "sprite", "aseprite", "editor", "gamedev"]
+categories = ["graphics", "multimedia::images", "game-development"]
+
+[lib]
+name = "pixmith_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+flate2 = "1"
+gif = "0.14"
+mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
+png = "0.17"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "unwind"
+strip = true
+
+# Keep decompression fast in debug-profile tests (they inflate large zlib bombs).
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
