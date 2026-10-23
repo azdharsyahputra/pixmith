@@ -1,101 +1,81 @@
-// Renders the Pixmith app icon: a pixel-art paintbrush on a transparency checkerboard, 32x32 cells.
+// Renders the Pixmith app icon: a pixel "P" in a warm-to-cool ramp on a dark rounded square, with one
+// white pixel lifting off its corner.
 // Usage: swift scripts/make-icon.swift <output.iconset directory>
 import CoreGraphics
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-let n = 32
-var grid = [UInt32](repeating: 0, count: n * n)  // 0xRRGGBBAA, fully opaque or fully transparent
-
-func set(_ x: Int, _ y: Int, _ c: UInt32) {
-    if x >= 0, y >= 0, x < n, y < n { grid[y * n + x] = c }
-}
-
-let navy: UInt32 = 0x1D2B53FF
-let paperLight: UInt32 = 0xFFF1E8FF, paperDark: UInt32 = 0xC2C3C7FF
-let brown: [UInt32] = [0xD2814FFF, 0xAB5236FF, 0x7E3A25FF]
-let bristle: [UInt32] = [0xFFE0B8FF, 0xFFCCAAFF, 0xD99F7AFF]
-let steel: [UInt32] = [0xFFF1E8FF, 0xC2C3C7FF, 0x83769CFF]
-let swatches: [(light: UInt32, dark: UInt32)] = [
-    (0xFF004DFF, 0xB30038FF), (0xFFA300FF, 0xB87200FF), (0xFFEC27FF, 0xB8A91CFF),
-    (0x00E436FF, 0x00A026FF), (0x29ADFFFF, 0x1B7FC4FF), (0xFF77A8FF, 0xB8567BFF),
-]
-
-// Rounded square with stepped corners.
-for y in 1...30 {
-    for x in 1...30 { set(x, y, navy) }
-}
-for (x, y) in [(1, 1), (2, 1), (1, 2), (30, 1), (29, 1), (30, 2), (1, 30), (2, 30), (1, 29), (30, 30), (29, 30), (30, 29)] {
-    set(x, y, 0)
-}
-
-// Canvas with a checkerboard.
-for y in 4...23 {
-    for x in 4...27 { set(x, y, (x / 2 + y / 2) % 2 == 0 ? paperLight : paperDark) }
-}
-
-// A painted squiggle behind the brush.
-let squiggle = [(6, 9), (7, 9), (8, 9), (8, 10), (9, 10), (10, 10), (10, 11), (11, 11), (12, 11), (12, 12), (13, 12),
-                (13, 13), (14, 13), (14, 14), (15, 14), (16, 14), (16, 15)]
-for (x, y) in squiggle {
-    set(x, y, 0x29ADFFFF)
-    set(x, y + 1, 0x1B7FC4FF)
-}
-
-// Outline so the brush stands out from the canvas.
-for y in 0..<n {
-    for x in 0..<n {
-        let s = x + y, u = x - y
-        if ((s == 30 || s == 34) && (-14...12).contains(u)) || ((31...33).contains(s) && (u == -15 || u == 13)) {
-            set(x, y, navy)
-        }
-    }
-}
-
-// Brush: a diagonal band. s = x + y is the width coordinate, u = x - y runs along the brush.
-for y in 0..<n {
-    for x in 0..<n {
-        let s = x + y, u = x - y
-        guard (31...33).contains(s) else { continue }
-        let shade = s - 31  // 0 light, 1 mid, 2 dark
-        switch u {
-        case -14 ... -6: set(x, y, brown[shade])
-        case -5 ... -3: set(x, y, steel[shade])
-        case -2 ... 5: set(x, y, bristle[shade])
-        case 6 ... 9: set(x, y, [0xFF77A8FF, 0xFF004DFF, 0xB30038FF][shade])
-        case 10 ... 11: if shade != 0 { set(x, y, shade == 1 ? 0xFF004DFF : 0xB30038FF) }
-        case 12: if shade == 1 { set(x, y, 0xFF004DFF) }
-        default: break
-        }
-    }
-}
-
-// Palette swatches along the bottom edge.
-for (i, c) in swatches.enumerated() {
-    for y in 25...27 {
-        for x in (5 + i * 4)...(7 + i * 4) { set(x, y, y == 27 ? c.dark : c.light) }
-    }
-}
-
 let space = CGColorSpace(name: CGColorSpace.sRGB)!
 
+func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
+    CGColor(srgbRed: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255,
+            blue: CGFloat(hex & 255) / 255, alpha: alpha)
+}
+
+/// Mixes two 0xRRGGBB colors, `t` in 0...1.
+func mix(_ a: UInt32, _ b: UInt32, _ t: CGFloat) -> UInt32 {
+    [16, 8, 0].reduce(UInt32(0)) { out, shift in
+        let x = CGFloat(a >> shift & 255), y = CGFloat(b >> shift & 255)
+        return out | UInt32((x + (y - x) * t).rounded()) << shift
+    }
+}
+
+/// The letter on a 5 x 7 grid, top row first.
+let glyph = [
+    "XXXX.",
+    "X...X",
+    "X...X",
+    "XXXX.",
+    "X....",
+    "X....",
+    "X....",
+]
+/// Pixel colors run diagonally from the bottom-left to the top-right through these stops.
+let ramp: [UInt32] = [0xFF9A3C, 0xFF4F7B, 0x9B5CFF, 0x3FB6FF]
+
 func render(_ size: Int) -> CGImage {
-    var bytes = [UInt8](repeating: 0, count: n * n * 4)
-    for (i, c) in grid.enumerated() {
-        bytes[i * 4] = UInt8(c >> 24)
-        bytes[i * 4 + 1] = UInt8(c >> 16 & 255)
-        bytes[i * 4 + 2] = UInt8(c >> 8 & 255)
-        bytes[i * 4 + 3] = UInt8(c & 255)
-    }
-    let small = bytes.withUnsafeMutableBytes { buf in
-        CGContext(data: buf.baseAddress, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4, space: space,
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!.makeImage()!
-    }
+    let s = CGFloat(size)
     let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0, space: space,
                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-    ctx.interpolationQuality = .none
-    ctx.draw(small, in: CGRect(x: 0, y: 0, width: size, height: size))
+
+    // Body: Apple's icon grid leaves 100/1024 of margin on each side for the shadow.
+    let body = CGRect(x: 0, y: 0, width: s, height: s).insetBy(dx: s * 100 / 1024, dy: s * 100 / 1024)
+    let shape = CGPath(roundedRect: body, cornerWidth: body.width * 0.2237, cornerHeight: body.width * 0.2237, transform: nil)
+    ctx.saveGState()
+    ctx.setShadow(offset: CGSize(width: 0, height: -s * 0.012), blur: s * 0.03, color: color(0x000000, 0.35))
+    ctx.addPath(shape)
+    ctx.setFillColor(color(0x18181D))
+    ctx.fillPath()
+    ctx.restoreGState()
+
+    ctx.saveGState()
+    ctx.addPath(shape)
+    ctx.clip()
+    let background = CGGradient(colorsSpace: space, colors: [color(0x24242B), color(0x0E0E12)] as CFArray, locations: nil)!
+    ctx.drawLinearGradient(background, start: CGPoint(x: body.minX, y: body.maxY), end: CGPoint(x: body.maxX, y: body.minY), options: [])
+    let highlight = CGGradient(colorsSpace: space, colors: [color(0xFFFFFF, 0.08), color(0xFFFFFF, 0)] as CFArray, locations: nil)!
+    ctx.drawLinearGradient(highlight, start: CGPoint(x: body.midX, y: body.maxY), end: CGPoint(x: body.midX, y: body.midY), options: [])
+    ctx.restoreGState()
+
+    let cell = body.height * 0.112
+    let origin = CGPoint(x: body.midX - cell * 2.6, y: body.midY - cell * 3.7)
+    func pixel(_ col: CGFloat, _ row: CGFloat, _ fill: UInt32) {
+        let gap = cell * 0.06
+        let rect = CGRect(x: origin.x + col * cell + gap / 2, y: origin.y + (6 - row) * cell + gap / 2,
+                          width: cell - gap, height: cell - gap)
+        ctx.addPath(CGPath(roundedRect: rect, cornerWidth: cell * 0.18, cornerHeight: cell * 0.18, transform: nil))
+        ctx.setFillColor(color(fill))
+        ctx.fillPath()
+    }
+    for (row, line) in glyph.enumerated() {
+        for (col, ch) in line.enumerated() where ch == "X" {
+            let f = CGFloat(col + 6 - row) / 10 * CGFloat(ramp.count - 1)
+            let i = min(Int(f), ramp.count - 2)
+            pixel(CGFloat(col), CGFloat(row), mix(ramp[i], ramp[i + 1], f - CGFloat(i)))
+        }
+    }
+    pixel(4.35, -0.35, 0xFFFFFF)
     return ctx.makeImage()!
 }
 

@@ -1,6 +1,6 @@
 # Architecture
 
-Pixmith is two layers: a Rust library that owns the document and every pixel operation, and a SwiftUI/AppKit app that shows it and turns input into calls on the library.
+Pixmith is two layers: a platform-independent Rust library that owns the document and every pixel operation behind a C ABI, and a native front end that shows it and turns input into calls on the library. The front end in this repository is a SwiftUI/AppKit app for macOS; front ends for other platforms would sit next to it and use the same headers.
 
 ```
 core/  (Rust, crate pixmith_core)          app/  (Swift package, macOS 13)

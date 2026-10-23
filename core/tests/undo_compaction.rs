@@ -9,6 +9,7 @@ use std::time::Instant;
 const MIB: usize = 1 << 20;
 
 /// CPU time of this thread in milliseconds, which a busy machine does not inflate like wall time.
+#[cfg(unix)]
 fn thread_cpu_ms() -> f64 {
     #[repr(C)]
     struct Timespec {
@@ -25,6 +26,13 @@ fn thread_cpu_ms() -> f64 {
     let mut ts = Timespec { sec: 0, nsec: 0 };
     unsafe { clock_gettime(THREAD_CPU, &mut ts) };
     ts.sec as f64 * 1000.0 + ts.nsec as f64 / 1e6
+}
+
+/// Wall time elsewhere; the assertions that use it are loose enough for that.
+#[cfg(not(unix))]
+fn thread_cpu_ms() -> f64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
 }
 
 fn fingerprint(e: &Editor) -> u64 {

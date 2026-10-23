@@ -1,12 +1,26 @@
-# Pixmith
+<p align="center"><img src="assets/logo.png" width="128" alt="Pixmith icon"></p>
 
-Pixmith is a lightweight pixel-art editor for macOS. It reads and writes the `.aseprite` file format, so sprites can move between Pixmith and other tools that speak it. The editor is a native SwiftUI/AppKit app on top of a Rust core library; the same core powers a command-line tool, `pixmith-cli`.
+<h1 align="center">Pixmith</h1>
+
+Pixmith is a lightweight pixel-art editor. It reads and writes the `.aseprite` file format, so sprites can move between Pixmith and other tools that speak it.
+
+All editing lives in a platform-independent Rust core with a plain C ABI. Front ends are thin native shells around it: the first one is a SwiftUI/AppKit app for macOS, and the same core powers a command-line tool, `pixmith-cli`. Front ends for Windows and Linux are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-front-end-for-another-platform).
 
 Pixmith is original code, written from the public `.aseprite` file format specification. It is not affiliated with Aseprite.
 
+## Download
+
+The released app is the macOS front end. Grab `Pixmith-<version>.dmg` from [Releases](https://github.com/azdharsyahputra/pixmith/releases), open it and drag Pixmith to Applications. Builds are for Apple silicon Macs running macOS 13 or newer.
+
+The app is not notarized yet, so the first launch is blocked by Gatekeeper. Right-click Pixmith in Applications and choose Open, then Open again, or run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Pixmith.app
+```
+
 ## Build and run
 
-Requirements: macOS 13 or newer, a Rust toolchain (`cargo`), and the Swift toolchain that ships with Xcode or the Command Line Tools.
+The core and `pixmith-cli` build anywhere Rust does (`cd core && cargo build --release`). The macOS app needs macOS 13 or newer and the Swift toolchain that ships with Xcode or the Command Line Tools.
 
 ```sh
 ./build.sh                  # builds core/ and app/, assembles build/Pixmith.app and build/pixmith-cli
@@ -222,7 +236,7 @@ Notes and limitations:
 
 ## Known limitations
 
-- macOS only (13 or newer).
+- The only graphical front end so far is the macOS app (13 or newer). The core and the CLI are portable.
 - The GIF format has 1 bit of transparency and at most 255 colors per frame; frames with more colors are quantized.
 - GIF import turns every frame into a full-canvas cel; animated PNG and WebP cannot be imported.
 - Releases are ad-hoc signed unless you provide a Developer ID identity, so Gatekeeper asks you to approve the app on other Macs.
@@ -231,7 +245,7 @@ Notes and limitations:
 
 ```
 core/       Rust library (document model, file formats, every pixel operation, C ABI) and pixmith-cli
-app/        SwiftUI/AppKit app (SwiftPM); Sources/PixmithCore holds the C headers for the core
+app/        macOS front end, SwiftUI/AppKit (SwiftPM); Sources/PixmithCore holds the C headers for the core
 scripts/    QA runner, Godot check, packaging and icon scripts
 docs/       architecture, Lua API, design references
 ```
