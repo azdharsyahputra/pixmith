@@ -1,6 +1,7 @@
-<p align="center"><img src="assets/logo.png" width="128" alt="Pixmith icon"></p>
-
-<h1 align="center">Pixmith</h1>
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.png">
+  <img src="assets/banner-dark.png" alt="Pixmith: pixel art editor, .aseprite compatible, Godot-ready">
+</picture>
 
 Pixmith is a lightweight pixel-art editor. It reads and writes the `.aseprite` file format, so sprites can move between Pixmith and other tools that speak it.
 
