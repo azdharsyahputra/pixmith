@@ -130,7 +130,9 @@ fn the_panel_and_the_sheets_draw() {
     // The Godot sheet, then the notice that follows a re-export, then the progress sheet of a script.
     h.state_mut().gamedev.tween.open = false;
     h.state_mut().open_godot_export();
-    h.run();
+    // The sheet rebuilds its preview 150 ms after a change and repaints until then; slow machines need more
+    // frames than `run` allows.
+    h.run_steps(8);
     assert!(h.state().gamedev.godot.is_some());
     h.state_mut().gamedev.godot = None;
     h.state_mut().gamedev.notice = Some(Notice { title: "x.lua".into(), text: "hello".into(), warning: false });
