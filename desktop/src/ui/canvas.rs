@@ -7,6 +7,8 @@
 use crate::app::{DocTab, PixmithApp, Tool};
 use crate::doc::Doc;
 use crate::theme::{Colors, space};
+use crate::ui::selection::{self, SelectionState};
+use crate::ui::tools::{draw, view};
 use crate::ui::widgets;
 use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Sense, Vec2};
 use std::collections::HashMap;
@@ -32,9 +34,6 @@ pub enum ShapeKind {
 pub const PAD: f32 = 64.0;
 pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 64.0;
-/// The pixel grid shows from this zoom on (`ViewSettings.gridMinZoom`).
-const GRID_MIN_ZOOM: f32 = 6.0;
-
 /// Ink modes of the core (`InkMode`), in order.
 pub const INKS: [&str; 5] = ["Simple", "Alpha Compositing", "Lock Alpha", "Behind", "Shading"];
 
@@ -54,7 +53,10 @@ pub struct DrawOptions {
     pub gradient_radial: bool,
     pub gradient_dither: usize,
     pub fill_pattern: usize,
-    pub show_grid: bool,
+    /// Spray density in percent (`sprayDensity`).
+    pub spray_density: f64,
+    /// Size of the custom brush taken from a selection, if any (`customBrush`).
+    pub custom_brush: Option<(i32, i32)>,
 }
 
 impl Default for DrawOptions {
@@ -72,7 +74,8 @@ impl Default for DrawOptions {
             gradient_radial: false,
             gradient_dither: 0,
             fill_pattern: 0,
-            show_grid: true,
+            spray_density: 40.0,
+            custom_brush: None,
         }
     }
 }
@@ -109,6 +112,8 @@ struct ToolGesture {
 #[derive(Default)]
 pub struct CanvasState {
     pub opts: DrawOptions,
+    /// Spray, gradient, curve, polygon, text and the view features (`ui::tools`).
+    pub tools: crate::ui::tools::ToolsState,
     /// Size of the canvas area in points, for zoom-to-fit (`ViewSettings.viewportSize`).
     pub viewport: Vec2,
     /// Sprite pixel under the cursor, if it is over the canvas.
@@ -121,6 +126,14 @@ pub struct CanvasState {
     /// Documents that already got their initial zoom-to-fit, with the size it was computed for.
     fitted: HashMap<usize, (u32, u32)>,
     gesture: Option<Gesture>,
+    /// A filter's live preview, drawn instead of the sprite while its sheet is open (`FilterState.preview`).
+    pub preview: Option<egui::TextureHandle>,
+    /// Checkerboard colors chosen in the preferences; `None` keeps the theme's.
+    pub checker: Option<(Color32, Color32)>,
+    /// Pixel grid color from the preferences.
+    pub grid: Option<Color32>,
+    /// Preferred zoom for a newly shown sprite (`Prefs.defaultZoom`); it shrinks to fit.
+    pub default_zoom: Option<u32>,
 }
 
 impl CanvasState {
@@ -170,12 +183,10 @@ pub fn sprite_rect(area: Rect, tab: &DocTab, ppp: f32) -> Rect {
 
 /// Keeps the pan inside what the Swift scroll view can reach: a sprite smaller than the view stays centered,
 /// a larger one scrolls until its edge meets the 64 pt padding.
-fn clamp_pan(area: Vec2, sprite: Vec2, pan: Vec2) -> Vec2 {
-    let reach = |view: f32, size: f32| ((size + 2.0 * PAD - view) / 2.0).max(0.0);
-    Vec2::new(
-        pan.x.clamp(-reach(area.x, sprite.x), reach(area.x, sprite.x)),
-        pan.y.clamp(-reach(area.y, sprite.y), reach(area.y, sprite.y)),
-    )
+fn clamp_pan(area: Vec2, sprite: Vec2, margin: Vec2, pan: Vec2) -> Vec2 {
+    let reach = |view: f32, size: f32, margin: f32| ((size + 2.0 * margin - view) / 2.0).max(0.0);
+    let (rx, ry) = (reach(area.x, sprite.x, margin.x), reach(area.y, sprite.y, margin.y));
+    Vec2::new(pan.x.clamp(-rx, rx), pan.y.clamp(-ry, ry))
 }
 
 fn pixel_at(rect: Rect, zoom: f32, pos: Pos2) -> (i32, i32) {
@@ -183,19 +194,35 @@ fn pixel_at(rect: Rect, zoom: f32, pos: Pos2) -> (i32, i32) {
     (p.x.floor() as i32, p.y.floor() as i32)
 }
 
+/// Tools whose Alt-click does not pick a color (`Tool.isSelection`; the move tool picks).
 fn is_selection(tool: Tool) -> bool {
-    matches!(tool, Tool::Marquee | Tool::Lasso | Tool::Polygon | Tool::Wand | Tool::Move)
+    matches!(tool, Tool::Marquee | Tool::Lasso | Tool::Polygon | Tool::Wand)
 }
 
 pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     handle_keys(app, &ctx);
+    selection::frame(app, &ctx);
 
     let c = Colors::of(&ctx);
     let rect = ui.max_rect();
     let response = ui.interact(rect, ui.id().with("canvas"), Sense::click_and_drag());
     let ppp = ui.pixels_per_point();
-    let PixmithApp { tabs, active, tool, primary, secondary, brush_size, dark, canvas: state, .. } = app;
+    let PixmithApp {
+        tabs,
+        active,
+        tool,
+        primary,
+        secondary,
+        brush_size,
+        dark,
+        canvas: state,
+        selection: sel,
+        tilemap,
+        timeline,
+        gamedev,
+        ..
+    } = app;
     let tab = &mut tabs[*active];
     state.viewport = rect.size();
 
@@ -205,16 +232,35 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
     if state.fitted.get(&doc_id) != Some(&dims) {
         state.fitted.insert(doc_id, dims);
         tab.zoom = fit_zoom(rect.size(), dims.0, dims.1);
+        if let Some(z) = state.default_zoom {
+            tab.zoom = (z.clamp(1, 64) as f32).min(tab.zoom);
+        }
         tab.pan = Vec2::ZERO;
     }
     state.ensure_render(&ctx, tab);
+    draw::track_pressure(state, &ctx);
+    draw::tool_changed(state, tab, *tool);
 
     navigate(state, tab, &response, rect, &ctx);
     let srect = sprite_rect(rect, tab, ppp);
-    interact(state, tab, *tool, primary, *secondary, *brush_size, &response, srect, &ctx);
+    // Selection tools and the free transform own the pointer; the drawing tools get the rest.
+    // "Edit on canvas" of the Tween panel takes the mouse before the tools do.
+    if crate::ui::gamedev::tween_canvas::input(&mut gamedev.tween, tab, &response, srect, &ctx) {
+        // The tween overlay consumed the pointer this frame.
+    } else if selection::input(sel, tab, *tool, state.gesture.is_none(), &response, srect, &ctx) {
+        let pos = ctx.input(|i| i.pointer.latest_pos());
+        state.cursor = pos.filter(|_| response.hovered() || sel.dragging()).map(|p| pixel_at(srect, tab.zoom, p));
+    } else {
+        interact(state, tilemap, tab, *tool, primary, *secondary, *brush_size, &response, srect, &ctx);
+    }
+    selection::update_outline(sel, tab);
     state.ensure_render(&ctx, tab);
 
-    paint(state, tab, &ui.painter_at(rect), &c, *dark, rect, srect, ppp);
+    let busy = matches!(state.gesture, Some(Gesture::Tool(_)));
+    let CanvasState { tools, .. } = &mut *state;
+    tools.onion.prepare(&ctx, tab, &tools.settings, timeline.onion_skin, busy);
+    paint(state, sel, tilemap, tab, *tool, &ui.painter_at(rect), &c, *dark, rect, srect, ppp, timeline.show_grid);
+    crate::ui::gamedev::tween_canvas::paint(&gamedev.tween, tab, &ui.painter_at(rect), &c, srect);
     if response.hovered() {
         ctx.set_cursor_icon(if ctx.input(|i| i.key_down(Key::Space)) {
             egui::CursorIcon::Grab
@@ -260,13 +306,18 @@ fn navigate(state: &mut CanvasState, tab: &mut DocTab, response: &egui::Response
             state.gesture = Some(Gesture::Pan(PointerButton::Primary));
         }
     }
-    tab.pan = clamp_pan(rect.size(), sprite * tab.zoom, tab.pan);
+    // Tiled axes reach as far as the copies drawn on each side (`CanvasLayout.margins`).
+    let (w, h) = (tab.doc.width(), tab.doc.height());
+    let copies = view::copies(tab.zoom, w, h, state.tools.settings.tiled, rect.size());
+    let margin = view::margins(tab.zoom, w, h, copies);
+    tab.pan = clamp_pan(rect.size(), sprite * tab.zoom, margin, tab.pan);
 }
 
 /// Mouse input for the tools (`CanvasNSView.mouseDown/Dragged/Up` and `DrawingTools.swift`).
 #[allow(clippy::too_many_arguments)]
 fn interact(
     state: &mut CanvasState,
+    tilemap: &mut crate::ui::tilemap::TilemapState,
     tab: &mut DocTab,
     tool: Tool,
     primary: &mut u32,
@@ -276,12 +327,13 @@ fn interact(
     srect: Rect,
     ctx: &egui::Context,
 ) {
-    let (pos, mods, pressed_primary, pressed_secondary) = ctx.input(|i| {
+    let (pos, mods, pressed_primary, pressed_secondary, now) = ctx.input(|i| {
         (
             i.pointer.latest_pos(),
             i.modifiers,
             i.pointer.button_pressed(PointerButton::Primary),
             i.pointer.button_pressed(PointerButton::Secondary),
+            i.time,
         )
     });
     let doc_id = tab.doc.raw() as usize;
@@ -293,6 +345,20 @@ fn interact(
     let p = pos.map(|pos| pixel_at(srect, tab.zoom, pos));
     state.cursor = if response.hovered() || matches!(state.gesture, Some(Gesture::Tool(_))) { p } else { None };
 
+    // The terrain brush, tile stamp and slice tool take the pointer before the drawing tools.
+    let pointer = crate::ui::tilemap::Pointer {
+        pos,
+        pixel: p,
+        hovered: response.hovered(),
+        busy: state.gesture.is_some(),
+        srect,
+        zoom: tab.zoom,
+        mirror: state.opts.sym_flags(),
+    };
+    if crate::ui::tilemap::canvas_interact(tilemap, tab, tool, &pointer, ctx) {
+        return;
+    }
+
     // Press.
     if state.gesture.is_none()
         && response.hovered()
@@ -300,14 +366,22 @@ fn interact(
         && let Some(p) = p
     {
         let button = if pressed_secondary { PointerButton::Secondary } else { PointerButton::Primary };
-        state.gesture = begin(state, tab, tool, primary, secondary, brush, p, button, mods, doc_id);
+        state.gesture = begin(state, tab, tool, primary, secondary, brush, p, button, mods, doc_id, now);
+    }
+
+    // An open polygon or curve previews its next point under the cursor.
+    if state.gesture.is_none()
+        && response.hovered()
+        && let Some(p) = p
+    {
+        draw::moved(state, tab, p);
     }
 
     // Drag and release.
     if let Some(Gesture::Tool(mut g)) = state.gesture {
         let down = ctx.input(|i| i.pointer.button_down(g.button));
         if !down {
-            finish(tab, &g);
+            finish(state, tab, &g);
             state.gesture = None;
         } else if let Some(p) = p {
             let constrain = mods.shift;
@@ -317,6 +391,9 @@ fn interact(
                 g.constrain = constrain;
                 state.gesture = Some(Gesture::Tool(g));
             }
+        }
+        if down {
+            draw::hold(state, tab, g.tool, g.last, g.color, ctx);
         }
     }
 }
@@ -328,9 +405,7 @@ fn mutated(tab: &mut DocTab) {
 
 /// Sends the ink mode to the core; shading steps between the two colors, backwards for the right button.
 fn apply_ink(state: &CanvasState, tab: &mut DocTab, primary: u32, secondary: u32, reverse: bool) {
-    let mode = state.opts.ink;
-    let ramp = if mode == 4 { vec![primary, secondary] } else { Vec::new() };
-    tab.doc.set_ink(mode as u32, reverse, &ramp);
+    draw::apply_ink(&state.opts, tab, primary, secondary, reverse);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -345,6 +420,7 @@ fn begin(
     button: PointerButton,
     mods: egui::Modifiers,
     doc: usize,
+    now: f64,
 ) -> Option<Gesture> {
     let right = button == PointerButton::Secondary;
     let color = if right { secondary } else { *primary };
@@ -358,7 +434,8 @@ fn begin(
             begin_edit(tab, "Fill");
             apply_ink(state, tab, *primary, secondary, right);
             let other = if right { *primary } else { secondary };
-            tab.doc.fill_at(layer, frame, p.0, p.1, color, other, state.opts.contiguous, sym);
+            let pattern = state.opts.fill_pattern as u32;
+            tab.doc.fill_pattern_at(layer, frame, p, color, other, pattern, state.opts.contiguous, sym);
             mutated(tab);
             return None;
         }
@@ -368,7 +445,8 @@ fn begin(
             let flags = sym | if state.opts.pixel_perfect { flag::PIXEL_PERFECT } else { 0 };
             let c = if tool == Tool::Eraser { 0 } else { color };
             gesture.color = c;
-            tab.doc.stroke_begin(layer, frame, p.0, p.1, c, brush, flags);
+            let pen = draw::pressure_style(state, c, brush);
+            tab.doc.stroke_begin(layer, frame, p.0, p.1, pen.map_or(c, |v| v.0), pen.map_or(brush, |v| v.1), flags);
             mutated(tab);
         }
         Tool::Line | Tool::Rectangle | Tool::Ellipse => {
@@ -376,6 +454,13 @@ fn begin(
             apply_ink(state, tab, *primary, secondary, right);
             shape(state, tab, &gesture, p, brush, false);
             mutated(tab);
+        }
+        Tool::Spray | Tool::Gradient | Tool::Curve | Tool::ShapePolygon | Tool::Contour | Tool::Text => {
+            let pen = draw::Pen { primary: *primary, secondary, brush };
+            let press = draw::Press { p, right, shift: mods.shift, now };
+            if !draw::down(state, tab, tool, pen, press) {
+                return None;
+            }
         }
         _ => return None,
     }
@@ -411,8 +496,15 @@ fn drag(
 ) {
     match g.tool {
         Tool::Pencil | Tool::Eraser => {
+            if let Some((color, size)) = draw::pressure_style(state, g.color, brush) {
+                tab.doc.stroke_style(color, size);
+            }
             tab.doc.stroke_to(p.0, p.1);
             mutated(tab);
+        }
+        Tool::Spray | Tool::Gradient | Tool::Curve | Tool::ShapePolygon | Tool::Contour => {
+            let right = g.button == PointerButton::Secondary;
+            draw::drag(state, tab, g.tool, g.start, right, g.color, p, constrain);
         }
         Tool::Line | Tool::Rectangle | Tool::Ellipse => {
             let g = ToolGesture { constrain, ..*g };
@@ -424,7 +516,8 @@ fn drag(
     }
 }
 
-fn finish(tab: &mut DocTab, g: &ToolGesture) {
+fn finish(state: &mut CanvasState, tab: &mut DocTab, g: &ToolGesture) {
+    draw::up(state, tab, g.tool);
     if matches!(g.tool, Tool::Pencil | Tool::Eraser | Tool::Line | Tool::Rectangle | Tool::Ellipse) {
         tab.doc.stroke_end();
         mutated(tab);
@@ -446,89 +539,43 @@ fn pick(state: &mut CanvasState, tab: &DocTab, primary: &mut u32, p: (i32, i32))
     }
 }
 
-/// Backdrop, sprite, grid, mirror guides and the two status chips (`CanvasOverlays`).
+/// Backdrop, sprite, grid, mirror guides and the two status chips (`CanvasOverlays`). The layers that depend on
+/// the view settings (tiling, onion skin, reference image, grids) are drawn by `ui::tools::view`.
 #[allow(clippy::too_many_arguments)]
 fn paint(
     state: &CanvasState,
+    sel: &SelectionState,
+    tilemap: &crate::ui::tilemap::TilemapState,
     tab: &DocTab,
+    tool: Tool,
     painter: &egui::Painter,
     c: &Colors,
     dark: bool,
     area: Rect,
     srect: Rect,
     ppp: f32,
+    show_grid: bool,
 ) {
-    let hairline = 1.0 / ppp;
-    // Soft drop shadow so the sprite reads as an object on the workspace.
-    let shadow = egui::Shadow {
-        offset: [0, 8],
-        blur: 28,
-        spread: 0,
-        color: Color32::from_black_alpha(if dark { 128 } else { 56 }),
+    let scene = view::Scene {
+        settings: &state.tools.settings,
+        reference: state.tools.reference.as_ref(),
+        onion: &state.tools.onion,
+        sprite: state.preview.as_ref().or(state.texture.as_ref()).map(|t| t.id()),
+        area,
+        srect,
+        zoom: tab.zoom,
+        size: (tab.doc.width(), tab.doc.height()),
+        ppp,
+        dark,
+        show_grid,
+        checker: state.checker,
+        grid: state.grid,
     };
-    painter.add(shadow.as_shape(srect, 0.0));
+    view::paint_under(painter, &scene);
+    view::paint_over(painter, &scene);
 
-    // Checkerboard: 8 pt squares anchored at the sprite's corner.
-    let (light, darker) = if dark {
-        (Color32::from_rgb(0x3A, 0x3A, 0x3D), Color32::from_rgb(0x2F, 0x2F, 0x32))
-    } else {
-        (Color32::from_rgb(0xF3, 0xF3, 0xF5), Color32::from_rgb(0xDA, 0xDA, 0xDF))
-    };
-    let vis = srect.intersect(area);
-    if vis.is_positive() {
-        let mut mesh = egui::Mesh::default();
-        mesh.add_colored_rect(vis, light);
-        let cell = 8.0;
-        let (i0, i1) =
-            (((vis.left() - srect.left()) / cell).floor() as i32, ((vis.right() - srect.left()) / cell).ceil() as i32);
-        let (j0, j1) =
-            (((vis.top() - srect.top()) / cell).floor() as i32, ((vis.bottom() - srect.top()) / cell).ceil() as i32);
-        for j in j0..j1 {
-            for i in i0..i1 {
-                if (i + j) % 2 == 0 {
-                    let r = Rect::from_min_size(srect.min + Vec2::new(i as f32, j as f32) * cell, Vec2::splat(cell));
-                    mesh.add_colored_rect(r.intersect(vis), darker);
-                }
-            }
-        }
-        painter.add(egui::Shape::mesh(mesh));
-    }
-
-    if let Some(t) = &state.texture {
-        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        painter.image(t.id(), srect, uv, Color32::WHITE);
-    }
-
-    // One-pixel outline just outside the sprite.
-    let outline = Color32::from_black_alpha(if dark { 153 } else { 46 });
-    painter.rect_stroke(srect, 0.0, egui::Stroke::new(hairline, outline), egui::StrokeKind::Outside);
-
-    // Pixel grid.
-    if state.opts.show_grid && tab.zoom >= GRID_MIN_ZOOM && vis.is_positive() {
-        let grid = Color32::from_black_alpha(31);
-        let snap = |v: f32| (v * ppp).round() / ppp;
-        let mut mesh = egui::Mesh::default();
-        let (w, h) = (tab.doc.width() as i32, tab.doc.height() as i32);
-        for i in 0..=w {
-            let x = snap(srect.left() + i as f32 * tab.zoom);
-            if x >= vis.left() - 1.0 && x <= vis.right() + 1.0 {
-                mesh.add_colored_rect(
-                    Rect::from_min_max(Pos2::new(x, vis.top()), Pos2::new(x + hairline, vis.bottom())),
-                    grid,
-                );
-            }
-        }
-        for j in 0..=h {
-            let y = snap(srect.top() + j as f32 * tab.zoom);
-            if y >= vis.top() - 1.0 && y <= vis.bottom() + 1.0 {
-                mesh.add_colored_rect(
-                    Rect::from_min_max(Pos2::new(vis.left(), y), Pos2::new(vis.right(), y + hairline)),
-                    grid,
-                );
-            }
-        }
-        painter.add(egui::Shape::mesh(mesh));
-    }
+    selection::paint(sel, tab, tool, painter, srect);
+    crate::ui::tilemap::canvas_paint(painter, tilemap, tab, srect, ppp, dark);
 
     // Mirror guides: pink dashes through the canvas center.
     if state.opts.mirror_x || state.opts.mirror_y {
@@ -579,14 +626,17 @@ fn handle_keys(app: &mut PixmithApp, ctx: &egui::Context) {
         return;
     }
     use egui::{Key, Modifiers};
-    let (redo, undo, smaller, larger) = ctx.input_mut(|i| {
+    let (redo, undo) = ctx.input_mut(|i| {
         let redo =
             i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y);
         let undo = i.consume_key(Modifiers::COMMAND, Key::Z);
-        let smaller = i.key_pressed(Key::OpenBracket) && !i.modifiers.command;
-        let larger = i.key_pressed(Key::CloseBracket) && !i.modifiers.command;
-        (redo, undo, smaller, larger)
+        (redo, undo)
     });
+    crate::ui::tools::handle_keys(app, ctx);
+    {
+        let PixmithApp { tabs, active, canvas, .. } = &mut *app;
+        draw::handle_key(canvas, &mut tabs[*active], ctx);
+    }
     if undo || redo {
         app.canvas.gesture = None;
         let tab = app.tab_mut();
@@ -595,29 +645,10 @@ fn handle_keys(app: &mut PixmithApp, ctx: &egui::Context) {
             tab.changed();
         }
     }
-    if smaller {
-        app.brush_size = app.brush_size.saturating_sub(1).max(1);
-    }
-    if larger {
-        app.brush_size = (app.brush_size + 1).min(64);
-    }
-    let (shift, command, alt) = ctx.input(|i| (i.modifiers.shift, i.modifiers.command, i.modifiers.alt));
-    if command || alt {
-        return;
-    }
-    for group in Tool::GROUPS {
-        for &tool in group {
-            let key = tool.key();
-            let (wants_shift, name) = match key.strip_prefix('\u{21e7}') {
-                Some(rest) => (true, rest),
-                None => (false, key),
-            };
-            if wants_shift != shift {
-                continue;
-            }
-            if Key::from_name(name).is_some_and(|k| ctx.input(|i| i.key_pressed(k))) {
-                app.tool = tool;
-            }
-        }
+    let before = app.tool;
+    // Tool keys, brush size, swap colors and the frame keys, rebindable in the preferences.
+    crate::ui::menus::shortcuts::dispatch(app, ctx);
+    if app.tool != before {
+        app.tilemap.leave_modes();
     }
 }

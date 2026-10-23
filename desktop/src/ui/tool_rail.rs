@@ -18,12 +18,14 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
                 widgets::rail_divider(ui);
             }
             for &tool in group.iter() {
-                let tip = format!("{} ({})", tool.title(), tool.key());
+                let tip =
+                    format!("{} ({})", tool.title(), app.menus.shortcuts.label(crate::ui::menus::Action::Tool(tool)));
                 if widgets::tool_button(ui, tool.icon(), app.tool == tool, metric::TOOL_BUTTON)
                     .on_hover_text(tip)
                     .clicked()
                 {
                     app.tool = tool;
+                    app.tilemap.leave_modes();
                 }
             }
         }

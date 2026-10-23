@@ -2,7 +2,7 @@
 
 use super::TimelineState;
 use crate::app::DocTab;
-use eframe::egui::{self, Key, Modifiers};
+use eframe::egui;
 use pixmith_core::document::layers::PlayState;
 
 pub fn stop(tab: &mut DocTab) {
@@ -32,26 +32,7 @@ pub fn step(tab: &mut DocTab, delta: i32) {
 /// repaint at the moment the next frame is due.
 pub fn update(tab: &mut DocTab, st: &mut TimelineState, ctx: &egui::Context) {
     let now = ctx.input(|i| i.time);
-    if !ctx.egui_wants_keyboard_input() {
-        let (space, prev, next) = ctx.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::Space),
-                i.consume_key(Modifiers::NONE, Key::Comma),
-                i.consume_key(Modifiers::NONE, Key::Period),
-            )
-        });
-        if space {
-            toggle(tab, st, now);
-        }
-        if prev {
-            stop(tab);
-            step(tab, -1);
-        }
-        if next {
-            stop(tab);
-            step(tab, 1);
-        }
-    }
+    // Play / Pause and the frame keys are rebindable single-key shortcuts (`ui::menus::shortcuts`).
     if !tab.playing {
         st.frame_started = None;
         return;

@@ -6,6 +6,7 @@ use crate::app::{PixmithApp, Tool};
 use crate::doc::Doc;
 use crate::theme::{self, Colors, space};
 use crate::ui::canvas::{DrawOptions, INKS};
+use crate::ui::selection;
 use crate::ui::widgets::{self, SegGlyph};
 use eframe::egui;
 use egui_phosphor::regular as icon;
@@ -21,7 +22,7 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
     );
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = space::SM - 2.0;
-        let title = app.tool.title();
+        let title = crate::ui::tilemap::bar_title(app).unwrap_or(app.tool.title());
         ui.label(egui::RichText::new(title).font(widgets::strong(ui.ctx(), theme::font::BODY_LARGE)).color(c.text));
         options(app, ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -64,6 +65,21 @@ fn brush(ui: &mut egui::Ui, size: &mut u32, o: &mut DrawOptions) {
         90.0,
         "Brush size ([ and ] change it). Drag the label to scrub.",
     );
+    // A brush taken from the selection replaces the shape toggle (`BrushOptionsView`).
+    if let Some((w, h)) = o.custom_brush {
+        let c = Colors::of(ui.ctx());
+        ui.spacing_mut().item_spacing.x = space::XS;
+        ui.label(
+            egui::RichText::new(format!("Brush {w}\u{d7}{h}"))
+                .font(theme::ui_font(theme::font::CAPTION))
+                .color(c.text_secondary),
+        );
+        if widgets::tools_bar_button(ui, "Reset", true).clicked() {
+            Doc::brush_reset();
+            o.custom_brush = Doc::brush_info();
+        }
+        return;
+    }
     let options = [(SegGlyph::Square, "Square brush"), (SegGlyph::Circle, "Round brush")];
     if let Some(i) = widgets::bar_segmented(ui, o.circle_brush as usize, &options) {
         o.circle_brush = i == 1;
@@ -112,6 +128,9 @@ fn filled_chip(ui: &mut egui::Ui, o: &mut DrawOptions, help: &str) {
 }
 
 fn options(app: &mut PixmithApp, ui: &mut egui::Ui) {
+    if crate::ui::tilemap::bar_options(app, ui) {
+        return;
+    }
     let (o, size) = (&mut app.canvas.opts, &mut app.brush_size);
     match app.tool {
         Tool::Pencil => {
@@ -132,6 +151,9 @@ fn options(app: &mut PixmithApp, ui: &mut egui::Ui) {
         }
         Tool::Spray => {
             group(ui, |ui| brush(ui, size, o));
+            group(ui, |ui| {
+                widgets::tools_slider(ui, "spray-density", "Density", &mut o.spray_density, (5.0, 100.0), "%", 150.0);
+            });
             group(ui, |ui| ink(ui, o));
         }
         Tool::Fill => group(ui, |ui| {
@@ -145,7 +167,7 @@ fn options(app: &mut PixmithApp, ui: &mut egui::Ui) {
                 &mut o.fill_pattern,
                 &["Solid", "Checker", "25%", "50%", "75%"],
                 92.0,
-                "Fill pattern",
+                "Dither the fill between the primary and secondary colors",
             );
         }),
         Tool::Gradient => group(ui, |ui| {
@@ -188,7 +210,11 @@ fn options(app: &mut PixmithApp, ui: &mut egui::Ui) {
             group(ui, |ui| widgets::hint_label(ui, &["\u{21a9}"], "finish"));
         }
         Tool::Text => group(ui, |ui| widgets::hint_label(ui, &[], "Click where the text should start")),
-        Tool::Wand | Tool::Marquee | Tool::Lasso | Tool::Polygon => {
+        Tool::Wand => {
+            group(ui, |ui| selection::wand_options(ui, &mut app.selection));
+            group(ui, |ui| widgets::hint_label(ui, &["\u{21e7}", "\u{2325}"], "add / subtract"))
+        }
+        Tool::Marquee | Tool::Lasso | Tool::Polygon => {
             group(ui, |ui| widgets::hint_label(ui, &["\u{21e7}", "\u{2325}"], "add / subtract"))
         }
         Tool::Move => {

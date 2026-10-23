@@ -171,12 +171,21 @@ pub struct PixmithApp {
     pub inspector: ui::inspector::InspectorState,
     pub timeline: ui::timeline::TimelineState,
     pub files: ui::title_row::FilesState,
+    pub selection: ui::selection::SelectionState,
+    pub tilemap: ui::tilemap::TilemapState,
+    pub gamedev: ui::gamedev::GamedevState,
+    /// The menu bar, preferences, shortcuts and the dialogs opened from the menus.
+    pub menus: ui::menus::MenusState,
 }
 
 impl PixmithApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> PixmithApp {
         theme::install(&cc.egui_ctx);
-        PixmithApp::default()
+        let mut app = PixmithApp { menus: ui::menus::MenusState::load(cc.storage), ..PixmithApp::default() };
+        ui::menus::apply_appearance(&mut app, &cc.egui_ctx);
+        app.canvas.tools.enable_persistence(ui::tools::view::ViewSettings::default_path());
+        app.gamedev.start();
+        app
     }
 
     pub fn tab(&self) -> &DocTab {
@@ -193,6 +202,9 @@ impl PixmithApp {
 
     /// Lays out the whole window. Panels are added outside-in, which is how egui assigns space.
     pub fn ui(&mut self, root: &mut egui::Ui) {
+        let doc_id = self.tab().doc.raw() as usize;
+        self.tilemap.sync(self.tool, doc_id);
+        ui::menus::shortcuts_first(self, root.ctx());
         let c = self.colors();
         root.painter().rect_filled(root.max_rect(), 0.0, c.panel);
         let bar = |fill| egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(theme::space::MD as i8, 0));
@@ -216,6 +228,13 @@ impl PixmithApp {
             .resizable(false)
             .frame(bar(c.panel))
             .show(root, |ui| ui::context_bar::show(self, ui));
+        if let Some(height) = ui::transform::bar_height(self, root.available_width(), root.ctx()) {
+            egui::Panel::top("transform_bar")
+                .exact_size(height)
+                .resizable(false)
+                .frame(bar(c.panel))
+                .show(root, |ui| ui::transform::show_bar(self, ui));
+        }
         egui::Panel::bottom("timeline")
             .exact_size(ui::timeline::panel_height(self))
             .resizable(false)
@@ -223,9 +242,14 @@ impl PixmithApp {
             .frame(egui::Frame::new().fill(c.panel))
             .show(root, |ui| ui::timeline::show(self, ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(c.workspace))
+            .frame(egui::Frame::new().fill(self.menus.prefs.canvas_background().unwrap_or(c.workspace)))
             .show(root, |ui| ui::canvas::show(self, ui));
         ui::dialogs::show(self, root.ctx());
+        ui::selection::dialogs(self, root.ctx());
+        ui::tilemap::show_sheets(self, root.ctx());
+        ui::tools::show_windows(self, root.ctx());
+        ui::gamedev::show(self, root.ctx());
+        ui::menus::show(self, root.ctx());
     }
 }
 
@@ -244,6 +268,10 @@ impl Default for PixmithApp {
             inspector: Default::default(),
             timeline: Default::default(),
             files: Default::default(),
+            selection: Default::default(),
+            tilemap: Default::default(),
+            gamedev: Default::default(),
+            menus: Default::default(),
         }
     }
 }
@@ -251,5 +279,14 @@ impl Default for PixmithApp {
 impl eframe::App for PixmithApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         PixmithApp::ui(self, ui);
+    }
+
+    /// A clean exit leaves no recovery copies behind.
+    fn on_exit(&mut self) {
+        self.discard_recovery_copies();
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.menus.save(storage);
     }
 }

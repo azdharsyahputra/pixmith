@@ -1,6 +1,6 @@
 //! The right-hand inspector: Color, Palette, Layer, Cel and Sprite sections (`Inspector.swift`, `ColorPanel.swift`).
 //!
-//! Layers themselves live in the timeline. The Tilemap and Slices sections of the macOS app are not ported yet.
+//! Layers themselves live in the timeline. The Tileset and Slices sections live in `ui/tilemap`.
 
 pub mod color;
 mod palette;
@@ -53,7 +53,7 @@ pub struct InspectorState {
 pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
     let c = Colors::of(ui.ctx());
     let rect = ui.max_rect();
-    let PixmithApp { tabs, active, primary, secondary, inspector: st, error, .. } = app;
+    let PixmithApp { tabs, active, tool, primary, secondary, inspector: st, error, tilemap, .. } = app;
     let tab = &mut tabs[*active];
     let mut changed = false;
 
@@ -64,6 +64,7 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
         changed |= palette::section(ui, &mut st.palette, primary, secondary, &mut tab.doc, error);
         changed |= layer_section(ui, st, tab);
         changed |= cel_section(ui, tab);
+        changed |= crate::ui::tilemap::inspector_sections(ui, tab, tilemap, *tool, error);
         changed |= sprite_section(ui, tab, primary, error);
     });
     // The hairline on the leading edge.

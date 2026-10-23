@@ -1254,3 +1254,70 @@ pub fn dialog<R>(
         })
         .inner
 }
+
+// MARK: Drawing-tool controls (`DSSlider`, `DSBarButtonStyle`)
+
+/// A horizontal slider drawn as a field with the value filled in (`DSSlider`): the label sits left, the value
+/// right. Returns true while the value is being changed.
+pub fn tools_slider(
+    ui: &mut Ui,
+    id: impl Hash + std::fmt::Debug,
+    label: &str,
+    value: &mut f64,
+    range: (f64, f64),
+    unit: &str,
+    width: f32,
+) -> bool {
+    let c = Colors::of(ui.ctx());
+    let id = ui.id().with(id);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, metric::CONTROL), Sense::hover());
+    let response = ui.interact(rect, id, Sense::click_and_drag());
+    let mut changed = false;
+    if (response.dragged() || response.drag_started() || response.clicked())
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let f = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) as f64;
+        let v = (range.0 + f * (range.1 - range.0)).round();
+        changed = v != *value;
+        *value = v;
+    }
+    let frac = ((value.clamp(range.0, range.1) - range.0) / (range.1 - range.0)) as f32;
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius::FIELD, c.field);
+    let fill_alpha = if response.dragged() { 0.34 } else { 0.22 };
+    let fill = Rect::from_min_size(rect.min, vec2(rect.width() * frac, rect.height()));
+    painter.rect_filled(fill, radius::FIELD, c.accent.gamma_multiply(fill_alpha));
+    painter.text(
+        pos2(rect.left() + space::SM, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        strong(ui.ctx(), font::CAPTION),
+        c.text_tertiary,
+    );
+    painter.text(
+        pos2(rect.right() - space::SM, rect.center().y),
+        Align2::RIGHT_CENTER,
+        format!("{}{unit}", value.round() as i64),
+        ui_font(font::CAPTION),
+        c.text,
+    );
+    changed
+}
+
+/// A small text button on the bars (`DSBarButtonStyle`).
+pub fn tools_bar_button(ui: &mut Ui, title: &str, enabled: bool) -> Response {
+    let c = Colors::of(ui.ctx());
+    let galley = ui.painter().layout_no_wrap(title.to_owned(), strong(ui.ctx(), font::CAPTION), c.text);
+    let size = vec2(galley.size().x + 2.0 * (space::SM + 2.0), metric::CONTROL);
+    let (rect, response) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    let fill = if response.is_pointer_button_down_on() && enabled {
+        c.pressed
+    } else if response.hovered() && enabled {
+        c.hover
+    } else {
+        c.field
+    };
+    ui.painter().rect_filled(rect, radius::CONTROL, dimmed(enabled, fill));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, dimmed(enabled, c.text));
+    response
+}

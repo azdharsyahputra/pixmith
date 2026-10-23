@@ -191,6 +191,7 @@ impl PixmithApp {
         if is_png {
             match Doc::import_png(path) {
                 Ok(mut doc) => {
+                    self.add_recent(path);
                     doc.touch();
                     self.present(doc);
                 }

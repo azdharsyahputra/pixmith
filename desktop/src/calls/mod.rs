@@ -2,5 +2,14 @@
 
 mod canvas;
 mod files;
+pub(crate) mod gamedev;
+mod imports;
 mod inspector;
+mod menus;
+mod selection;
+mod tilemap;
 mod timeline;
+mod tools;
+
+pub use menus::FilterRegion;
+pub use tilemap::SliceInfo;

@@ -30,6 +30,8 @@ pub struct FilesState {
     pub quit_skip: Vec<usize>,
     /// Hands out distinct starting revisions to new tabs, so the canvas never mistakes one document for another.
     pub next_revision: u64,
+    /// File > Import > Sprite Sheet as Frames: the chosen PNG and the cell size being asked for.
+    pub sheet_import: Option<(std::path::PathBuf, u32, u32)>,
 }
 
 impl Default for FilesState {
@@ -43,6 +45,7 @@ impl Default for FilesState {
             quitting: false,
             quit_approved: false,
             quit_skip: Vec::new(),
+            sheet_import: None,
             next_revision: 0,
         }
     }
@@ -94,7 +97,14 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
         + space::MD;
     let right_w = 28.0 + 2.0 + 70.0 + 2.0 + 28.0 + space::XS + export_w;
     let right = Rect::from_min_max(pos2(full.right() - right_w, full.top()), full.right_bottom());
-    let left = Rect::from_min_max(full.left_top(), pos2(right.left() - space::SM, full.bottom()));
+    let mut left = Rect::from_min_max(full.left_top(), pos2(right.left() - space::SM, full.bottom()));
+    // The menus come first (Windows and Linux have no global menu bar; macOS keeps the same in-window menu).
+    let menu_w = crate::ui::menus::bar::width(ui, left.width());
+    let menu_rect = Rect::from_min_size(left.min, vec2(menu_w, left.height()));
+    ui.scope_builder(UiBuilder::new().max_rect(menu_rect).layout(Layout::left_to_right(Align::Center)), |ui| {
+        crate::ui::menus::bar::show(app, ui)
+    });
+    left.min.x = menu_rect.right() + space::SM;
 
     let mut tabs = TabEvents::default();
     ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| {
@@ -337,6 +347,8 @@ fn export_button(app: &mut PixmithApp, ui: &mut Ui) {
     );
     let response = response.on_hover_text("Export the sprite");
     let mut chosen = None;
+    let mut godot = None;
+    let can_reexport_tileset = app.has_tileset_export_settings();
     egui::Popup::menu(&response).show(|ui| {
         for (kind, label) in [(ExportKind::Png, "PNG\u{2026}"), (ExportKind::Sheet, "Sprite Sheet\u{2026}")] {
             if ui.button(label).clicked() {
@@ -353,8 +365,13 @@ fn export_button(app: &mut PixmithApp, ui: &mut Ui) {
                 chosen = Some(kind);
             }
         }
+        ui.separator();
+        godot = crate::ui::gamedev::export_menu(ui, can_reexport_tileset);
     });
     if let Some(kind) = chosen {
         app.request_export(kind);
+    }
+    if let Some(item) = godot {
+        app.run_export_menu_item(item);
     }
 }

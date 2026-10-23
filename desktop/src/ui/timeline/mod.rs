@@ -7,9 +7,9 @@
 
 mod controls;
 mod grid;
-mod header;
-mod layers;
-mod playback;
+pub mod header;
+pub mod layers;
+pub mod playback;
 mod sheets;
 mod tags;
 
@@ -137,6 +137,16 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
+    /// Opens the layer properties sheet (Layer > Layer Properties…).
+    pub fn open_layer_sheet(&mut self, tab: &DocTab, layer: u32) {
+        self.layer_sheet = Some(sheets::LayerSheet::new(tab, layer));
+    }
+
+    /// Opens the sheet for a new tag over the current frame (Frame > New Tag…).
+    pub fn open_tag_sheet(&mut self, tab: &DocTab) {
+        self.tag_sheet = Some(sheets::TagSheet { index: None, tag: tags::new_tag_draft(&tab.doc, tab.frame) });
+    }
+
     /// The selected cels, clamped to the sprite (`selectedCels`).
     fn selected_cels(&self, tab: &DocTab) -> CelRect {
         let (nl, nf) = (tab.doc.layer_count(), tab.doc.frame_count());

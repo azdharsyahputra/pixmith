@@ -65,6 +65,11 @@ Each file mirrors a Swift file, so a change in one app is easy to carry over to 
 | `src/ui/title_row.rs` | `Tools/TopBar.swift` `TitleRow`, `App/Documents.swift` `TabBar` |
 | `src/ui/dialogs.rs`, `src/calls/files.rs` | `NewSpriteSheet`, `App/FileActions.swift`, `App/Documents.swift` |
 | `src/ui/tool_rail.rs` | `Tools/ToolsPanel.swift` |
+| `src/ui/tilemap/*.rs`, `src/calls/tilemap.rs` | `Panels/TilemapView.swift`, `Panels/AutotileView.swift`, `Canvas/SlicesView.swift` (tileset, terrain brush, slices, their sheets and canvas overlays) |
+| `src/ui/gamedev/`, `src/calls/gamedev.rs` | `Panels/TweenView.swift`, `Dialogs/GodotExport.swift`, `Dialogs/GodotTilesetExport.swift`, `App/Scripts.swift`, `Autosaver` in `App/FileActions.swift`, `ProgressSheet.swift` |
+| `src/ui/menus/` (`bar.rs`, `commands.rs`) | the menus of `PixmithApp.swift` and every `CommandMenu` in `app/Sources/Pixmith` |
+| `src/ui/menus/filters.rs`, `calls/menus.rs` | `Dialogs/FiltersView.swift`, `Dialogs/CurvesEditor.swift`, `Dialogs/ColorModeView.swift` |
+| `src/ui/menus/history.rs`, `prefs.rs`, `shortcuts.rs`, `help.rs` | `Panels/HistoryPanel.swift`, `App/Preferences.swift`, `App/Shortcuts.swift` |
 | `src/ui/context_bar.rs`, `canvas.rs`, `inspector.rs`, `timeline.rs` | `Tools/TopBar.swift` `ContextBar`, `Canvas/`, `Panels/Inspector.swift`, `Panels/Timeline.swift` |
 
 ## Status: phase 1
