@@ -565,7 +565,9 @@ fn freeing_a_document_drops_its_running_stroke() {
             shapes::pixmith_stroke_end();
             pixmith_free(b);
         }
-        assert!(hits > 0 || cfg!(miri), "address reuse never happened, so the test proved nothing");
+        // Not every allocator hands the freed block straight back (Windows' does not), so only insist
+        // on reuse where it is known to happen.
+        assert!(hits > 0 || cfg!(miri) || !cfg!(unix), "address reuse never happened, so the test proved nothing");
     }
 }
 

@@ -307,10 +307,10 @@ struct ShortcutsHelpView: View {
                 return out
             }
         }
-        return (NSApp.mainMenu?.items ?? []).compactMap { top in
+        return (NSApp.mainMenu?.items ?? []).compactMap { top -> (menu: String, items: [(title: String, keys: String)])? in
             guard let sub = top.submenu else { return nil }
             let items = collect(sub)
-            return items.isEmpty ? nil : (sub.title, items)
+            return items.isEmpty ? nil : (menu: sub.title, items: items)
         }
     }
 }
