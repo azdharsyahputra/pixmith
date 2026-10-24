@@ -319,6 +319,11 @@ struct HelpCommands: Commands {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Divider()
+            Button("Install Command Line Tool…") { CommandLineTool.install() }
+            Button("Uninstall Command Line Tool…") { CommandLineTool.uninstall() }
+        }
         CommandGroup(after: .help) {
             Button("Keyboard Shortcuts") { openWindow(id: "shortcuts") }
         }

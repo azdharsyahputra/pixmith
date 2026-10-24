@@ -176,12 +176,20 @@ pub struct PixmithApp {
     pub gamedev: ui::gamedev::GamedevState,
     /// The menu bar, preferences, shortcuts and the dialogs opened from the menus.
     pub menus: ui::menus::MenusState,
+    /// The Home screen, project view and project switcher.
+    pub projects: ui::projects::ProjectsState,
 }
 
 impl PixmithApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> PixmithApp {
         theme::install(&cc.egui_ctx);
-        let mut app = PixmithApp { menus: ui::menus::MenusState::load(cc.storage), ..PixmithApp::default() };
+        let mut app = PixmithApp {
+            menus: ui::menus::MenusState::load(cc.storage),
+            projects: ui::projects::ProjectsState::load(cc.storage),
+            ..PixmithApp::default()
+        };
+        // Pixmith opens on Home; opening a file straight away (command line, drop) goes to the editor instead.
+        app.go_home();
         ui::menus::apply_appearance(&mut app, &cc.egui_ctx);
         app.canvas.tools.enable_persistence(ui::tools::view::ViewSettings::default_path());
         app.gamedev.start();
@@ -213,37 +221,42 @@ impl PixmithApp {
             .resizable(false)
             .frame(bar(c.panel))
             .show(root, |ui| ui::title_row::show(self, ui));
-        egui::Panel::left("tool_rail")
-            .exact_size(metric::TOOL_RAIL)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(c.panel))
-            .show(root, |ui| ui::tool_rail::show(self, ui));
-        egui::Panel::right("inspector")
-            .exact_size(metric::INSPECTOR_WIDTH)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(c.panel))
-            .show(root, |ui| ui::inspector::show(self, ui));
-        egui::Panel::top("context_bar")
-            .exact_size(metric::BAR_HEIGHT)
-            .resizable(false)
-            .frame(bar(c.panel))
-            .show(root, |ui| ui::context_bar::show(self, ui));
-        if let Some(height) = ui::transform::bar_height(self, root.available_width(), root.ctx()) {
-            egui::Panel::top("transform_bar")
-                .exact_size(height)
+        ui::projects::tick(self, root.ctx());
+        if self.projects.is_editor() {
+            egui::Panel::left("tool_rail")
+                .exact_size(metric::TOOL_RAIL)
+                .resizable(false)
+                .frame(egui::Frame::new().fill(c.panel))
+                .show(root, |ui| ui::tool_rail::show(self, ui));
+            egui::Panel::right("inspector")
+                .exact_size(metric::INSPECTOR_WIDTH)
+                .resizable(false)
+                .frame(egui::Frame::new().fill(c.panel))
+                .show(root, |ui| ui::inspector::show(self, ui));
+            egui::Panel::top("context_bar")
+                .exact_size(metric::BAR_HEIGHT)
                 .resizable(false)
                 .frame(bar(c.panel))
-                .show(root, |ui| ui::transform::show_bar(self, ui));
+                .show(root, |ui| ui::context_bar::show(self, ui));
+            if let Some(height) = ui::transform::bar_height(self, root.available_width(), root.ctx()) {
+                egui::Panel::top("transform_bar")
+                    .exact_size(height)
+                    .resizable(false)
+                    .frame(bar(c.panel))
+                    .show(root, |ui| ui::transform::show_bar(self, ui));
+            }
+            egui::Panel::bottom("timeline")
+                .exact_size(ui::timeline::panel_height(self))
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(c.panel))
+                .show(root, |ui| ui::timeline::show(self, ui));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(self.menus.prefs.canvas_background().unwrap_or(c.workspace)))
+                .show(root, |ui| ui::canvas::show(self, ui));
+        } else {
+            ui::projects::show_screen(self, root);
         }
-        egui::Panel::bottom("timeline")
-            .exact_size(ui::timeline::panel_height(self))
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(egui::Frame::new().fill(c.panel))
-            .show(root, |ui| ui::timeline::show(self, ui));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(self.menus.prefs.canvas_background().unwrap_or(c.workspace)))
-            .show(root, |ui| ui::canvas::show(self, ui));
         ui::dialogs::show(self, root.ctx());
         ui::selection::dialogs(self, root.ctx());
         ui::tilemap::show_sheets(self, root.ctx());
@@ -272,6 +285,7 @@ impl Default for PixmithApp {
             tilemap: Default::default(),
             gamedev: Default::default(),
             menus: Default::default(),
+            projects: Default::default(),
         }
     }
 }
@@ -288,5 +302,6 @@ impl eframe::App for PixmithApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.menus.save(storage);
+        self.projects.save(storage);
     }
 }

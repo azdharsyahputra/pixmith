@@ -96,7 +96,7 @@ func runScriptAndWait(_ m: SpriteModel, _ url: URL) {
 }
 
 func recoveryFile(_ s: DocumentSlot) -> URL {
-    recoveryDirectory.appendingPathComponent(s.recoveryID.uuidString).appendingPathExtension("aseprite")
+    recoveryDirectory.appendingPathComponent(s.recoveryID.uuidString).appendingPathExtension("pxmt")
 }
 
 // MARK: - Scenarios
@@ -465,7 +465,7 @@ func registerTabs() {
         // And the old tab's recovery copy is gone.
         expect(!FileManager.default.fileExists(atPath: oldCopy.path), "the old document's recovery copy is gone")
         let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: recoveryDirectory.path)) ?? [])
-            .filter { $0.hasSuffix(".aseprite") && $0.contains(m.activeSlotObject!.recoveryID.uuidString) }
+            .filter { $0.hasSuffix(".pxmt") && $0.contains(m.activeSlotObject!.recoveryID.uuidString) }
         expectEq(leftovers.count, 0, "and the replacement has none")
     }
 

@@ -21,6 +21,7 @@ module PixmithCore [system] {
     header "pixmith_tween.h"
     header "pixmith_godot.h"
     header "pixmith_jobs.h"
+    header "pixmith_project.h"
     link "pixmith_core"
     export *
 }

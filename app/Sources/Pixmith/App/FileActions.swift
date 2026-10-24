@@ -278,6 +278,7 @@ private func accessoryView(_ rows: [NSView]) -> NSView {
 struct FileCommands: Commands {
     @ObservedObject var model: SpriteModel
     @ObservedObject private var recents = RecentFiles.shared
+    @ObservedObject private var projects = RecentProjects.shared
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
@@ -290,6 +291,13 @@ struct FileCommands: Commands {
                 }
                 Divider()
                 Button("Clear Menu") { recents.clear() }.disabled(recents.urls.isEmpty)
+            }
+            Menu("Open Recent Project") {
+                ForEach(projects.folders.prefix(12), id: \.self) { folder in
+                    Button(folder.lastPathComponent) { AppRoute.shared.openProject(folder) }
+                }
+                Divider()
+                Button("Clear Menu") { projects.clear() }.disabled(projects.folders.isEmpty)
             }
         }
         CommandGroup(after: .saveItem) {
@@ -448,7 +456,7 @@ final class Autosaver {
             // pixmith_save writes through a temporary file, so a crash mid-write keeps the previous copy.
             guard let snapshot = pixmith_snapshot(slot.doc) else { continue }
             let id = slot.recoveryID
-            let (asepriteFile, metaFile) = (file(id, "aseprite"), file(id, "json"))
+            let (asepriteFile, metaFile) = (file(id, "pxmt"), file(id, "json"))
             let meta: [String: Any] = [
                 "path": slot.fileURL?.path ?? NSNull(),
                 "name": model.name(of: slot),
@@ -509,15 +517,15 @@ final class Autosaver {
     }
 
     private func remove(_ id: UUID) {
-        try? FileManager.default.removeItem(at: file(id, "aseprite"))
-        try? FileManager.default.removeItem(at: file(id, "json"))
+        for ext in ["pxmt", "aseprite", "json"] { try? FileManager.default.removeItem(at: file(id, ext)) }
     }
 
     private func candidates() -> [Candidate] {
         let open = Set((model ?? SpriteModel.shared).slots.map(\.recoveryID))
         let urls = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         return urls.compactMap { url in
-            guard url.pathExtension == "aseprite", let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent),
+            // .aseprite copies are left over from versions before .pxmt.
+            guard ["pxmt", "aseprite"].contains(url.pathExtension), let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent),
                   !open.contains(id) else { return nil }
             let meta = (try? Data(contentsOf: file(id, "json"))).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()

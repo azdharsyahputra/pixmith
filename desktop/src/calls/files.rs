@@ -47,7 +47,7 @@ impl Doc {
         (undo, redo)
     }
 
-    /// Saves as `.aseprite` and records that state as saved.
+    /// Saves (`.pxmt` unless the path says `.aseprite`) and records that state as saved.
     pub fn save_marked(&mut self, path: &Path) -> Result<(), String> {
         self.save(path)?;
         self.mark_saved();
@@ -143,7 +143,7 @@ impl PixmithApp {
     /// one without a file keeps the name for its tab and as the Save As suggestion (`renameDocument`).
     pub fn rename_document(&mut self, i: usize, new_name: &str) {
         let mut base = new_name.trim().to_string();
-        for ext in [".aseprite", ".ase"] {
+        for ext in [".pxmt", ".aseprite", ".ase"] {
             if base.to_lowercase().ends_with(ext) {
                 base.truncate(base.len() - ext.len());
             }
@@ -156,7 +156,7 @@ impl PixmithApp {
             tab.doc.name = Some(base);
             return;
         };
-        let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "aseprite".into());
+        let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "pxmt".into());
         let target = path.with_file_name(format!("{base}.{ext}"));
         if target == path {
             return;
@@ -202,6 +202,7 @@ impl PixmithApp {
             self.active = self.tabs.len() - 1;
         }
         self.sync_untitled();
+        self.show_editor();
     }
 
     pub fn request_new_sprite(&mut self) {
@@ -213,10 +214,11 @@ impl PixmithApp {
         self.present(Doc::new(width.clamp(1, 4096), height.clamp(1, 4096)));
     }
 
-    /// The Open panel: Aseprite files and PNGs, like the macOS app.
+    /// The Open panel: Pixmith documents, Aseprite files and PNGs.
     pub fn open_dialog(&mut self) {
         let picked = rfd::FileDialog::new()
-            .add_filter("Aseprite or PNG", &["aseprite", "ase", "png"])
+            .add_filter("Pixmith, Aseprite or PNG", &["pxmt", "aseprite", "ase", "png"])
+            .add_filter("Pixmith", &["pxmt"])
             .add_filter("Aseprite", &["aseprite", "ase"])
             .add_filter("PNG", &["png"])
             .pick_file();
@@ -227,6 +229,11 @@ impl PixmithApp {
 
     /// Opens `path` in a tab (or switches to the tab that already has it). Errors go to `self.error`.
     pub fn open_path(&mut self, path: &Path) {
+        // A folder opens as a project (dropped on the window, or given on the command line).
+        if path.is_dir() {
+            self.open_project(path);
+            return;
+        }
         let is_png = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"));
         if is_png {
             match Doc::import_png(path) {
@@ -241,6 +248,7 @@ impl PixmithApp {
         }
         if let Some(i) = self.tabs.iter().position(|t| t.doc.path.as_deref().is_some_and(|p| same_file(p, path))) {
             self.active = i;
+            self.show_editor();
             return;
         }
         match Doc::open(path) {
@@ -269,17 +277,25 @@ impl PixmithApp {
 
     fn save_as_tab(&mut self, i: usize) -> bool {
         let Some(tab) = self.tabs.get(i) else { return false };
+        // New documents are saved as .pxmt; a document opened from an .aseprite file stays one.
         let name = tab.doc.path.as_ref().and_then(|p| p.file_name()).map_or_else(
-            || format!("{}.aseprite", tab.doc.name.as_deref().unwrap_or("Untitled")),
+            || format!("{}.pxmt", tab.doc.name.as_deref().unwrap_or("Untitled")),
             |n| n.to_string_lossy().into_owned(),
         );
-        let mut dialog = rfd::FileDialog::new().add_filter("Aseprite", &["aseprite", "ase"]).set_file_name(name);
+        let is_aseprite = Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("aseprite") || e.eq_ignore_ascii_case("ase"));
+        let pixmith = ("Pixmith", &["pxmt"][..]);
+        let aseprite = ("Aseprite", &["aseprite", "ase"][..]);
+        let (first, second) = if is_aseprite { (aseprite, pixmith) } else { (pixmith, aseprite) };
+        let mut dialog =
+            rfd::FileDialog::new().add_filter(first.0, first.1).add_filter(second.0, second.1).set_file_name(name);
         if let Some(dir) = tab.doc.path.as_ref().and_then(|p| p.parent()) {
             dialog = dialog.set_directory(dir);
         }
         let Some(mut path) = dialog.save_file() else { return false };
         if path.extension().is_none() {
-            path.set_extension("aseprite");
+            path.set_extension(if is_aseprite { "aseprite" } else { "pxmt" });
         }
         self.write_to(i, &path)
     }

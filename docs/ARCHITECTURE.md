@@ -37,7 +37,8 @@ The two apps are meant to be indistinguishable apart from the platform's native 
 | `render/` | Partial rendering for viewers (`view.rs`) and dirty-region tracking (`dirty.rs`). |
 | `paint/` | Tools that change pixels: shapes, ink, curves, font, filters, transform, selection. |
 | `palette/` | Palette editing, built-in presets, palette files. |
-| `formats/` | `.aseprite`, PNG, GIF, APNG, sprite sheets, JSON, export planning, durable file writes. |
+| `formats/` | `.pxmt`, `.aseprite`, PNG, GIF, APNG, sprite sheets, JSON, export planning, durable file writes. |
+| `project.rs` | Project folders of canvases (`.pxmt` plus a `.pixmith` folder) and their C ABI. |
 | `gamedev/` | Auto-tiling, tweening, the Godot 4 exporter. |
 | `ffi/` | The C ABI plumbing and the document-level entry points. |
 | `scripting.rs`, `jobs.rs` | The Lua host and snapshots for background work. |
@@ -52,6 +53,7 @@ The two apps are meant to be indistinguishable apart from the platform's native 
 
 ### File formats
 
+- `formats/pxmt.rs`: Pixmith's own `.pxmt` document format (specification: [`PXMT_FORMAT.md`](PXMT_FORMAT.md)): magic, version and CRC-checked chunks `META` (JSON facts: size, frame and layer counts, timestamps), `THMB` (PNG thumbnail, at most 256 px) and `SPRT` (the sprite as an `.aseprite` file produced by `ase.rs`, so every feature round-trips; tweens, terrains and Godot export settings already live in user data). `pixmith_open` recognizes `.pxmt` by its magic; `pixmith_save` writes it when the path ends in `.pxmt`; `pixmith_save_aseprite` always writes `.aseprite`; `pixmith_file_thumbnail` previews any document file. Readers can fetch `META` and `THMB` without decoding `SPRT`.
 - `formats/ase.rs`: `.aseprite` reader and writer, written from the public format specification. Reads RGBA, grayscale and indexed files, raw, compressed and linked cels, layers and groups, tags, new and old palettes, tilemaps, slices and user data; unknown chunk types are skipped. Writes cels cropped to their content and links cels that share a buffer.
 - `document/color_mode.rs`: color mode (RGBA, grayscale, indexed) as a constraint on the pixel values; the writer encodes pixels according to the mode.
 - `document/tilemap.rs`: tilesets and tilemap layers; the rendered pixels stay in `Cel::pixels` and edits are written back into the shared tile images.
@@ -60,9 +62,13 @@ The two apps are meant to be indistinguishable apart from the platform's native 
 - `formats/gif.rs`: animated GIF, numbered PNG sequences, atomic file writes shared with the other exporters.
 - `formats/animation.rs`: animated PNG export (the `png` crate's APNG support) and GIF import, which composes each frame onto the logical screen following the GIF disposal methods.
 - `formats/sheet.rs`: sprite sheet layouts and Aseprite-style JSON metadata.
-- `formats/json.rs`: a small JSON parser (no dependencies) that keeps member order.
+- `formats/json.rs`: a small JSON parser and serializer (no dependencies) that keeps member order.
 - `formats/sheet_import.rs`: sprite sheet PNG plus Aseprite JSON (array or hash format) into a sprite: frame rectangles, durations, trimmed frames, upscaled sheets, tags, slices.
 - `formats/import.rs`: PNG decoding, sprite from PNG, sprite from sheet cells, PNG as a new layer.
+
+### Projects
+
+`project.rs` implements the project browser's file operations (declared for Swift in `pixmith_project.h`; the egui app calls the Rust functions directly). A project is a folder of canvases (`*.pxmt`, plus `*.aseprite` / `*.ase` found there) with a `.pixmith/` folder holding `project.json` (name, creation time, canvas order; unknown members are preserved) and `trash/`. `scan` lists canvases in saved order, then new files by name, reading only the `META` chunk of a `.pxmt` or the leading headers of an `.aseprite`; unreadable files are listed with an error. `new_canvas`, `duplicate_canvas`, `rename_canvas` (rejects empty names and `/ \ :` and the other characters Windows forbids; keeps the extension; refuses taken names, compared case-insensitively), `trash_canvas` / `restore_canvas` (project-local `.pixmith/trash/`, names made unique) and `import` (`.aseprite` / `.ase` / `.png` to `.pxmt`) keep the saved order in step. All writes are atomic (`durable`).
 
 ### Editing features
 
@@ -89,7 +95,7 @@ Every feature module exposes its functions as `#[no_mangle] pub unsafe extern "C
 - File writes go through `formats/durable.rs`: a temporary file in the same directory, `fsync` of the file and then of the directory, an atomic rename, the original's permissions kept, symbolic links written through, and stale `*.pixmith-tmp` files cleaned up. A failed or interrupted save leaves the original untouched.
 - The release profile unwinds on panic, and every entry point body runs inside `crate::ffi::guarded(name, doc, || ...)` (inserted mechanically; a test fails if one is missing). A panic returns false/0/NULL, sets `pixmith_last_error()` to "internal error: ...", rewinds the document to its last undo step (the undone work stays on the redo stack) and bumps `pixmith_panic_count()`; `pixmith_last_panic()` describes it so the app can warn the user and offer to save a copy (`pixmith_safety.h`).
 
-Each module's declarations live in a header under `app/Sources/PixmithCore/` (`pixmith.h` for `ffi/document.rs`, `pixmith_selection.h`, `pixmith_shapes.h`, `pixmith_ink.h`, `pixmith_layers.h`, `pixmith_filters.h`, `pixmith_curves.h`, `pixmith_transform.h`, `pixmith_tilemap.h`, `pixmith_colormode.h`, `pixmith_palette_edit.h`, `pixmith_slices.h`, `pixmith_io.h` for import and export, `pixmith_history.h`). `module.modulemap` lists them and links `pixmith_core`, so Swift sees them as `import PixmithCore`.
+Each module's declarations live in a header under `app/Sources/PixmithCore/` (`pixmith.h` for `ffi/document.rs`, `pixmith_selection.h`, `pixmith_shapes.h`, `pixmith_ink.h`, `pixmith_layers.h`, `pixmith_filters.h`, `pixmith_curves.h`, `pixmith_transform.h`, `pixmith_tilemap.h`, `pixmith_colormode.h`, `pixmith_palette_edit.h`, `pixmith_slices.h`, `pixmith_io.h` for import and export, `pixmith_history.h`, `pixmith_project.h` for `.pxmt` saving, thumbnails and projects). `module.modulemap` lists them and links `pixmith_core`, so Swift sees them as `import PixmithCore`.
 
 ### Threading
 
@@ -103,7 +109,7 @@ An `Editor` (`PixmithDoc`) is not `Sync`, and the core keeps some per-thread sta
 
 ### Command line
 
-`src/bin/pixmith-cli.rs` is a second binary in the same crate, using the library directly (no FFI). It parses arguments with the standard library only and exports PNG, GIF, APNG, sprite sheets with JSON and PNG sequences. Integration tests are in `core/tests/cli.rs`.
+`src/bin/pixmith-cli.rs` is a second binary in the same crate, using the library directly (no FFI). It parses arguments with the standard library only and reads `.pxmt` and `.aseprite` alike (through `formats::pxmt::read_document`), converts between them (`convert <in> <out>`) and exports PNG, GIF, APNG, sprite sheets with JSON and PNG sequences. Integration tests are in `core/tests/cli.rs`.
 
 ## App (`app/Sources/Pixmith`)
 
@@ -133,4 +139,4 @@ Sources are grouped by area; `Sources/PixmithMain/PixmithApp.swift` is the `@mai
 
 ## Tests
 
-`cargo test` in `core/` runs the unit tests next to each module, `tests/cli.rs` (the command-line tool) and `tests/compat.rs`, which reads real `.aseprite` files written by Aseprite (fixtures and licenses in `tests/fixtures/aseprite/SOURCES.md`), compares renderings with the PNGs Aseprite exported, checks the facts the fixtures' source projects document, round-trips every file through the writer, runs the exporters and the CLI on them, and feeds damaged copies to the reader to make sure it never panics.
+`cargo test` in `core/` runs the unit tests next to each module, `tests/cli.rs` (the command-line tool), `tests/pxmt.rs` (every fixture round-tripped through `.pxmt`, thumbnails, damaged and hostile files, the C entry points, `pixmith-cli convert`), `tests/project.rs` (project scan, order, new, duplicate, rename, trash, restore, import, the C ABI; temp directories only) and `tests/compat.rs`, which reads real `.aseprite` files written by Aseprite (fixtures and licenses in `tests/fixtures/aseprite/SOURCES.md`), compares renderings with the PNGs Aseprite exported, checks the facts the fixtures' source projects document, round-trips every file through the writer, runs the exporters and the CLI on them, and feeds damaged copies to the reader to make sure it never panics.

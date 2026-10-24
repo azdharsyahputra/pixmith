@@ -96,6 +96,7 @@ extension SpriteModel {
 @discardableResult
 func fresh(_ w: Int = 16, _ h: Int = 16) -> SpriteModel {
     MainWindow.assumeKey = true
+    AppRoute.shared.screen = .editor
     let m = SpriteModel.shared
     m.stop()
     // One pristine untitled tab, whatever earlier scenario steps opened.

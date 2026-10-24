@@ -17,10 +17,12 @@ final class AppDriver {
     let host: NSHostingView<ContentView>
     let container = Backdrop()
 
-    init(_ model: SpriteModel = .shared, size: NSSize = NSSize(width: 1180, height: 760)) {
+    /// `dark` pins the window's appearance; nil follows the system.
+    init(_ model: SpriteModel = .shared, size: NSSize = NSSize(width: 1180, height: 760), dark: Bool? = nil) {
         host = NSHostingView(rootView: ContentView(model: model))
         window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        if let dark { window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua) }
         container.frame = NSRect(origin: .zero, size: size)
         host.frame = container.bounds
         host.autoresizingMask = [.width, .height]

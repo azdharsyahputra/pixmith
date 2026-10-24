@@ -15,6 +15,8 @@ cp "$(swift build -c release --package-path "$root/app" --show-bin-path)/Pixmith
 cp "$root/Info.plist" "$app/Contents/Info.plist"
 mkdir -p "$app/Contents/Resources"
 cp "$root/assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+# The command line tool ships inside the app; Pixmith > Install Command Line Tool… links it onto the PATH.
+cp "$root/core/target/release/pixmith-cli" "$app/Contents/MacOS/pixmith-cli"
 codesign --force --sign - "$app"
 echo "Built $app"
 cp "$root/core/target/release/pixmith-cli" "$root/build/pixmith-cli"

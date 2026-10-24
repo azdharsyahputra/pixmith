@@ -1,4 +1,5 @@
-//! A small JSON parser, enough to read Aseprite sprite sheet metadata.
+//! A small JSON parser and serializer: enough to read Aseprite sprite sheet metadata and to keep Pixmith's own
+//! small JSON files (`.pxmt` META chunks, `project.json`).
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -49,6 +50,46 @@ impl Value {
             Some(m)
         } else {
             None
+        }
+    }
+}
+
+/// Serializes a value as compact JSON (members in order).
+pub fn to_string(v: &Value) -> String {
+    let mut out = String::new();
+    write_value(v, &mut out);
+    out
+}
+
+fn write_value(v: &Value, out: &mut String) {
+    use crate::formats::sheet::json_str;
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Num(n) if n.fract() == 0.0 && n.abs() < 9.0e15 => out.push_str(&(*n as i64).to_string()),
+        Value::Num(n) => out.push_str(&n.to_string()),
+        Value::Str(s) => out.push_str(&json_str(s)),
+        Value::Arr(a) => {
+            out.push('[');
+            for (i, x) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_value(x, out);
+            }
+            out.push(']');
+        }
+        Value::Obj(m) => {
+            out.push('{');
+            for (i, (k, x)) in m.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&json_str(k));
+                out.push(':');
+                write_value(x, out);
+            }
+            out.push('}');
         }
     }
 }

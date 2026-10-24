@@ -6,7 +6,11 @@ enum MainWindow {
     static weak var window: NSWindow?
 
     /// True when the document window itself is the key window (a sheet being key makes this false).
-    static var isKey: Bool { assumeKey || (window != nil && NSApp.keyWindow === window) }
+    static var windowIsKey: Bool { assumeKey || (window != nil && NSApp.keyWindow === window) }
+
+    /// True when the document window is key and shows the editor: the single-key tool shortcuts and tab keys
+    /// belong to it, not to Home or a project's canvas grid.
+    static var isKey: Bool { assumeKey || (windowIsKey && AppRoute.shared.isEditor) }
 
     /// Set by the QA runner, whose offscreen windows never become key.
     static var assumeKey = false

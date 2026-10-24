@@ -404,12 +404,12 @@ func registerFiles() {
         func waitFor(_ cond: () -> Bool) { for _ in 0..<100 where !cond() { pumpRunLoop(0.03) } }
         Autosaver.shared.start(m)
         Autosaver.shared.tick()
-        waitFor { recoveryFiles().contains { $0.hasSuffix(".aseprite") } && recoveryFiles().contains { $0.hasSuffix(".json") } }
-        expect(recoveryFiles().contains { $0.hasSuffix(".aseprite") }, "recovery copy written under \(dir.path): \(recoveryFiles())")
+        waitFor { recoveryFiles().contains { $0.hasSuffix(".pxmt") } && recoveryFiles().contains { $0.hasSuffix(".json") } }
+        expect(recoveryFiles().contains { $0.hasSuffix(".pxmt") }, "recovery copy written under \(dir.path): \(recoveryFiles())")
         expect(recoveryFiles().contains { $0.hasSuffix(".json") })
         m.undo()
         Autosaver.shared.tick()
-        waitFor { !recoveryFiles().contains { $0.hasSuffix(".aseprite") } }
-        expect(!recoveryFiles().contains { $0.hasSuffix(".aseprite") }, "recovery copy removed when the document is clean")
+        waitFor { !recoveryFiles().contains { $0.hasSuffix(".pxmt") } }
+        expect(!recoveryFiles().contains { $0.hasSuffix(".pxmt") }, "recovery copy removed when the document is clean")
     }
 }

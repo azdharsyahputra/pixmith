@@ -1,9 +1,9 @@
-//! Command-line companion to Pixmith: inspect and export .aseprite files without the app.
+//! Command-line companion to Pixmith: inspect, convert and export .pxmt and .aseprite files without the app.
 
 use pixmith_core::document::{Sprite, Tag};
 use pixmith_core::formats::export_plan::{render_outputs, EncodeOptions, ExportOptions, Format, LayerMode, Trim};
 use pixmith_core::formats::sheet::{json_str, Layout, Options};
-use pixmith_core::formats::{ase, gif};
+use pixmith_core::formats::{gif, pxmt};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::path::Path;
@@ -13,6 +13,10 @@ const USAGE: &str = "\
 Usage:
   pixmith-cli info <file>... [--json]
   pixmith-cli export <file>... [outputs] [options]
+  pixmith-cli convert <in> <out>
+
+Every <file> may be a .pxmt (Pixmith) or .aseprite / .ase document; the format is detected from the content.
+`convert` writes <out> as .pxmt or .aseprite (.ase) according to its extension.
 
 Outputs (at least one):
   --png <out.png>        one frame as PNG (see --frame)
@@ -138,6 +142,7 @@ impl ExportArgs {
 enum Command {
     Help,
     Info { files: Vec<String>, json: bool },
+    Convert { input: String, output: String },
     Export { files: Vec<String>, args: ExportArgs },
 }
 
@@ -152,6 +157,16 @@ fn parse(args: Vec<String>) -> Res<Command> {
         "-h" | "--help" | "help" => return Ok(Command::Help),
         "info" => false,
         "export" => true,
+        "convert" => {
+            let rest: Vec<String> = it.collect();
+            return match rest.as_slice() {
+                [a] if a == "-h" || a == "--help" => Ok(Command::Help),
+                [input, output] if !input.starts_with('-') && !output.starts_with('-') => {
+                    Ok(Command::Convert { input: input.clone(), output: output.clone() })
+                }
+                _ => usage("convert takes exactly an input and an output file: convert <in> <out>"),
+            };
+        }
         other => return usage(format!("unknown command \"{other}\"")),
     };
     let (mut files, mut json_flag, mut a) = (Vec::new(), false, ExportArgs::default());
@@ -376,9 +391,24 @@ fn stem(path: &str) -> String {
     Path::new(path).file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned())
 }
 
+/// Reads a `.pxmt` or `.aseprite` document (detected from the content).
 fn load(path: &str) -> Result<Sprite, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    ase::read(&bytes)
+    pxmt::read_document(&bytes)
+}
+
+fn convert(input: &str, output: &str) -> Result<(), String> {
+    let lower = output.to_ascii_lowercase();
+    if !(lower.ends_with(".pxmt") || lower.ends_with(".aseprite") || lower.ends_with(".ase")) {
+        return Err(format!("the output \"{output}\" must end in .pxmt, .aseprite or .ase"));
+    }
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(input), std::fs::canonicalize(output)) {
+        if a == b {
+            return Err("the input and the output are the same file".into());
+        }
+    }
+    let s = load(input)?;
+    pxmt::save_file(output, &s)
 }
 
 const DIRECTIONS: [&str; 4] = ["forward", "reverse", "pingpong", "pingpong_reverse"];
@@ -669,6 +699,11 @@ fn run(cmd: Command) -> bool {
                     [one] if files.len() == 1 => println!("{one}"),
                     _ => println!("[{}]", docs.join(",")),
                 }
+            }
+        }
+        Command::Convert { input, output } => {
+            if let Err(e) = convert(&input, &output) {
+                fail(&input, e);
             }
         }
         Command::Export { files, args } => {

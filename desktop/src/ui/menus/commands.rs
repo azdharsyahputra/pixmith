@@ -17,6 +17,7 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Cmd {
     // File
+    Home,
     New,
     Open,
     OpenRecent(usize),
@@ -24,6 +25,7 @@ pub enum Cmd {
     CloseTab,
     Save,
     SaveAs,
+    ExportAseprite,
     ExportPng,
     ExportOptions,
     ExportSheet,
@@ -133,6 +135,7 @@ pub enum Cmd {
     // Help
     KeyboardShortcuts,
     About,
+    CommandLineTool,
 }
 
 /// An entry of a menu or submenu.
@@ -194,6 +197,8 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
                 Item(Cmd::RescanScripts),
             ]);
             vec![
+                Item(Cmd::Home),
+                Sep,
                 Item(Cmd::New),
                 Item(Cmd::Open),
                 sub("Open Recent", recents),
@@ -201,6 +206,7 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
                 Sep,
                 Item(Cmd::Save),
                 Item(Cmd::SaveAs),
+                Item(Cmd::ExportAseprite),
                 Sep,
                 Item(Cmd::ExportPng),
                 Item(Cmd::ExportOptions),
@@ -386,7 +392,7 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
             Item(Cmd::NextTab),
             Item(Cmd::PreviousTab),
         ],
-        "Help" => vec![Item(Cmd::KeyboardShortcuts), Item(Cmd::About)],
+        "Help" => vec![Item(Cmd::KeyboardShortcuts), Item(Cmd::CommandLineTool), Item(Cmd::About)],
         _ => Vec::new(),
     }
 }
@@ -411,6 +417,7 @@ impl Cmd {
     pub fn label(self, app: &PixmithApp) -> String {
         let t = |s: &str| s.to_string();
         match self {
+            Cmd::Home => t("Home"),
             Cmd::New => t("New Sprite\u{2026}"),
             Cmd::Open => t("Open\u{2026}"),
             Cmd::OpenRecent(i) => app
@@ -423,6 +430,7 @@ impl Cmd {
             Cmd::CloseTab => t("Close Tab"),
             Cmd::Save => t("Save"),
             Cmd::SaveAs => t("Save As\u{2026}"),
+            Cmd::ExportAseprite => t("Export As Aseprite\u{2026}"),
             Cmd::ExportPng => t("Export PNG\u{2026}"),
             Cmd::ExportOptions => t("Export\u{2026}"),
             Cmd::ExportSheet => t("Export Sprite Sheet\u{2026}"),
@@ -525,6 +533,7 @@ impl Cmd {
             Cmd::PreviousTab => t("Previous Tab"),
             Cmd::KeyboardShortcuts => t("Keyboard Shortcuts"),
             Cmd::About => t("About Pixmith"),
+            Cmd::CommandLineTool => t("Command Line Tool\u{2026}"),
         }
     }
 
@@ -532,6 +541,7 @@ impl Cmd {
     pub fn shortcut(self) -> Option<KeyboardShortcut> {
         let (c, s, a) = (Modifiers::COMMAND, Modifiers::SHIFT, Modifiers::ALT);
         match self {
+            Cmd::Home => ks(c | s, Key::H),
             Cmd::New => ks(c, Key::N),
             Cmd::Open => ks(c, Key::O),
             Cmd::CloseTab => ks(c, Key::W),
@@ -641,6 +651,7 @@ impl Cmd {
     /// What the entry does.
     pub fn run(self, app: &mut PixmithApp, ctx: &egui::Context) {
         match self {
+            Cmd::Home => app.go_home(),
             Cmd::New => app.request_new_sprite(),
             Cmd::Open => app.open_dialog(),
             Cmd::OpenRecent(i) => {
@@ -657,6 +668,7 @@ impl Cmd {
                 app.save_as();
             }
             // `Export…` opens the options sheet of the common case until the combined sheet is ported.
+            Cmd::ExportAseprite => app.export_as_aseprite(),
             Cmd::ExportPng | Cmd::ExportOptions => app.request_export(ExportKind::Png),
             Cmd::ExportSheet => app.request_export(ExportKind::Sheet),
             Cmd::ExportGif => app.request_export(ExportKind::Gif),
@@ -863,6 +875,7 @@ impl Cmd {
             Cmd::PreviousTab => step_tab(app, -1),
             Cmd::KeyboardShortcuts => app.menus.help_open = true,
             Cmd::About => app.menus.about_open = true,
+            Cmd::CommandLineTool => app.menus.cli_open = true,
         }
     }
 }
@@ -905,6 +918,7 @@ fn layer_edit(app: &mut PixmithApp, edit: impl FnOnce(&mut Doc, u32) -> Option<u
 
 /// Every command that has a shortcut.
 const SHORTCUT_CMDS: &[Cmd] = &[
+    Cmd::Home,
     Cmd::New,
     Cmd::Open,
     Cmd::CloseTab,

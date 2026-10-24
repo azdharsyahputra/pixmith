@@ -158,6 +158,60 @@ pub fn about(ctx: &egui::Context) -> bool {
     action != DialogAction::None
 }
 
+/// The command line tool shipped next to the app (`pixmith-cli` / `pixmith-cli.exe`; not `pixmith.exe`, which
+/// Windows would treat as the same name as `Pixmith.exe`), if it is there.
+pub fn bundled_cli() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let name = if cfg!(windows) { "pixmith-cli.exe" } else { "pixmith-cli" };
+    let cli = exe.parent()?.join(name);
+    cli.is_file().then_some(cli)
+}
+
+/// Help > Command Line Tool…: where the bundled `pixmith` command is and how to put it on the PATH. Returns
+/// true when the dialog is dismissed.
+pub fn command_line_tool(ctx: &egui::Context) -> bool {
+    let c = Colors::of(ctx);
+    let cli = bundled_cli();
+    let folder = cli.as_ref().and_then(|p| p.parent()).map(|p| p.display().to_string());
+    let action = widgets::dialog(ctx, "cli", 440.0, "Command Line Tool", None, |ui| {
+        let body = |ui: &mut egui::Ui, text: &str| {
+            ui.label(egui::RichText::new(text).font(ui_font(font::BODY)).color(c.text));
+        };
+        match &folder {
+            Some(folder) => {
+                body(ui, "Pixmith ships with the \u{201c}pixmith-cli\u{201d} command, in the same folder as the app:");
+                ui.label(egui::RichText::new(folder.as_str()).monospace().color(c.text));
+                if ui.button("Copy Folder Path").clicked() {
+                    ui.ctx().copy_text(folder.clone());
+                }
+                if cfg!(windows) {
+                    widgets::note(
+                        ui,
+                        "To run it from any terminal, add this folder to your PATH: Start \u{2192} \u{201c}Edit the \
+                         system environment variables\u{201d} \u{2192} Environment Variables \u{2192} Path \u{2192} New.",
+                    );
+                } else {
+                    widgets::note(
+                        ui,
+                        "To run it from any terminal, link it onto your PATH, for example:\n\
+                         ln -s \"<folder>/pixmith-cli\" ~/.local/bin/pixmith",
+                    );
+                }
+                widgets::note(
+                    ui,
+                    "Try: pixmith info hero.pxmt \u{2014} pixmith export hero.pxmt --gif hero.gif --scale 4",
+                );
+            }
+            None => body(
+                ui,
+                "This build does not include the command line tool. Release downloads have it next to the app.",
+            ),
+        }
+        widgets::dialog_buttons(ui, None, None, "OK", true)
+    });
+    action != DialogAction::None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

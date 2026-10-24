@@ -45,6 +45,8 @@ jobs:
       - name: Build
         working-directory: desktop
         run: cargo build --release
+      - name: Build the command line tool
+        run: cargo build --release --manifest-path core/Cargo.toml --bin pixmith-cli
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -53,6 +55,7 @@ jobs:
           $name = "Pixmith-$env:TAG-windows-x64"
           New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
           Copy-Item desktop/target/release/pixmith-desktop.exe "dist/$name/Pixmith.exe"
+          Copy-Item core/target/release/pixmith-cli.exe "dist/$name/pixmith-cli.exe"
           Copy-Item desktop/README.md "dist/$name/README.md"
           Copy-Item LICENSE "dist/$name/LICENSE"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
@@ -64,6 +67,7 @@ jobs:
           name="Pixmith-${TAG}-linux-x64"
           mkdir -p "dist/$name"
           cp desktop/target/release/pixmith-desktop "dist/$name/Pixmith"
+          cp core/target/release/pixmith-cli "dist/$name/pixmith-cli"
           cp desktop/README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           echo "ASSET=dist/$name.tar.gz" >> "$GITHUB_ENV"

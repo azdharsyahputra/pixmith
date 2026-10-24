@@ -5,6 +5,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) { Prefs.applyAppearance() }
 
+    /// Files and project folders from Finder, the Dock or `open`; opening one skips the Home screen.
     func application(_ application: NSApplication, open urls: [URL]) {
         urls.forEach { SpriteModel.shared.requestOpen($0) }
     }
@@ -45,19 +46,28 @@ struct PixmithApp: App {
 struct PixmithCommands: Commands {
     @ObservedObject var model: SpriteModel
     @ObservedObject private var sheet = SheetState.shared
+    @ObservedObject private var route = AppRoute.shared
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Sprite…") { model.requestNewSprite() }.keyboardShortcut("n")
+            Button("New Project…") { route.requestNewProject() }
             Button("Open…") { model.requestOpen() }.keyboardShortcut("o")
+            Button("Open Project…") { route.openProjectPanel() }.keyboardShortcut("o", modifiers: [.command, .shift])
+            Button("Home") { route.showHome(model) }.keyboardShortcut("h", modifiers: [.command, .shift])
+                .disabled(route.screen == .home)
         }
         CommandGroup(replacing: .saveItem) {
-            Button("Save") { model.save() }.keyboardShortcut("s")
-            Button("Save As…") { model.saveAs() }.keyboardShortcut("s", modifiers: [.command, .shift])
-            Divider()
-            Button("Export PNG…") { model.exportPNG(sheet: false) }.keyboardShortcut("e", modifiers: [.command, .shift])
-            Button("Export…") { model.showExportOptions() }.keyboardShortcut("e", modifiers: [.command, .option])
-            Button("Export Sprite Sheet…") { model.exportSpriteSheet() }
+            Group {
+                Button("Save") { model.save() }.keyboardShortcut("s")
+                Button("Save As…") { model.saveAs() }.keyboardShortcut("s", modifiers: [.command, .shift])
+                Divider()
+                Button("Export PNG…") { model.exportPNG(sheet: false) }.keyboardShortcut("e", modifiers: [.command, .shift])
+                Button("Export…") { model.showExportOptions() }.keyboardShortcut("e", modifiers: [.command, .option])
+                Button("Export Sprite Sheet…") { model.exportSpriteSheet() }
+                Button("Export As Aseprite…") { model.exportAseprite() }
+            }
+            .disabled(!route.isEditor)
         }
         CommandGroup(replacing: .undoRedo) {
             Button("Undo") { model.undo() }.keyboardShortcut("z")

@@ -13,6 +13,12 @@ enum Prefs {
         static let appearance = "appearance"
         static let canvasBgOn = "canvasBackgroundOn"
         static let canvasBg = "canvasBackground"
+        static let recentProjects = "recentProjects"
+        /// Folder the New Project dialog starts in (the last one used).
+        static let projectsLocation = "projectsLocation"
+        static let projectSort = "projectSort"
+        static let canvasSort = "canvasSort"
+        static let homeTab = "homeTab"
     }
 
     enum Default {

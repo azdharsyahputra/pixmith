@@ -80,7 +80,7 @@ Exit status, for CI: `0` every scenario passed; `1` at least one scenario failed
 ./scripts/package.sh        # writes dist/Pixmith-<version>.dmg
 ```
 
-The script builds a universal (arm64 + x86_64) app when the Rust toolchain has both macOS targets. With `rustup` it installs the missing target; without it, it builds the native architecture only and prints a warning. The disk image contains `Pixmith.app`, `pixmith-cli` and an `Applications` shortcut. The app is signed ad-hoc unless you set:
+The script builds a universal (arm64 + x86_64) app when the Rust toolchain has both macOS targets. With `rustup` it installs the missing target; without it, it builds the native architecture only and prints a warning. The disk image contains `Pixmith.app` (with the command line tool inside it) and an `Applications` shortcut. The app is signed ad-hoc unless you set:
 
 | Variable | Effect |
 | --- | --- |
@@ -215,11 +215,20 @@ Other commands (export GIF, APNG, PNG sequence and sprite sheet, import, layer a
 
 ## Command-line tool
 
-`pixmith-cli` inspects and exports `.aseprite` files without the app. It is built next to the app as `build/pixmith-cli`.
+`pixmith-cli` inspects, converts and exports Pixmith (`.pxmt`) and `.aseprite` files without the app; every command accepts either format (detected from the file's content). It ships with the app:
+
+- **macOS:** inside `Pixmith.app`. Choose **Pixmith → Install Command Line Tool…** to add the `pixmith` command to Terminal (in `/usr/local/bin`, or `~/.local/bin` without a password); **Uninstall Command Line Tool…** removes it.
+- **Windows / Linux:** `pixmith-cli(.exe)` sits next to `Pixmith(.exe)` in the download; **Help → Command Line Tool…** shows the folder and how to put it on your PATH.
+- **From source:** `./build.sh` also writes `build/pixmith-cli`.
+
+The examples below use `pixmith-cli`; after installing on macOS the same commands work as `pixmith`.
 
 ```sh
 pixmith-cli info hero.aseprite              # size, frames, layers, tags
-pixmith-cli info --json hero.aseprite       # same as JSON (an array when given several files)
+pixmith-cli info --json hero.pxmt           # same as JSON (an array when given several files)
+
+pixmith-cli convert hero.aseprite hero.pxmt # .pxmt <-> .aseprite, chosen by the output's extension
+pixmith-cli convert hero.pxmt hero.aseprite
 
 pixmith-cli export hero.aseprite --png hero.png --frame 2 --scale 4
 pixmith-cli export hero.aseprite --gif hero.gif --scale 4
@@ -234,7 +243,7 @@ pixmith-cli export hero.aseprite --layer Body --png body.png   # only layers wit
 pixmith-cli export sprites/*.aseprite --png 'out/{name}.png' --scale 2
 ```
 
-Frames are counted from 1, like the editor and the `-001.png` file names; the sprite sheet JSON follows Aseprite's format and counts from 0. Exit codes: `0` success, `1` a file could not be read or exported (the other files in a batch are still processed), `2` usage error. Run `pixmith-cli --help` for all options.
+`.pxmt` is Pixmith's own format and the default for Save: the whole document plus an embedded thumbnail (specification in [docs/PXMT_FORMAT.md](docs/PXMT_FORMAT.md)). Frames are counted from 1, like the editor and the `-001.png` file names; the sprite sheet JSON follows Aseprite's format and counts from 0. Exit codes: `0` success, `1` a file could not be read or exported (the other files in a batch are still processed), `2` usage error. Run `pixmith-cli --help` for all options.
 
 ### Godot 4 export
 

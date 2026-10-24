@@ -20,6 +20,7 @@ struct TitleRow: View {
 
     var body: some View {
         DSToolbar {
+            ProjectSwitcher(model: model)
             TabBar(model: model)
             Spacer(minLength: DS.Space.sm)
             ZoomControl(model: model)
@@ -76,6 +77,7 @@ struct ExportButton: View {
             Divider()
             Button("PNG…") { model.exportPNG(sheet: false) }
             Button("Sprite Sheet…") { model.exportSpriteSheet() }
+            Button("Aseprite…") { model.exportAseprite() }
             Divider()
             Button("Animated GIF…") { model.exportGIF() }
             Button("Animated PNG…") { model.exportAPNG() }

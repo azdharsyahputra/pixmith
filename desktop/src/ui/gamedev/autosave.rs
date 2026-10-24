@@ -1,7 +1,7 @@
 //! Autosave and crash recovery (`Autosaver` in `FileActions.swift`).
 //!
 //! While a document has unsaved changes, a copy goes to the Recovery folder every minute
-//! (`PIXMITH_AUTOSAVE_INTERVAL` overrides the seconds): `<id>.aseprite` plus a JSON sidecar with the original
+//! (`PIXMITH_AUTOSAVE_INTERVAL` overrides the seconds): `<id>.pxmt` plus a JSON sidecar with the original
 //! path, the tab's name and the date. Every open tab has its own copy. A clean exit, a save or closing the tab
 //! removes the copy, so anything found there at launch is left over from a crash, and the app offers to
 //! restore it.
@@ -78,7 +78,7 @@ fn iso8601(t: SystemTime) -> String {
 }
 
 /// Days since 1970-01-01 to (year, month, day) in the proleptic Gregorian calendar.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -136,7 +136,7 @@ impl Autosaver {
     }
 
     fn remove(&self, id: &str) {
-        for ext in ["aseprite", "json"] {
+        for ext in ["pxmt", "aseprite", "json"] {
             if let Some(f) = self.file(id, ext) {
                 let _ = std::fs::remove_file(f);
             }
@@ -224,7 +224,7 @@ impl Autosaver {
     /// Starts writing a copy of `doc` on a worker thread.
     fn write(&mut self, id: &str, doc: &Doc, revision: u64, name: &str) {
         let (Some(dir), Some(snapshot)) = (self.dir.clone(), doc.snapshot()) else { return };
-        let (file, meta) = (self.file(id, "aseprite").unwrap_or_default(), self.file(id, "json").unwrap_or_default());
+        let (file, meta) = (self.file(id, "pxmt").unwrap_or_default(), self.file(id, "json").unwrap_or_default());
         let original = doc.path.as_ref().map_or("null".to_string(), |p| json_str(&p.to_string_lossy()));
         let sidecar = format!(
             "{{\"path\":{original},\"name\":{},\"date\":{}}}",
@@ -267,7 +267,8 @@ pub fn candidates(dir: &Path, open: &[String]) -> Vec<Candidate> {
         .filter_map(Result::ok)
         .filter_map(|e| {
             let file = e.path();
-            if file.extension()? != "aseprite" {
+            // Copies from before `.pxmt` are `.aseprite`; both open.
+            if !matches!(file.extension()?.to_str()?, "pxmt" | "aseprite") {
                 return None;
             }
             let id = file.file_stem()?.to_string_lossy().into_owned();
@@ -424,7 +425,7 @@ mod tests {
         let dir = scratch("clean");
         let mut app = app_with_autosave(&dir);
         settle(&mut app);
-        assert!(files(&dir, "aseprite").is_empty());
+        assert!(files(&dir, "pxmt").is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -435,7 +436,7 @@ mod tests {
         app.tab_mut().doc.touch();
         app.tab_mut().changed();
         settle(&mut app);
-        let copies = files(&dir, "aseprite");
+        let copies = files(&dir, "pxmt");
         assert_eq!(copies.len(), 1);
         let meta = std::fs::read_to_string(copies[0].with_extension("json")).unwrap();
         assert!(meta.contains("\"name\":\"Untitled\"") && meta.contains("\"path\":null"), "{meta}");
@@ -449,7 +450,7 @@ mod tests {
         // Saving removes the copy.
         app.tab_mut().doc.mark_saved();
         settle(&mut app);
-        assert!(files(&dir, "aseprite").is_empty() && files(&dir, "json").is_empty());
+        assert!(files(&dir, "pxmt").is_empty() && files(&dir, "json").is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -461,13 +462,13 @@ mod tests {
         app.new_sprite(8, 8);
         app.tab_mut().doc.touch();
         settle(&mut app);
-        assert_eq!(files(&dir, "aseprite").len(), 2);
+        assert_eq!(files(&dir, "pxmt").len(), 2);
         app.request_close(0);
         app.answer_prompt(crate::ui::dialogs::Answer::Discard);
         settle(&mut app);
-        assert_eq!(files(&dir, "aseprite").len(), 1);
+        assert_eq!(files(&dir, "pxmt").len(), 1);
         app.discard_recovery_copies();
-        assert!(files(&dir, "aseprite").is_empty());
+        assert!(files(&dir, "pxmt").is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -482,7 +483,7 @@ mod tests {
         first.new_sprite(8, 8);
         first.tab_mut().doc.touch();
         settle(&mut first);
-        assert_eq!(files(&dir, "aseprite").len(), 2);
+        assert_eq!(files(&dir, "pxmt").len(), 2);
         // The first run "crashes": nothing is cleaned up. A new run finds the copies.
         let mut second = PixmithApp::default();
         second.gamedev.autosave.start_in(dir.clone());
@@ -498,7 +499,7 @@ mod tests {
         assert!(second.tabs.iter().any(|t| t.doc.path.as_deref() == Some(original.as_path())));
         // The restored tabs keep using the copies' ids, so nothing new is created beside them.
         settle(&mut second);
-        assert_eq!(files(&dir, "aseprite").len(), 2, "{:?}", files(&dir, "aseprite"));
+        assert_eq!(files(&dir, "pxmt").len(), 2, "{:?}", files(&dir, "pxmt"));
         let _ = std::fs::remove_dir_all(work);
     }
 }

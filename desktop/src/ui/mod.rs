@@ -6,6 +6,7 @@ pub mod dialogs;
 pub mod gamedev;
 pub mod inspector;
 pub mod menus;
+pub mod projects;
 pub mod selection;
 pub mod tilemap;
 pub mod timeline;

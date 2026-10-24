@@ -6,6 +6,7 @@ pub(crate) mod gamedev;
 mod imports;
 mod inspector;
 mod menus;
+pub mod projects;
 mod selection;
 mod tilemap;
 mod timeline;

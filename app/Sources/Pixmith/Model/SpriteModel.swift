@@ -279,14 +279,22 @@ final class SpriteModel: ObservableObject {
 
     func open() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = Self.aseTypes + [.png]
+        panel.allowedContentTypes = Self.documentTypes + [.png]
         if panel.runModal() == .OK, let url = panel.url { open(url) }
     }
 
     func open(_ url: URL) {
+        // A project folder opens as a project (Finder, the Dock and drag and drop can hand us one).
+        if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            AppRoute.shared.openProject(url)
+            return
+        }
         if url.pathExtension.lowercased() == "png" { return importPNG(url) }
         let key = url.resolvingSymlinksInPath()
-        if let i = slots.firstIndex(where: { $0.fileURL?.resolvingSymlinksInPath() == key }) { return activate(i) }
+        if let i = slots.firstIndex(where: { $0.fileURL?.resolvingSymlinksInPath() == key }) {
+            AppRoute.shared.enterEditor()
+            return activate(i)
+        }
         guard let d = url.path.withCString({ pixmith_open($0) }) else {
             errorMessage = lastError
             return
@@ -300,12 +308,43 @@ final class SpriteModel: ObservableObject {
         if let fileURL { write(to: fileURL) } else { saveAs() }
     }
 
+    /// Save As starts from Pixmith's own format: an opened .aseprite is suggested as a .pxmt next to it (Save keeps
+    /// writing the .aseprite; typing an .aseprite name here keeps that format).
     func saveAs() {
         guard !MainWindow.hasSheet else { return }
         let panel = NSSavePanel()
-        panel.allowedContentTypes = Self.aseTypes
-        panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "\(activeSlotObject?.customName ?? "Untitled").aseprite"
-        if panel.runModal() == .OK, let url = panel.url { write(to: url) }
+        panel.allowedContentTypes = [Self.pxmtType] + Self.asepriteTypes
+        let base = fileURL?.deletingPathExtension().lastPathComponent ?? activeSlotObject?.customName ?? "Untitled"
+        panel.nameFieldStringValue = base + ".pxmt"
+        panel.directoryURL = fileURL?.deletingLastPathComponent()
+        if panel.runModal() == .OK, let url = panel.url { write(to: Self.withDocumentExtension(url)) }
+    }
+
+    /// File > Export As Aseprite…: a copy in Aseprite's format. The document keeps its own file and stays as it is.
+    func exportAseprite() {
+        guard !MainWindow.hasSheet else { return }
+        stop()
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = Self.asepriteTypes.prefix(1).map { $0 }
+        let base = fileURL?.deletingPathExtension().lastPathComponent ?? activeSlotObject?.customName ?? "Untitled"
+        panel.nameFieldStringValue = base + ".aseprite"
+        panel.directoryURL = fileURL?.deletingLastPathComponent()
+        panel.message = "Saves a copy as an Aseprite file. Pixmith-only data (tweens, terrains, export settings) is not kept."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportAseprite(to: url.pathExtension.isEmpty ? url.appendingPathExtension("aseprite") : url)
+    }
+
+    @discardableResult
+    func exportAseprite(to url: URL) -> Bool {
+        finishShape()
+        let ok = ProjectStore.saveAseprite(doc, to: url)
+        if !ok { errorMessage = lastError }
+        return ok
+    }
+
+    /// Adds .pxmt to a name that has no document extension.
+    static func withDocumentExtension(_ url: URL) -> URL {
+        ["pxmt", "aseprite", "ase"].contains(url.pathExtension.lowercased()) ? url : url.appendingPathExtension("pxmt")
     }
 
     private func write(to url: URL) {
@@ -344,7 +383,11 @@ final class SpriteModel: ObservableObject {
         if !ok { errorMessage = lastError }
     }
 
-    static let aseTypes = ["aseprite", "ase"].compactMap { UTType(filenameExtension: $0) }
+    static let asepriteTypes = ["aseprite", "ase"].compactMap { UTType(filenameExtension: $0) }
+    /// Pixmith's own document type (declared in Info.plist; the extension alone stands in for it outside the app bundle).
+    static let pxmtType = UTType("com.pixmith.document") ?? UTType(filenameExtension: "pxmt", conformingTo: .data) ?? .data
+    /// Everything Open reads besides PNG: .pxmt first, then Aseprite's formats.
+    static var documentTypes: [UTType] { [pxmtType] + asepriteTypes }
 
     // MARK: Keyboard
 

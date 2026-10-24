@@ -2,6 +2,10 @@
 import Foundation
 import PackageDescription
 
+// ProjectStore (Sources/Pixmith/App/Projects.swift) calls the core's pixmith_project_* functions
+// (Sources/PixmithCore/pixmith_project.h). PIXMITH_PROJECT_FALLBACK=1 builds the pure-Swift fallback instead.
+let projectCore = ProcessInfo.processInfo.environment["PIXMITH_PROJECT_FALLBACK"] == nil
+
 // scripts/package.sh points this at a directory holding the (possibly universal) libpixmith_core.a.
 let coreLib = ProcessInfo.processInfo.environment["PIXMITH_CORE_LIB_DIR"] ?? Context.packageDirectory + "/../core/target/release"
 let link = LinkerSetting.unsafeFlags(["-L", coreLib])
@@ -17,7 +21,7 @@ let package = Package(
             name: "PixmithKit",
             dependencies: ["PixmithCore"],
             path: "Sources/Pixmith",
-            swiftSettings: [.unsafeFlags(["-enable-testing"])],
+            swiftSettings: [.unsafeFlags(["-enable-testing"])] + (projectCore ? [.define("PIXMITH_PROJECT_CORE")] : []),
             linkerSettings: [link]
         ),
         .executableTarget(

@@ -86,16 +86,18 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 combine "$app/Contents/MacOS/Pixmith" $swift_bins
 # shellcheck disable=SC2086
 combine "$work/bin/pixmith-cli" $cli_bins
+# The command line tool ships inside the app; Pixmith > Install Command Line Tool… links it onto the PATH.
+cp "$work/bin/pixmith-cli" "$app/Contents/MacOS/pixmith-cli"
 cp "$root/Info.plist" "$app/Contents/Info.plist"
 cp "$root/assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 
 echo "==> Signing"
 if [ -n "$sign_identity" ]; then
-    codesign --force --options runtime --timestamp --sign "$sign_identity" "$work/bin/pixmith-cli"
+    codesign --force --options runtime --timestamp --sign "$sign_identity" "$app/Contents/MacOS/pixmith-cli"
     codesign --force --options runtime --timestamp --sign "$sign_identity" "$app"
 else
     echo "PIXMITH_SIGN_IDENTITY is not set; signing ad-hoc (the app will not pass Gatekeeper on other Macs)"
-    codesign --force --sign - "$work/bin/pixmith-cli"
+    codesign --force --sign - "$app/Contents/MacOS/pixmith-cli"
     codesign --force --sign - "$app"
 fi
 codesign --verify --strict "$app"
@@ -104,7 +106,6 @@ echo "==> Creating disk image"
 stage="$work/dmg"
 mkdir -p "$stage"
 cp -R "$app" "$stage/Pixmith.app"
-cp "$work/bin/pixmith-cli" "$stage/pixmith-cli"
 ln -s /Applications "$stage/Applications"
 dmg="$dist/Pixmith-$version.dmg"
 rm -f "$dmg"

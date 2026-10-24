@@ -1,30 +1,25 @@
 import SwiftUI
 
-/// Main window: a full-width title row (document tabs, zoom, export) above three columns: tool rail | canvas column |
-/// inspector. The canvas column stacks the tool's context bar, the canvas and the timeline.
+/// Main window. It shows Home at launch, a project's canvases, or the editor (`AppRoute`); sheets, the file drop,
+/// the error alert and the window integration sit around all three.
 struct ContentView: View {
     @ObservedObject var model: SpriteModel
+    @ObservedObject private var route = AppRoute.shared
 
     var body: some View {
-        VStack(spacing: 0) {
-            // The title row hosts `TabBar(model:)` (document tabs), the zoom control and Export.
-            TitleRow(model: model)
-            HStack(spacing: 0) {
-                ToolsPanel(model: model)
-                VStack(spacing: 0) {
-                    ContextBar(model: model)
-                    CanvasArea(model: model)
-                    TimelinePanel(model: model).id(model.activeSlotID)
-                }
-                SidePanel(model: model).id(model.activeSlotID)
-            }
-        }
+        screen
         .frame(minWidth: 1000, minHeight: 640)
         .background(DSColor.panel)
-        .navigationTitle(model.windowTitle)
+        .navigationTitle(route.title)
         .pixmithFileDrop(model)
         .pixmithFileHandling(model)
         .sheet(isPresented: $model.showNewSheet) { NewSpriteSheet(model: model) }
+        .sheet(item: $route.sheet) { sheet in
+            switch sheet {
+            case .newProject: NewProjectSheet()
+            case .newCanvas(let folder): NewCanvasSheet(folder: folder)
+            }
+        }
         .filterSheets(model: model)
         .sheet(item: Binding(get: { model.renamingLayer.map(LayerID.init) },
                              set: { model.renamingLayer = $0?.id })) { item in
@@ -37,6 +32,38 @@ struct ContentView: View {
             Button("OK") {}
         } message: {
             Text(model.errorMessage ?? "")
+        }
+    }
+}
+
+private extension ContentView {
+    @ViewBuilder var screen: some View {
+        switch route.screen {
+        case .home: HomeView(model: model)
+        case .project(let folder): ProjectView(folder: folder).id(folder.path)
+        case .editor: EditorScreen(model: model)
+        }
+    }
+}
+
+/// The editor: a full-width title row (project switcher, document tabs, zoom, export) above three columns: tool rail |
+/// canvas column | inspector. The canvas column stacks the tool's context bar, the canvas and the timeline.
+struct EditorScreen: View {
+    @ObservedObject var model: SpriteModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // The title row hosts the project switcher, `TabBar(model:)` (document tabs), the zoom control and Export.
+            TitleRow(model: model)
+            HStack(spacing: 0) {
+                ToolsPanel(model: model)
+                VStack(spacing: 0) {
+                    ContextBar(model: model)
+                    CanvasArea(model: model)
+                    TimelinePanel(model: model).id(model.activeSlotID)
+                }
+                SidePanel(model: model).id(model.activeSlotID)
+            }
         }
     }
 }

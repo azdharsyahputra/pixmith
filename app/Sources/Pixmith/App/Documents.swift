@@ -22,7 +22,7 @@ final class DocumentSlot: Identifiable {
     /// `SpriteModel.revision` as of the last stash. Revisions are one increasing sequence for all documents.
     var revision = 0
     var savedRevision = 0
-    /// Names the recovery files written by `Autosaver` (`<uuid>.aseprite` and `<uuid>.json`).
+    /// Names the recovery files written by `Autosaver` (`<uuid>.pxmt` and `<uuid>.json`).
     var recoveryID = UUID()
     /// Revision whose content is in the recovery file, if any.
     var lastAutosavedRevision: Int?
@@ -85,7 +85,7 @@ extension SpriteModel {
     /// one without a file keeps the name for its tab and as the Save panel's suggestion.
     func renameDocument(_ slot: DocumentSlot, to newName: String) {
         var base = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        for ext in [".aseprite", ".ase"] where base.lowercased().hasSuffix(ext) { base.removeLast(ext.count) }
+        for ext in [".pxmt", ".aseprite", ".ase"] where base.lowercased().hasSuffix(ext) { base.removeLast(ext.count) }
         guard !base.isEmpty, !base.contains("/"), !base.contains(":") else { return }
         guard let url = slot.fileURL else {
             slot.customName = base
@@ -108,6 +108,26 @@ extension SpriteModel {
         objectWillChange.send()
     }
 
+    /// The tab that shows this file, if one is open.
+    func slot(for url: URL) -> DocumentSlot? {
+        let key = url.resolvingSymlinksInPath()
+        return slots.first { $0.fileURL?.resolvingSymlinksInPath() == key }
+    }
+
+    /// A project action renamed (`to` is the new URL) or deleted (`to` is nil) the file behind a tab. The tab follows
+    /// a rename; after a delete it keeps its pixels as a document without a file, so Save asks where to put it.
+    func canvasFileMoved(from old: URL, to new: URL?) {
+        guard let slot = slot(for: old) else { return }
+        if slot === activeSlotObject {
+            if new == nil { slot.customName = old.deletingPathExtension().lastPathComponent }
+            fileURL = new
+        } else {
+            if new == nil { slot.customName = old.deletingPathExtension().lastPathComponent }
+            slot.fileURL = new
+        }
+        objectWillChange.send()
+    }
+
     func nextUntitledNumber(excluding slot: DocumentSlot? = nil) -> Int {
         let used = Set(slots.filter { $0 !== slot && $0.fileURL == nil }.map(\.untitledNumber))
         return (1...).first { !used.contains($0) }!
@@ -123,6 +143,7 @@ extension SpriteModel {
 
     /// Shows a document: replaces the active tab if it is a pristine untitled one, else opens a new tab.
     func present(_ d: OpaquePointer, url: URL?) {
+        AppRoute.shared.enterEditor()
         if activeIsPristine {
             replace(with: d)
             fileURL = url
@@ -135,6 +156,7 @@ extension SpriteModel {
     /// Adds a tab holding `doc` (which the model takes ownership of) and makes it the active one.
     @discardableResult
     func newTab(doc d: OpaquePointer, url: URL?) -> Int {
+        AppRoute.shared.enterEditor()
         finishTransients()
         stash(activeSlot)
         let slot = DocumentSlot(doc: d, fileURL: url)
@@ -580,7 +602,8 @@ extension SpriteModel {
     }
 }
 
-/// Drop target for files dragged from Finder onto the window: each `.aseprite`, `.ase` or `.png` opens as a tab.
+/// Drop target for files dragged from Finder onto the window: each `.pxmt`, `.aseprite`, `.ase` or `.png` opens as a
+/// tab, and a project folder opens as a project.
 private struct FileDropDelegate: DropDelegate {
     let model: SpriteModel
 
@@ -590,7 +613,10 @@ private struct FileDropDelegate: DropDelegate {
         let model = model
         for provider in info.itemProviders(for: [.fileURL]) {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url, ["aseprite", "ase", "png"].contains(url.pathExtension.lowercased()) else { return }
+                guard let url else { return }
+                let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                guard isFolder && ProjectStore.isProject(url) || ["pxmt", "aseprite", "ase", "png"].contains(url.pathExtension.lowercased())
+                else { return }
                 DispatchQueue.main.async { model.requestOpen(url) }
             }
         }

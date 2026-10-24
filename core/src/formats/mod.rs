@@ -9,5 +9,6 @@ pub mod export_plan;
 pub mod gif;
 pub mod import;
 pub mod json;
+pub mod pxmt;
 pub mod sheet;
 pub mod sheet_import;

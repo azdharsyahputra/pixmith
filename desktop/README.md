@@ -2,7 +2,7 @@
 
 This is the cross-platform front end of Pixmith, written in Rust with [egui](https://github.com/emilk/egui). It links the Rust core in `../core` as a normal dependency and is designed to look and behave exactly like the native macOS app in `../app`: same layout, same design tokens (`src/theme.rs` mirrors `DesignSystem.swift`), same core calls. Only the platform's native file dialogs and system font differ.
 
-Pixmith is a lightweight pixel-art editor that reads and writes `.aseprite` files. See the [main README](../README.md) for what it does.
+Pixmith is a lightweight pixel-art editor. Its own document format is `.pxmt`; `.aseprite` files can be opened, saved back and exported (File > Export As Aseprite). See the [main README](../README.md) for what it does.
 
 ## Download
 
@@ -70,6 +70,7 @@ Each file mirrors a Swift file, so a change in one app is easy to carry over to 
 | `src/ui/menus/` (`bar.rs`, `commands.rs`) | the menus of `PixmithApp.swift` and every `CommandMenu` in `app/Sources/Pixmith` |
 | `src/ui/menus/filters.rs`, `calls/menus.rs` | `Dialogs/FiltersView.swift`, `Dialogs/CurvesEditor.swift`, `Dialogs/ColorModeView.swift` |
 | `src/ui/menus/history.rs`, `prefs.rs`, `shortcuts.rs`, `help.rs` | `Panels/HistoryPanel.swift`, `App/Preferences.swift`, `App/Shortcuts.swift` |
+| `src/ui/projects/`, `src/calls/projects.rs` | Home (recent canvases and projects), the project view (canvas grid, trash, reorder), the editor's project switcher; the `.pxmt` and project core calls |
 | `src/ui/context_bar.rs`, `canvas.rs`, `inspector.rs`, `timeline.rs` | `Tools/TopBar.swift` `ContextBar`, `Canvas/`, `Panels/Inspector.swift`, `Panels/Timeline.swift` |
 
 ## Status: phase 1
@@ -93,3 +94,7 @@ Works now:
 | Ctrl/Cmd+= and Ctrl/Cmd+- | Zoom in and out |
 
 Not in phase 1: the macOS app's other import commands (GIF, sprite sheet, PNG as layer), Open Recent, autosave and crash recovery, the Export options and Godot export sheets, tab reordering by drag, and the panels and canvas tools that are still being ported (see the Swift sources for the full target). Exports run on the UI thread, so very large sprites pause the window while they write.
+
+## Projects and `.pxmt`
+
+Pixmith opens on Home (File > Home, Ctrl+Shift+H, brings it back; the open tabs stay). A project is a folder of canvases with a `.pixmith` folder holding its name, canvas order and trash. Opening a file directly (drag and drop, File > Open, or `Pixmith.exe file.pxmt` on the command line, which is also how Windows "Open with" works) skips Home. Save and Save As write `.pxmt`; a document opened from an `.aseprite` file is saved back to that file; File > Export As Aseprite writes a copy.

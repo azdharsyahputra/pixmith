@@ -88,7 +88,9 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
     let bar = full.expand2(vec2(space::MD, 0.0));
     ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, c.separator_soft));
 
-    zoom_shortcuts(app, ui.ctx());
+    if app.projects.is_editor() {
+        zoom_shortcuts(app, ui.ctx());
+    }
 
     let export_w = space::MD
         + 13.0
@@ -98,9 +100,12 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
             .size()
             .x
         + space::MD;
-    let right_w = 28.0 + 2.0 + 70.0 + 2.0 + 28.0 + space::XS + export_w;
+    // Home and the project view have no zoom or export.
+    let editor = app.projects.is_editor();
+    let right_w = if editor { 28.0 + 2.0 + 70.0 + 2.0 + 28.0 + space::XS + export_w } else { 0.0 };
     let right = Rect::from_min_max(pos2(full.right() - right_w, full.top()), full.right_bottom());
-    let mut left = Rect::from_min_max(full.left_top(), pos2(right.left() - space::SM, full.bottom()));
+    let mut left =
+        Rect::from_min_max(full.left_top(), pos2(right.left() - if editor { space::SM } else { 0.0 }, full.bottom()));
     // The menus come first (Windows and Linux have no global menu bar; macOS keeps the same in-window menu).
     let menu_w = crate::ui::menus::bar::width(ui, left.width());
     let menu_rect = Rect::from_min_size(left.min, vec2(menu_w, left.height()));
@@ -108,10 +113,24 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
         crate::ui::menus::bar::show(app, ui)
     });
     left.min.x = menu_rect.right() + space::SM;
+    if editor {
+        // The project switcher comes before the tabs.
+        let w = crate::ui::projects::switcher::width(app, ui);
+        let rect = Rect::from_min_size(left.min, vec2(w, left.height()));
+        ui.scope_builder(UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), |ui| {
+            crate::ui::projects::switcher::show(app, ui)
+        });
+        left.min.x = rect.right();
+    }
 
     let mut tabs = TabEvents::default();
     let mut renaming = app.files.renaming.take();
+    // On Home the tabs only show once there is a document to go back to.
+    let show_tabs = editor || app.tabs.len() > 1 || app.tabs.iter().any(|t| t.doc.path.is_some() || t.doc.is_dirty());
     ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| {
+        if !show_tabs {
+            return;
+        }
         egui::ScrollArea::horizontal()
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .auto_shrink([false, false])
@@ -119,12 +138,14 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| tab_bar(app, ui, &mut tabs, &mut renaming));
             });
     });
-    ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::left_to_right(Align::Center)), |ui| {
-        ui.spacing_mut().item_spacing.x = space::XXS;
-        zoom_control(app, ui);
-        ui.add_space(space::XS - space::XXS);
-        export_button(app, ui);
-    });
+    if editor {
+        ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::left_to_right(Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = space::XXS;
+            zoom_control(app, ui);
+            ui.add_space(space::XS - space::XXS);
+            export_button(app, ui);
+        });
+    }
 
     app.files.renaming = renaming;
     if let Some((i, name)) = tabs.rename {
@@ -132,6 +153,7 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
     }
     if let Some(i) = tabs.activate {
         app.active = i;
+        app.show_editor();
     }
     if let Some(i) = tabs.close {
         app.request_close(i);

@@ -3,7 +3,7 @@
 
 use super::{clampc, editor, editor_quiet, path_arg, save_to, set_error, sprite};
 use crate::document::{Editor, Sprite};
-use crate::formats::{ase, export};
+use crate::formats::{ase, export, pxmt};
 use crate::paint::{selection, shapes};
 use std::ffi::{c_char, CString};
 use std::ptr::null_mut;
@@ -22,11 +22,8 @@ pub unsafe extern "C" fn pixmith_open(path: *const c_char) -> *mut Editor {
             set_error("invalid path");
             return null_mut();
         };
-        match std::fs::read(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|b| ase::read(&b))
-            .and_then(|s| s.validate().map(|_| s))
-        {
+        // .pxmt is recognized by its magic bytes, anything else is read as .aseprite.
+        match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| pxmt::read_document(&b)) {
             Ok(s) => Box::into_raw(Box::new(Editor::new(s))),
             Err(e) => {
                 set_error(format!("{path}: {e}"));
@@ -50,7 +47,64 @@ pub unsafe extern "C" fn pixmith_free(doc: *mut Editor) {
 pub unsafe extern "C" fn pixmith_save(doc: *const Editor, path: *const c_char) -> bool {
     crate::ffi::guarded("pixmith_save", std::ptr::null_mut(), || {
         let Some(s) = editor_quiet(doc as *mut Editor).map(|e| &e.sprite) else { return false };
+        let Some(p) = path_arg(path) else {
+            set_error("invalid path");
+            return false;
+        };
+        // .pxmt when the path ends in ".pxmt", .aseprite otherwise.
+        save_to(path, pxmt::encode_for_path(&p, s))
+    })
+}
+
+/// Writes the document as .aseprite whatever the extension says.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_save_aseprite(doc: *const Editor, path: *const c_char) -> bool {
+    crate::ffi::guarded("pixmith_save_aseprite", std::ptr::null_mut(), || {
+        let Some(s) = editor_quiet(doc as *mut Editor).map(|e| &e.sprite) else { return false };
         save_to(path, Ok(ase::write(s)))
+    })
+}
+
+/// A preview of a document file fitted inside `max_w` x `max_h`; `out` holds `max_w * max_h * 4` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_file_thumbnail(
+    path: *const c_char,
+    max_w: u32,
+    max_h: u32,
+    out: *mut u8,
+    len: usize,
+    w: *mut u32,
+    h: *mut u32,
+) -> bool {
+    crate::ffi::guarded("pixmith_file_thumbnail", std::ptr::null_mut(), || {
+        let Some(path) = path_arg(path) else {
+            set_error("invalid path");
+            return false;
+        };
+        if out.is_null() {
+            set_error("no output buffer");
+            return false;
+        }
+        match pxmt::file_thumbnail(&path, max_w, max_h) {
+            Ok(t) if t.rgba.len() <= len => {
+                std::ptr::copy_nonoverlapping(t.rgba.as_ptr(), out, t.rgba.len());
+                if !w.is_null() {
+                    *w = t.width;
+                }
+                if !h.is_null() {
+                    *h = t.height;
+                }
+                true
+            }
+            Ok(_) => {
+                set_error("the output buffer is too small for the thumbnail");
+                false
+            }
+            Err(e) => {
+                set_error(e);
+                false
+            }
+        }
     })
 }
 

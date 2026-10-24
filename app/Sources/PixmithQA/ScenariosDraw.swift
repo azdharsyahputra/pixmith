@@ -15,6 +15,7 @@ func registerScenarios() {
     registerHistory()
     registerFiles()
     registerTabs()
+    registerProjects()
 }
 
 /// Snapshot of the whole composite plus undo counts; used to check that an operation is one undo step.

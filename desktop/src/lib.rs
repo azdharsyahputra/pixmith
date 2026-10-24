@@ -10,3 +10,4 @@ pub mod theme;
 pub mod ui;
 
 pub use app::PixmithApp;
+pub use calls::projects;

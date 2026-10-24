@@ -39,6 +39,8 @@ pub struct MenusState {
     pub help_open: bool,
     pub(super) help_filter: String,
     pub about_open: bool,
+    /// Help > Command Line Tool…
+    pub cli_open: bool,
     pub filter: Option<filters::FilterSession>,
     pub scale: Option<filters::ScaleSession>,
     pub canvas_size: Option<sheets::CanvasSizeSession>,
@@ -64,6 +66,7 @@ impl Default for MenusState {
             help_open: false,
             help_filter: String::new(),
             about_open: false,
+            cli_open: false,
             filter: None,
             scale: None,
             canvas_size: None,
@@ -148,6 +151,7 @@ impl MenusState {
             || self.canvas_size.is_some()
             || self.cel.is_some()
             || self.about_open
+            || self.cli_open
     }
 }
 
@@ -157,6 +161,7 @@ pub fn blocked(app: &PixmithApp) -> bool {
         || app.files.prompt.is_some()
         || app.files.new_sheet.is_some()
         || app.files.export.is_some()
+        || app.projects.has_sheet()
         || app.menus.sheet_open()
 }
 
@@ -210,6 +215,9 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
     }
     if app.menus.about_open && sheets::about(ctx) {
         app.menus.about_open = false;
+    }
+    if app.menus.cli_open && sheets::command_line_tool(ctx) {
+        app.menus.cli_open = false;
     }
     history::show(app, ctx);
     prefs::show(app, ctx);

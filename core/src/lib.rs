@@ -11,7 +11,9 @@
 //! - [`render`]: compositing views and dirty-rectangle tracking for the canvas.
 //! - [`paint`]: drawing and editing tools: shapes, ink, curves, text, filters, transforms, selections.
 //! - [`palette`]: palette editing, built-in presets and palette file formats.
-//! - [`formats`]: `.aseprite`, PNG, GIF, APNG, sprite sheets and JSON, plus crash-safe file writes.
+//! - [`formats`]: `.pxmt` (Pixmith's own format), `.aseprite`, PNG, GIF, APNG, sprite sheets and JSON, plus
+//!   crash-safe file writes.
+//! - [`project`]: project folders of canvases (`.pxmt` files plus a `.pixmith` folder) and their C ABI.
 //! - [`gamedev`]: autotiling, tweening and the Godot 4 exporter.
 //! - [`scripting`]: the Lua scripting host.
 //! - [`jobs`]: document snapshots for background work.
@@ -41,6 +43,7 @@ pub mod history;
 pub mod jobs;
 pub mod paint;
 pub mod palette;
+pub mod project;
 pub mod render;
 pub mod scripting;
 

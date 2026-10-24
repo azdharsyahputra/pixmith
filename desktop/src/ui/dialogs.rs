@@ -85,6 +85,8 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
         new_sheet(app, ctx);
     } else if app.files.export.is_some() {
         export_sheet(app, ctx);
+    } else if app.projects.has_sheet() {
+        // The New Project / New Canvas sheet owns the keyboard.
     } else {
         file_shortcuts(app, ctx);
     }

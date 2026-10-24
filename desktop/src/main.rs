@@ -20,5 +20,17 @@ fn main() -> eframe::Result {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("Pixmith", options, Box::new(|cc| Ok(Box::new(pixmith_desktop::PixmithApp::new(cc)))))
+    eframe::run_native(
+        "Pixmith",
+        options,
+        Box::new(|cc| {
+            let mut app = pixmith_desktop::PixmithApp::new(cc);
+            // `Pixmith.exe file.pxmt` (Windows "Open with"): documents named on the command line open straight
+            // away and skip Home; a folder opens as a project.
+            app.open_args(
+                std::env::args_os().skip(1).filter(|a| !a.to_string_lossy().starts_with('-')).map(Into::into),
+            );
+            Ok(Box::new(app))
+        }),
+    )
 }
