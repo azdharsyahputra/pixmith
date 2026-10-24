@@ -141,7 +141,7 @@ fn variants(s: &Sprite, name: &str, o: &Options) -> Result<Vec<(String, Sprite)>
         LayerMode::Each => {
             for i in 0..s.layers.len() {
                 let has_cel = s.cels.iter().any(|f| f.get(i).is_some_and(|c| c.is_some()));
-                if s.layers[i].is_group() || !s.is_layer_shown(i) || !has_cel {
+                if s.layers[i].is_group() || s.layers[i].is_reference() || !s.is_layer_shown(i) || !has_cel {
                     continue;
                 }
                 let stem = stem_from_template(&o.name_template, name, Some(&s.layers[i].name), true);

@@ -49,10 +49,13 @@ pub struct DrawState {
     last_press: Option<(f64, (i32, i32))>,
     /// Pen pressure of the latest touch event, 0..1 (tablets that report it).
     pub pressure: Option<f32>,
+    /// The pen lifted: forget the pressure at the start of the next frame, not before the lift is handled, so
+    /// the last dab of a stroke still uses the pressure it was drawn with.
+    pressure_lifted: bool,
 }
 
 impl DrawState {
-    fn next_random(&mut self) -> u32 {
+    pub(crate) fn next_random(&mut self) -> u32 {
         if self.rng == 0 {
             self.rng = 0x9E37_79B9;
         }
@@ -140,14 +143,24 @@ pub fn pressure_style(state: &CanvasState, color: u32, size: u32) -> Option<(u32
 }
 
 /// Remembers the latest pen pressure from touch events; call once per frame.
+///
+/// Windows delivers a pen as a touch with a pressure value (winit's `WM_POINTER` handling), which egui turns into
+/// `Event::Touch { force }`; that is the only pressure source on any OS (see `desktop/README.md`).
 pub fn track_pressure(state: &mut CanvasState, ctx: &egui::Context) {
+    let draw = &mut state.tools.draw;
+    if std::mem::take(&mut draw.pressure_lifted) {
+        draw.pressure = None;
+    }
     ctx.input(|i| {
         for e in &i.events {
             if let egui::Event::Touch { phase, force, .. } = e {
-                state.tools.draw.pressure = match phase {
-                    egui::TouchPhase::End | egui::TouchPhase::Cancel => None,
-                    _ => force.map(|f| f.clamp(0.0, 1.0)).or(state.tools.draw.pressure),
-                };
+                match phase {
+                    egui::TouchPhase::End | egui::TouchPhase::Cancel => draw.pressure_lifted = true,
+                    _ => {
+                        draw.pressure_lifted = false;
+                        draw.pressure = force.map(|f| f.clamp(0.0, 1.0)).or(draw.pressure);
+                    }
+                }
             }
         }
     });
@@ -554,6 +567,50 @@ mod tests {
         assert_eq!(snapped((0, 0), (2, -10)), (0, -10));
         assert_eq!(snapped((5, 5), (9, 8)), (9, 9));
         assert_eq!(snapped((5, 5), (1, 3)), (1, 1));
+    }
+
+    fn frame_with(ctx: &egui::Context, events: Vec<egui::Event>, state: &mut CanvasState) {
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| track_pressure(state, ui.ctx()));
+        out.textures_delta.clear();
+    }
+
+    fn touch(phase: egui::TouchPhase, force: Option<f32>) -> egui::Event {
+        egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(1),
+            phase,
+            pos: egui::pos2(1.0, 1.0),
+            force,
+        }
+    }
+
+    #[test]
+    fn pressure_follows_the_pen_and_outlives_the_lift_by_one_frame() {
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        frame_with(&ctx, vec![touch(egui::TouchPhase::Start, Some(0.25))], &mut state);
+        assert_eq!(state.tools.draw.pressure, Some(0.25));
+        // A move without a reading keeps the last one; a reading above 1 is clamped.
+        frame_with(&ctx, vec![touch(egui::TouchPhase::Move, None)], &mut state);
+        assert_eq!(state.tools.draw.pressure, Some(0.25));
+        frame_with(&ctx, vec![touch(egui::TouchPhase::Move, Some(1.5))], &mut state);
+        assert_eq!(state.tools.draw.pressure, Some(1.0));
+        // The lift frame still draws with the pressure of the last move...
+        frame_with(&ctx, vec![touch(egui::TouchPhase::End, None)], &mut state);
+        assert_eq!(state.tools.draw.pressure, Some(1.0));
+        // ...and the mouse that comes next has none.
+        frame_with(&ctx, vec![], &mut state);
+        assert_eq!(state.tools.draw.pressure, None);
+        // A new touch in the very frame after a lift is not wiped out.
+        frame_with(&ctx, vec![touch(egui::TouchPhase::Start, Some(0.5))], &mut state);
+        frame_with(
+            &ctx,
+            vec![touch(egui::TouchPhase::End, None), touch(egui::TouchPhase::Start, Some(0.75))],
+            &mut state,
+        );
+        frame_with(&ctx, vec![], &mut state);
+        assert_eq!(state.tools.draw.pressure, Some(0.75));
     }
 
     #[test]

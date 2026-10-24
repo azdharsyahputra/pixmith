@@ -24,6 +24,10 @@ pub struct Prefs {
     pub appearance: u8,
     pub canvas_bg_on: bool,
     pub canvas_bg: u32,
+    /// Id of the chosen color theme from an extension (`<extension>/<path>`); empty is the default look.
+    pub theme: String,
+    /// Allow AI agents to control Pixmith (Live mode, `docs/LIVE_PROTOCOL.md`).
+    pub live_enabled: bool,
 }
 
 impl Default for Prefs {
@@ -38,6 +42,8 @@ impl Default for Prefs {
             appearance: 0,
             canvas_bg_on: false,
             canvas_bg: 0x3C3C3CFF,
+            theme: String::new(),
+            live_enabled: true,
         }
     }
 }
@@ -83,20 +89,24 @@ impl Prefs {
 
     pub fn encode(&self) -> String {
         let mut out = format!(
-            "newWidth={}\nnewHeight={}\ngridColor={}\ndefaultZoom={}\nappearance={}\ncanvasBgOn={}\ncanvasBg={}\n",
+            "newWidth={}\nnewHeight={}\ngridColor={}\ndefaultZoom={}\nappearance={}\ncanvasBgOn={}\ncanvasBg={}\nliveEnabled={}\n",
             self.new_width,
             self.new_height,
             self.grid_color,
             self.default_zoom,
             self.appearance,
             u8::from(self.canvas_bg_on),
-            self.canvas_bg
+            self.canvas_bg,
+            u8::from(self.live_enabled)
         );
         if let Some(v) = self.checker_light {
             out.push_str(&format!("checkerLight={v}\n"));
         }
         if let Some(v) = self.checker_dark {
             out.push_str(&format!("checkerDark={v}\n"));
+        }
+        if !self.theme.is_empty() {
+            out.push_str(&format!("theme={}\n", self.theme.replace('\n', "")));
         }
         out
     }
@@ -105,6 +115,10 @@ impl Prefs {
         let mut p = Prefs::default();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
+            if key == "theme" {
+                p.theme = value.trim().to_string();
+                continue;
+            }
             let Ok(v) = value.trim().parse::<u32>() else { continue };
             match key {
                 "newWidth" => p.new_width = v.clamp(1, 4096),
@@ -114,6 +128,7 @@ impl Prefs {
                 "appearance" => p.appearance = v.min(2) as u8,
                 "canvasBgOn" => p.canvas_bg_on = v != 0,
                 "canvasBg" => p.canvas_bg = v,
+                "liveEnabled" => p.live_enabled = v != 0,
                 "checkerLight" => p.checker_light = Some(v),
                 "checkerDark" => p.checker_dark = Some(v),
                 _ => {}
@@ -129,6 +144,7 @@ pub enum PrefsTab {
     General,
     Appearance,
     Keyboard,
+    Extensions,
 }
 
 // MARK: Window
@@ -151,8 +167,8 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
         .id(egui::Id::new("preferences_window"))
         .collapsible(false)
         .resizable(false)
-        .fixed_size(vec2(488.0, 468.0))
-        .default_pos(ctx.content_rect().center() - vec2(244.0, 260.0))
+        .fixed_size(vec2(488.0, 548.0))
+        .default_pos(ctx.content_rect().center() - vec2(244.0, 300.0))
         .frame(frame)
         .open(&mut open)
         .show(ctx, |ui| {
@@ -162,10 +178,15 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
                     (SegGlyph::Text("General"), "General"),
                     (SegGlyph::Text("Appearance"), "Appearance"),
                     (SegGlyph::Text("Keyboard"), "Keyboard"),
+                    (SegGlyph::Text("Extensions"), "Extensions"),
                 ];
                 let selected = tab as usize;
                 if let Some(i) = widgets::bar_segmented(ui, selected, &options) {
-                    app.menus.prefs_tab = [PrefsTab::General, PrefsTab::Appearance, PrefsTab::Keyboard][i];
+                    app.menus.prefs_tab =
+                        [PrefsTab::General, PrefsTab::Appearance, PrefsTab::Keyboard, PrefsTab::Extensions][i];
+                    if app.menus.prefs_tab == PrefsTab::Extensions {
+                        pixmith_core::extensions::refresh();
+                    }
                     app.menus.shortcuts.recording = None;
                     app.menus.shortcuts.conflict = None;
                 }
@@ -175,6 +196,7 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
                 PrefsTab::General => general(app, ui),
                 PrefsTab::Appearance => dark_changed = appearance(app, ui),
                 PrefsTab::Keyboard => keyboard(&mut app.menus.shortcuts, ui),
+                PrefsTab::Extensions => crate::ui::extensions::tab(app, ui),
             }
         });
     if let Some(dark) = dark_changed {
@@ -189,7 +211,7 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
 }
 
 /// A group of rows with a title above it (a grouped `Form` section).
-fn group(ui: &mut Ui, title: &str, rows: impl FnOnce(&mut Ui)) {
+pub(crate) fn group(ui: &mut Ui, title: &str, rows: impl FnOnce(&mut Ui)) {
     let c = Colors::of(ui.ctx());
     ui.label(egui::RichText::new(title).font(widgets::strong(ui.ctx(), font::CAPTION)).color(c.text_secondary));
     ui.add_space(-space::XS);
@@ -206,7 +228,7 @@ fn group(ui: &mut Ui, title: &str, rows: impl FnOnce(&mut Ui)) {
 }
 
 /// A row: the label at the left, the control at the right.
-fn row(ui: &mut Ui, label: &str, last: bool, control: impl FnOnce(&mut Ui)) {
+pub(crate) fn row(ui: &mut Ui, label: &str, last: bool, control: impl FnOnce(&mut Ui)) {
     let c = Colors::of(ui.ctx());
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::left_to_right(Align::Center), |ui| {
         ui.label(egui::RichText::new(label).font(ui_font(font::BODY_LARGE)).color(c.text));
@@ -218,7 +240,7 @@ fn row(ui: &mut Ui, label: &str, last: bool, control: impl FnOnce(&mut Ui)) {
     }
 }
 
-fn note(ui: &mut Ui, text: &str) {
+pub(crate) fn note(ui: &mut Ui, text: &str) {
     let c = Colors::of(ui.ctx());
     ui.label(egui::RichText::new(text).font(ui_font(font::CAPTION)).color(c.text_secondary));
 }
@@ -268,12 +290,24 @@ fn general(app: &mut PixmithApp, ui: &mut Ui) {
     });
     note(ui, "Large sprites open at a smaller zoom so they fit the window.");
     ui.add_space(space::SM);
+    group(ui, "Live mode", |ui| {
+        row(ui, "Allow AI agents to control Pixmith", true, |ui| {
+            ui.checkbox(&mut p.live_enabled, "");
+        });
+    });
+    note(
+        ui,
+        "Lets tools on this computer, such as the Pixmith MCP server, edit the open documents. Each edit is an undo step.",
+    );
+    ui.add_space(space::SM);
     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
         if super::controls::bar_button(ui, "Restore Defaults", true, false).clicked() {
             p = Prefs {
                 appearance: p.appearance,
                 canvas_bg_on: p.canvas_bg_on,
                 canvas_bg: p.canvas_bg,
+                theme: p.theme.clone(),
+                live_enabled: p.live_enabled,
                 ..Prefs::default()
             };
         }
@@ -292,7 +326,7 @@ fn appearance(app: &mut PixmithApp, ui: &mut Ui) -> Option<bool> {
     let mut p = app.menus.prefs.clone();
     let mut theme_change = None;
     group(ui, "Theme", |ui| {
-        row(ui, "Appearance", true, |ui| {
+        row(ui, "Appearance", false, |ui| {
             let options = [
                 (SegGlyph::Text("System"), "System"),
                 (SegGlyph::Text("Light"), "Light"),
@@ -304,6 +338,12 @@ fn appearance(app: &mut PixmithApp, ui: &mut Ui) -> Option<bool> {
                 theme_change = Some(p.wants_dark(system));
             }
         });
+        let system = ui.ctx().input(|i| i.raw.system_theme) != Some(egui::Theme::Light);
+        let mut id = p.theme.clone();
+        if crate::ui::extensions::theme_row(ui, &mut id, &mut p.appearance, system) {
+            p.theme = id;
+            theme_change = Some(p.wants_dark(system));
+        }
     });
     group(ui, "Canvas", |ui| {
         row(ui, "Custom canvas background", false, |ui| {

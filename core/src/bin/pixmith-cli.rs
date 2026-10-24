@@ -1,7 +1,9 @@
-//! Command-line companion to Pixmith: inspect, convert and export .pxmt and .aseprite files without the app.
+//! Command-line companion to Pixmith: inspect, convert and export .pxmt and .aseprite files (and open WebP, JPEG,
+//! BMP, TGA, ICO, PCX and FLI/FLC images) without the app.
 
 use pixmith_core::document::{Sprite, Tag};
 use pixmith_core::formats::export_plan::{render_outputs, EncodeOptions, ExportOptions, Format, LayerMode, Trim};
+use pixmith_core::formats::raster::{self, ImageFormat, ImageOptions};
 use pixmith_core::formats::sheet::{json_str, Layout, Options};
 use pixmith_core::formats::{gif, pxmt};
 use std::collections::HashSet;
@@ -13,10 +15,12 @@ const USAGE: &str = "\
 Usage:
   pixmith-cli info <file>... [--json]
   pixmith-cli export <file>... [outputs] [options]
-  pixmith-cli convert <in> <out>
+  pixmith-cli convert <in> <out> [image options]
 
-Every <file> may be a .pxmt (Pixmith) or .aseprite / .ase document; the format is detected from the content.
-`convert` writes <out> as .pxmt or .aseprite (.ase) according to its extension.
+Every <file> may be a .pxmt (Pixmith) or .aseprite / .ase document, or an image (PNG, GIF, WebP, JPEG, BMP, TGA,
+ICO, PCX, FLI/FLC; an animation gives one frame per image); the format is detected from the content.
+`convert` writes <out> as .pxmt or .aseprite (.ase), or as .webp, .jpg, .bmp, .tga, .ico, .pcx or .flc, according
+to its extension (the first frame, except for animated .webp and .flc).
 
 Outputs (at least one):
   --png <out.png>        one frame as PNG (see --frame)
@@ -26,7 +30,23 @@ Outputs (at least one):
   --json <out.json>      sprite sheet metadata (needs --sheet)
   --godot-tres <f.tres>  Godot 4 SpriteFrames + atlas PNG (needs --godot-root, see below)
   --png-seq <dir/base>   every frame as <dir/base>-001.png, -002.png, ...
+  --webp <out.webp>      WebP: animated when the sprite has several frames (lossless unless --lossy)
+  --jpg <out.jpg>        JPEG of one frame, flattened onto --background (also --jpeg)
+  --bmp <out.bmp>        BMP of one frame (32 bit with alpha, 8 bit for up to 256 colors, else 24 bit)
+  --tga <out.tga>        TGA of one frame (RLE unless --no-rle)
+  --ico <out.ico>        Windows icon with the sizes of --ico-sizes (default: the sprite's own size)
+  --pcx <out.pcx>        PCX of one frame (8 bit palette, or 24 bit)
+  --flc <out.flc>        Autodesk Animator FLC with all frames and their durations (also --fli)
   --godot-tileset <f.tres>  Godot 4 TileSet plus atlas PNG (needs --godot-root, see --tileset)
+
+Image format options (export and convert):
+  --quality <1-100>      JPEG quality (default 90); WebP quality when lossy (default 90)
+  --lossy, --lossless    WebP: lossy with --quality, or lossless (default)
+  --no-animation         WebP: write only the --frame instead of the whole animation
+  --background <#rrggbb> color that transparent pixels are flattened onto for formats without alpha (default #ffffff)
+  --ico-sizes <list>     icon sizes, e.g. 16,32,48,256 (each 1-256); the sprite is scaled by a whole number to fit
+  --bits <8|24|32>       BMP, TGA and PCX depth (default: chosen from the image)
+  --no-rle               TGA: do not run-length encode
 
 Options:
   --godot-root <dir>     Godot project folder (holds project.godot); output must be inside it
@@ -128,7 +148,99 @@ struct ExportArgs {
     tag_exclude: Vec<String>,
     godot_tscn: bool,
     godot_overwrite_tscn: bool,
+    images: Vec<(ImageFormat, String)>,
+    image: ImageFlags,
 }
+
+/// Settings of the WebP, JPEG, BMP, TGA, ICO, PCX and FLC outputs.
+#[derive(Default)]
+struct ImageFlags {
+    quality: Option<u8>,
+    lossy: bool,
+    no_animation: bool,
+    background: Option<String>,
+    ico_sizes: Option<Vec<u16>>,
+    bits: Option<u8>,
+    no_rle: bool,
+}
+
+impl ImageFlags {
+    /// Reads one of the image format options; false when `flag` is not one.
+    fn parse(&mut self, flag: &str, value: &mut dyn FnMut(&str) -> Res<String>) -> Res<bool> {
+        match flag {
+            "--quality" => {
+                let q = number(flag, &value(flag)?)?;
+                if !(1..=100).contains(&q) {
+                    return usage("--quality: expected a number from 1 to 100");
+                }
+                self.quality = Some(q as u8);
+            }
+            "--lossy" => self.lossy = true,
+            "--lossless" => self.lossy = false,
+            "--no-animation" => self.no_animation = true,
+            "--no-rle" => self.no_rle = true,
+            "--background" => self.background = Some(value(flag)?),
+            "--bits" => {
+                let b = number(flag, &value(flag)?)?;
+                if ![8, 24, 32].contains(&b) {
+                    return usage("--bits: expected 8, 24 or 32");
+                }
+                self.bits = Some(b as u8);
+            }
+            "--ico-sizes" => {
+                let v = value(flag)?;
+                let mut sizes = Vec::new();
+                for part in v.split(',').filter(|p| !p.trim().is_empty()) {
+                    let n = number(flag, part.trim())?;
+                    if !(1..=256).contains(&n) {
+                        return usage("--ico-sizes: every size must be from 1 to 256");
+                    }
+                    sizes.push(n as u16);
+                }
+                if sizes.is_empty() || sizes.len() > 8 {
+                    return usage("--ico-sizes: give between 1 and 8 sizes, e.g. 16,32,48,256");
+                }
+                self.ico_sizes = Some(sizes);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn options(&self) -> Res<ImageOptions> {
+        let mut o = ImageOptions {
+            webp_lossless: !self.lossy,
+            webp_animated: !self.no_animation,
+            tga_rle: !self.no_rle,
+            ..Default::default()
+        };
+        if let Some(q) = self.quality {
+            o.jpeg_quality = q;
+            o.webp_quality = q;
+        }
+        if let Some(b) = &self.background {
+            o.background = raster::parse_hex_color(b).or_else(|e| usage(format!("--background: {e}")))?;
+        }
+        if let Some(sizes) = &self.ico_sizes {
+            o.set_ico_sizes(sizes);
+        }
+        o.bits = self.bits.unwrap_or(0);
+        Ok(o)
+    }
+}
+
+/// `--webp` and the other image outputs of `export`.
+const IMAGE_FLAGS: [(&str, ImageFormat); 9] = [
+    ("--webp", ImageFormat::Webp),
+    ("--jpg", ImageFormat::Jpeg),
+    ("--jpeg", ImageFormat::Jpeg),
+    ("--bmp", ImageFormat::Bmp),
+    ("--tga", ImageFormat::Tga),
+    ("--ico", ImageFormat::Ico),
+    ("--pcx", ImageFormat::Pcx),
+    ("--flc", ImageFormat::Flc),
+    ("--fli", ImageFormat::Flc),
+];
 
 impl ExportArgs {
     /// A SpriteFrames export was requested (`--godot-root` alone may belong to a TileSet export).
@@ -142,7 +254,7 @@ impl ExportArgs {
 enum Command {
     Help,
     Info { files: Vec<String>, json: bool },
-    Convert { input: String, output: String },
+    Convert { input: String, output: String, image: ImageFlags },
     Export { files: Vec<String>, args: ExportArgs },
 }
 
@@ -158,12 +270,31 @@ fn parse(args: Vec<String>) -> Res<Command> {
         "info" => false,
         "export" => true,
         "convert" => {
-            let rest: Vec<String> = it.collect();
-            return match rest.as_slice() {
-                [a] if a == "-h" || a == "--help" => Ok(Command::Help),
-                [input, output] if !input.starts_with('-') && !output.starts_with('-') => {
-                    Ok(Command::Convert { input: input.clone(), output: output.clone() })
+            let mut rest: Vec<String> = it.collect();
+            if rest.len() == 1 && (rest[0] == "-h" || rest[0] == "--help") {
+                return Ok(Command::Help);
+            }
+            let (mut files, mut image) = (Vec::new(), ImageFlags::default());
+            rest.reverse();
+            while let Some(arg) = rest.pop() {
+                if !arg.starts_with('-') {
+                    files.push(arg);
+                    continue;
                 }
+                let (flag, mut inline) = match arg.split_once('=') {
+                    Some((f, v)) if f.starts_with("--") => (f.to_string(), Some(v.to_string())),
+                    _ => (arg.clone(), None),
+                };
+                let mut value = |flag: &str| match inline.take().or_else(|| rest.pop()) {
+                    Some(v) => Ok(v),
+                    None => usage(format!("{flag} needs a value")),
+                };
+                if !image.parse(&flag, &mut value)? {
+                    return usage(format!("unknown option \"{flag}\" for convert"));
+                }
+            }
+            return match files.as_slice() {
+                [input, output] => Ok(Command::Convert { input: input.clone(), output: output.clone(), image }),
                 _ => usage("convert takes exactly an input and an output file: convert <in> <out>"),
             };
         }
@@ -232,6 +363,11 @@ fn parse(args: Vec<String>) -> Res<Command> {
             ("--godot-tscn", true) if !has_inline => a.godot_tscn = true,
             ("--godot-overwrite-tscn", true) if !has_inline => a.godot_overwrite_tscn = true,
             ("-v" | "--verbose", true) => a.verbose = true,
+            (f, true) if IMAGE_FLAGS.iter().any(|(n, _)| *n == f) => {
+                let fmt = IMAGE_FLAGS.iter().find(|(n, _)| *n == f).map(|(_, k)| *k).unwrap_or(ImageFormat::Webp);
+                a.images.push((fmt, value(f)?));
+            }
+            (f, true) if a.image.parse(f, &mut value)? => {}
             _ => return usage(format!("unknown option \"{flag}\" for {cmd}")),
         }
     }
@@ -293,9 +429,10 @@ fn godot_option(a: &mut ExportArgs, flag: &str, value: &mut dyn FnMut(&str) -> R
 
 fn validate(a: &ExportArgs, files: &[String]) -> Res<()> {
     let outputs = [&a.png, &a.gif, &a.apng, &a.sheet, &a.png_seq, &a.godot_tileset];
-    if outputs.iter().all(|o| o.is_none()) && !a.godot() {
-        return usage("nothing to do: give at least one of --png, --gif, --apng, --sheet, --png-seq, --godot-tres, --godot-tileset");
+    if outputs.iter().all(|o| o.is_none()) && !a.godot() && a.images.is_empty() {
+        return usage("nothing to do: give at least one of --png, --gif, --apng, --webp, --jpg, --bmp, --tga, --ico, --pcx, --flc, --sheet, --png-seq, --godot-tres, --godot-tileset");
     }
+    a.image.options()?;
     if a.godot_tileset.is_some() && a.godot_root.is_none() {
         return usage("--godot-tileset needs --godot-root");
     }
@@ -330,8 +467,8 @@ fn validate(a: &ExportArgs, files: &[String]) -> Res<()> {
     if a.json.is_some() && a.sheet.is_none() {
         return usage("--json needs --sheet");
     }
-    if a.frame.is_some() && a.png.is_none() {
-        return usage("--frame needs --png");
+    if a.frame.is_some() && a.png.is_none() && a.images.is_empty() {
+        return usage("--frame needs --png (or --jpg, --bmp, --tga, --ico, --pcx, --webp)");
     }
     if (a.layout.is_some()
         || a.columns.is_some()
@@ -391,16 +528,24 @@ fn stem(path: &str) -> String {
     Path::new(path).file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned())
 }
 
-/// Reads a `.pxmt` or `.aseprite` document (detected from the content).
+/// Reads a `.pxmt` or `.aseprite` document, or an image (detected from the content).
 fn load(path: &str) -> Result<Sprite, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    pxmt::read_document(&bytes)
+    raster::read_any(&bytes, path)
 }
 
-fn convert(input: &str, output: &str) -> Result<(), String> {
+/// The image format an output name asks for (WebP, JPEG, BMP, TGA, ICO, PCX, FLC), if it is one.
+fn image_output(path: &str) -> Option<ImageFormat> {
+    ImageFormat::from_path(path).filter(|f| !matches!(f, ImageFormat::Png | ImageFormat::Gif))
+}
+
+fn convert(input: &str, output: &str, flags: &ImageFlags) -> Result<(), String> {
     let lower = output.to_ascii_lowercase();
-    if !(lower.ends_with(".pxmt") || lower.ends_with(".aseprite") || lower.ends_with(".ase")) {
-        return Err(format!("the output \"{output}\" must end in .pxmt, .aseprite or .ase"));
+    let image = image_output(output);
+    if !(lower.ends_with(".pxmt") || lower.ends_with(".aseprite") || lower.ends_with(".ase") || image.is_some()) {
+        return Err(format!(
+            "the output \"{output}\" must end in .pxmt, .aseprite, .ase, .webp, .jpg, .bmp, .tga, .ico, .pcx or .flc"
+        ));
     }
     if let (Ok(a), Ok(b)) = (std::fs::canonicalize(input), std::fs::canonicalize(output)) {
         if a == b {
@@ -408,7 +553,47 @@ fn convert(input: &str, output: &str) -> Result<(), String> {
         }
     }
     let s = load(input)?;
-    pxmt::save_file(output, &s)
+    match image {
+        Some(fmt) => {
+            let opts = flags.options().map_err(|e| e.to_string())?;
+            write_image(&s, fmt, output, &ExportOptions::default(), 1, 0, &opts, false)
+        }
+        None => pxmt::save_file(output, &s),
+    }
+}
+
+/// Writes one WebP, JPEG, BMP, TGA, ICO, PCX or FLC output (several files if `s` is split by layers or tags).
+#[allow(clippy::too_many_arguments)]
+fn write_image(
+    s: &Sprite,
+    fmt: ImageFormat,
+    path: &str,
+    o: &ExportOptions,
+    scale: usize,
+    frame: usize,
+    image: &ImageOptions,
+    verbose: bool,
+) -> Result<(), String> {
+    let format = match fmt {
+        ImageFormat::Webp => Format::Webp,
+        ImageFormat::Jpeg => Format::Jpeg,
+        ImageFormat::Bmp => Format::Bmp,
+        ImageFormat::Tga => Format::Tga,
+        ImageFormat::Ico => Format::Ico,
+        ImageFormat::Pcx => Format::Pcx,
+        _ => Format::Flc,
+    };
+    let enc = EncodeOptions {
+        scale,
+        frame,
+        sheet: Options { scale, ..Options::default() },
+        write_json: false,
+        image: *image,
+    };
+    for (file, data) in render_outputs(s, format, o, &enc, path, None)? {
+        write(&file, &data, verbose)?;
+    }
+    Ok(())
 }
 
 const DIRECTIONS: [&str; 4] = ["forward", "reverse", "pingpong", "pingpong_reverse"];
@@ -634,6 +819,7 @@ fn export_file(input: &str, a: &ExportArgs) -> Result<(), String> {
             extrude: a.sheet_extrude.unwrap_or(0),
         },
         write_json: a.json.is_some(),
+        image: Default::default(),
     };
     for (format, path) in [(Format::Png, &a.png), (Format::Gif, &a.gif), (Format::Apng, &a.apng)] {
         if let Some(path) = out(path) {
@@ -664,6 +850,13 @@ fn export_file(input: &str, a: &ExportArgs) -> Result<(), String> {
             for (path, _) in &r.files {
                 println!("wrote {}", path.display());
             }
+        }
+    }
+    if !a.images.is_empty() {
+        let image = a.image.options().map_err(|e| e.to_string())?;
+        for (fmt, path) in &a.images {
+            let path = path.replace("{name}", &name);
+            write_image(&s, *fmt, &path, &opts, scale, a.frame.unwrap_or(1) - 1, &image, a.verbose)?;
         }
     }
     if let Some(base) = out(&a.png_seq) {
@@ -701,8 +894,8 @@ fn run(cmd: Command) -> bool {
                 }
             }
         }
-        Command::Convert { input, output } => {
-            if let Err(e) = convert(&input, &output) {
+        Command::Convert { input, output, image } => {
+            if let Err(e) = convert(&input, &output, &image) {
                 fail(&input, e);
             }
         }

@@ -34,6 +34,12 @@ final class DocumentSlot: Identifiable {
     var closed = false
     /// The reference image and its placement belong to the document.
     var reference = ReferenceState()
+    /// Pixmith Live (Live.swift): the id clients know this tab by, its revision, and what it looked like when the
+    /// revision was last updated.
+    var liveID: String?
+    var liveRevision = 1
+    var liveSeen: LiveStamp?
+    var liveDocPtr: OpaquePointer?
 
     init(doc: OpaquePointer, fileURL: URL? = nil) {
         self.doc = doc
@@ -309,8 +315,9 @@ extension SpriteModel {
     // MARK: Closing
 
     /// Closes a tab, asking about unsaved changes first. Returns false if the user cancelled.
+    /// `discardChanges` closes a document with unsaved changes without asking (Live mode, after the client said so).
     @discardableResult
-    func closeTab(_ index: Int) -> Bool {
+    func closeTab(_ index: Int, discardChanges: Bool = false) -> Bool {
         guard slots.indices.contains(index) else { return false }
         let slot = slots[index]
         let previous = index == activeSlot ? nil : activeSlotObject
@@ -319,7 +326,7 @@ extension SpriteModel {
         } else if isDirty(slot) {
             activate(index)  // show the tab the question is about
         }
-        if isDirty(slot) {
+        if isDirty(slot), !discardChanges {
             guard confirmDiscard() else { return false }
         }
         guard let index = slots.firstIndex(where: { $0 === slot }) else { return false }
@@ -586,7 +593,7 @@ extension SpriteModel {
 extension SpriteModel {
     /// Opens a file as a tab without switching to it (⌘-click in Open Recent). Already open files stay as they are.
     func openInBackground(_ url: URL) {
-        guard url.pathExtension.lowercased() != "png" else { return requestOpen(url) }
+        guard url.pathExtension.lowercased() != "png", !ImageFormats.isImage(url) else { return requestOpen(url) }
         let key = url.resolvingSymlinksInPath()
         if slots.contains(where: { $0.fileURL?.resolvingSymlinksInPath() == key }) { return }
         guard let d = url.path.withCString({ pixmith_open($0) }) else {
@@ -615,7 +622,8 @@ private struct FileDropDelegate: DropDelegate {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
                 let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-                guard isFolder && ProjectStore.isProject(url) || ["pxmt", "aseprite", "ase", "png"].contains(url.pathExtension.lowercased())
+                guard isFolder && ProjectStore.isProject(url) || ["pxmt", "aseprite", "ase", "png", ExtensionLibrary.packageExtension].contains(url.pathExtension.lowercased())
+                        || ImageFormats.isImage(url)
                 else { return }
                 DispatchQueue.main.async { model.requestOpen(url) }
             }

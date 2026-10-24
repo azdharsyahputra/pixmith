@@ -23,6 +23,7 @@ struct TitleRow: View {
             ProjectSwitcher(model: model)
             TabBar(model: model)
             Spacer(minLength: DS.Space.sm)
+            LiveChip()
             ZoomControl(model: model)
             ExportButton(model: model)
         }

@@ -3,11 +3,15 @@
 mod canvas;
 mod files;
 pub(crate) mod gamedev;
+pub mod images;
 mod imports;
 mod inspector;
 mod menus;
 pub mod projects;
+mod retouch;
+pub mod script_ui;
 mod selection;
+mod spritedata;
 mod tilemap;
 mod timeline;
 mod tools;

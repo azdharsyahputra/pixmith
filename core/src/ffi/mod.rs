@@ -5,6 +5,7 @@
 //! [`document`]; each feature module exposes its own next to the Rust implementation.
 
 pub mod document;
+pub mod live;
 
 #[cfg(test)]
 mod guard_tests;

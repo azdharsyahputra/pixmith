@@ -23,6 +23,8 @@ extension Tool {
         case .text: "textformat"
         case .picker: "eyedropper"
         case .slice: "crop"
+        case .blur: "drop.halffull"
+        case .jumble: "shuffle"
         }
     }
 
@@ -48,13 +50,15 @@ extension Tool {
         case .text: "Text"
         case .picker: "Eyedropper"
         case .slice: "Slice"
+        case .blur: "Blur"
+        case .jumble: "Jumble"
         }
     }
 
     /// Toolbar groups, in order: select, paint, shapes, other.
     static let groups: [[Tool]] = [
         [.marquee, .lasso, .polygon, .wand, .move],
-        [.pencil, .eraser, .spray, .fill, .gradient],
+        [.pencil, .eraser, .spray, .blur, .jumble, .fill, .gradient],
         [.line, .rectangle, .ellipse, .curve, .shapePolygon, .contour],
         [.text, .picker, .slice],
     ]

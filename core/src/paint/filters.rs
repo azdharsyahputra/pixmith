@@ -477,7 +477,8 @@ pub fn apply(
     let mut handled: std::collections::HashSet<*const Cel> = std::collections::HashSet::new();
     for (l, f) in cells {
         // Tilemap layers are filtered through their pixels and written back to the tiles by the caller.
-        if sprite.layers.get(l).is_none_or(|ly| ly.is_group()) {
+        // Groups have no pixels; a locked reference layer is protected from filters like it is from drawing.
+        if sprite.layers.get(l).is_none_or(|ly| ly.is_group() || (ly.is_reference() && ly.is_locked())) {
             continue;
         }
         let Some(Some(cel)) = sprite.cels.get_mut(f).and_then(|row| row.get_mut(l)) else { continue };
@@ -502,6 +503,7 @@ pub fn apply(
                 pixels: result,
                 tiles: cel.tiles.clone(),
                 user_data: cel.user_data.clone(),
+                z_index: cel.z_index,
                 ..Default::default()
             });
             handled.insert(Arc::as_ptr(&new));
@@ -606,6 +608,7 @@ pub fn scale_sprite(sprite: &mut Sprite, new_w: u32, new_h: u32) -> bool {
             pixels: px,
             tiles: cel.tiles.clone(),
             user_data: cel.user_data.clone(),
+            z_index: cel.z_index,
             ..Default::default()
         });
         done.insert(key, scaled.clone());

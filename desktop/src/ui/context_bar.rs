@@ -98,7 +98,7 @@ fn ink(ui: &mut egui::Ui, o: &mut DrawOptions) {
     );
 }
 
-fn pressure(ui: &mut egui::Ui, o: &mut DrawOptions) {
+fn pressure_size(ui: &mut egui::Ui, o: &mut DrawOptions) {
     if widgets::bar_chip_with(
         ui,
         o.pressure_size,
@@ -109,6 +109,10 @@ fn pressure(ui: &mut egui::Ui, o: &mut DrawOptions) {
     {
         o.pressure_size = !o.pressure_size;
     }
+}
+
+fn pressure(ui: &mut egui::Ui, o: &mut DrawOptions) {
+    pressure_size(ui, o);
     if widgets::bar_chip_with(
         ui,
         o.pressure_alpha,
@@ -155,6 +159,26 @@ fn options(app: &mut PixmithApp, ui: &mut egui::Ui) {
                 widgets::tools_slider(ui, "spray-density", "Density", &mut o.spray_density, (5.0, 100.0), "%", 150.0);
             });
             group(ui, |ui| ink(ui, o));
+        }
+        Tool::Blur => {
+            group(ui, |ui| brush(ui, size, o));
+            group(ui, |ui| {
+                widgets::tools_slider(
+                    ui,
+                    "blur-strength",
+                    "Strength",
+                    &mut o.retouch_strength,
+                    (5.0, 100.0),
+                    "%",
+                    150.0,
+                );
+            });
+            group(ui, |ui| pressure_size(ui, o));
+        }
+        Tool::Jumble => {
+            group(ui, |ui| brush(ui, size, o));
+            group(ui, |ui| widgets::hint_label(ui, &[], "swaps nearby pixels"));
+            group(ui, |ui| pressure_size(ui, o));
         }
         Tool::Fill => group(ui, |ui| {
             if widgets::bar_text_chip(ui, "Contiguous", o.contiguous, "Off: replace every matching pixel in the cel")

@@ -107,6 +107,13 @@ pub struct TimelineState {
     frame_started: Option<f64>,
 }
 
+impl TimelineState {
+    /// A tag or layer sheet is open.
+    pub fn sheet_open(&self) -> bool {
+        self.tag_sheet.is_some() || self.layer_sheet.is_some()
+    }
+}
+
 impl Default for TimelineState {
     fn default() -> TimelineState {
         TimelineState {
@@ -140,6 +147,18 @@ impl TimelineState {
     /// Opens the layer properties sheet (Layer > Layer Properties…).
     pub fn open_layer_sheet(&mut self, tab: &DocTab, layer: u32) {
         self.layer_sheet = Some(sheets::LayerSheet::new(tab, layer));
+    }
+
+    /// Applies and closes the open layer properties sheet as its OK button does.
+    pub fn apply_layer_sheet(&mut self, tab: &mut DocTab) {
+        if let Some(sheet) = self.layer_sheet.take() {
+            sheets::apply_layer(&sheet, tab);
+        }
+    }
+
+    /// The open layer properties sheet, for tests.
+    pub fn layer_sheet_mut(&mut self) -> Option<&mut sheets::LayerSheet> {
+        self.layer_sheet.as_mut()
     }
 
     /// Opens the sheet for a new tag over the current frame (Frame > New Tag…).

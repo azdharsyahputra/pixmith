@@ -4,7 +4,7 @@
 //! the other. Swift's points map to egui's points (logical pixels).
 
 use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Spacing on a 4/8 pt grid (`DS.Space`).
 pub mod space {
@@ -103,8 +103,69 @@ fn with_alpha(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 255.0).round() as u8)
 }
 
+/// A theme's token overrides, per appearance, resolved against the built-in colors once when set so
+/// `Colors::dark()` / `light()` stay cheap.
+static THEME: RwLock<(Option<Colors>, Option<Colors>)> = RwLock::new((None, None));
+
+/// Replaces the built-in colors with a theme's (token names as in `core/src/extensions/theme.rs`, values
+/// `0xRRGGBBAA`). Tokens a theme does not mention keep their values; an appearance with an empty list is
+/// unchanged. Call `apply` afterwards so egui's visuals follow.
+pub fn set_theme_override(dark: &[(String, u32)], light: &[(String, u32)]) {
+    let resolve = |base: Colors, tokens: &[(String, u32)]| (!tokens.is_empty()).then(|| base.with_tokens(tokens));
+    *THEME.write().unwrap_or_else(|p| p.into_inner()) =
+        (resolve(Colors::builtin_dark(), dark), resolve(Colors::builtin_light(), light));
+}
+
+/// Back to the built-in look.
+pub fn clear_theme_override() {
+    set_theme_override(&[], &[]);
+}
+
 impl Colors {
+    /// These colors with theme tokens applied. A new `accent` also retints the selected fills and the accent
+    /// line, which the built-in colors derive from the accent.
+    pub fn with_tokens(mut self, tokens: &[(String, u32)]) -> Colors {
+        for (key, v) in tokens {
+            let c = rgba(*v);
+            match key.as_str() {
+                "workspace" => self.workspace = c,
+                "panel" => self.panel = c,
+                "panel2" => self.panel2 = c,
+                "recessed" => self.recessed = c,
+                "elevated" => self.elevated = c,
+                "separator" => self.separator = c,
+                "separatorSoft" => self.separator_soft = c,
+                "field" => self.field = c,
+                "hover" => self.hover = c,
+                "pressed" => self.pressed = c,
+                "accent" => {
+                    self.accent = c;
+                    self.selected = with_alpha(c, 0.18);
+                    self.selected_hover = with_alpha(c, 0.26);
+                    self.accent_line = with_alpha(c, 0.55);
+                }
+                "destructive" => self.destructive = c,
+                "guide" => self.guide = c,
+                "overlay" => self.overlay = c,
+                "canvasShadow" => self.canvas_shadow = c,
+                "text" => self.text = c,
+                "textSecondary" => self.text_secondary = c,
+                "textTertiary" => self.text_tertiary = c,
+                _ => {}
+            }
+        }
+        self
+    }
+
     pub fn dark() -> Colors {
+        THEME.read().unwrap_or_else(|p| p.into_inner()).0.unwrap_or_else(Colors::builtin_dark)
+    }
+
+    pub fn light() -> Colors {
+        THEME.read().unwrap_or_else(|p| p.into_inner()).1.unwrap_or_else(Colors::builtin_light)
+    }
+
+    pub fn builtin_dark() -> Colors {
         let accent = rgba(ACCENT_DARK);
         Colors {
             workspace: rgba(0x1B1B1DFF),
@@ -131,7 +192,7 @@ impl Colors {
         }
     }
 
-    pub fn light() -> Colors {
+    pub fn builtin_light() -> Colors {
         let accent = rgba(ACCENT_LIGHT);
         Colors {
             workspace: rgba(0xE9E9EBFF),

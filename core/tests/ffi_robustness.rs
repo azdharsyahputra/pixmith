@@ -241,6 +241,17 @@ fn point_calls(d: Doc, l: u32, f: u32, x: i32, y: i32, g: &mut Failures) {
     call!(g, ctx, shapes::pixmith_stroke_begin(d, l, f, x, y, 0xFF0000FF, 3, 0xFF));
     call!(g, ctx, shapes::pixmith_stroke_to(d, far(x1), far(y1)));
     call!(g, ctx, shapes::pixmith_stroke_end());
+    for kind in 0..3 {
+        call!(g, ctx, pixmith_core::paint::retouch::pixmith_retouch_begin(d, l, f, x, y, kind, 7, 80, 5, 3));
+        call!(g, ctx, pixmith_core::paint::retouch::pixmith_retouch_to(d, far(x1), far(y1)));
+        call!(g, ctx, pixmith_core::paint::retouch::pixmith_retouch_size(d, u32::MAX));
+        call!(g, ctx, pixmith_core::paint::retouch::pixmith_retouch_end_doc(d));
+    }
+    call!(
+        g,
+        ctx,
+        pixmith_core::paint::retouch::pixmith_retouch_begin(d, l, f, x, y, 1, u32::MAX, u32::MAX, 0, u32::MAX)
+    );
     call!(g, ctx, shapes::pixmith_spray(d, l, f, x, y, 0xFF, 20, 100, 42, 3));
     call!(g, ctx, shapes::pixmith_spray(d, l, f, x, y, 0xFF, 5000, u32::MAX, 0, 0));
     call!(g, ctx, tm::pixmith_tile_stamp(d, l, f, x, y, 1));

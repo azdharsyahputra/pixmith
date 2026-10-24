@@ -1,13 +1,17 @@
 //! The Color section and the rail's color chips (`ColorPanel.swift`).
 
 use super::InspectorState;
+use super::selectors::{self, Selector};
 use crate::app::PixmithApp;
 use crate::doc::Doc;
 use crate::theme::{Colors, font, metric, space, ui_font};
 use crate::ui::widgets::{self, NumberOpts, ds_icon_button, ds_number_field, inspector_section, rgba_color};
-use eframe::egui::{self, Color32, Id, Painter, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, pos2, vec2};
+use eframe::egui::{
+    self, Color32, Id, Painter, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, WidgetInfo, pos2, vec2,
+};
+use pixmith_core::colorpick;
 
-/// Hue (degrees), saturation, value and alpha, all but hue in 0...1 (`HSVA`).
+/// Hue (degrees), saturation, value and alpha, all but hue in 0...1 (`HSVA`). The math is `pixmith_core::colorpick`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Hsva {
     pub h: f64,
@@ -19,49 +23,59 @@ pub struct Hsva {
 impl Hsva {
     /// From `0xRRGGBBAA`. `hue` is kept when the color is gray (hue is undefined there) so dragging stays stable.
     pub fn from_rgba(rgba: u32, hue: Option<f64>) -> Hsva {
-        let r = ((rgba >> 24) & 0xFF) as f64 / 255.0;
-        let g = ((rgba >> 16) & 0xFF) as f64 / 255.0;
-        let b = ((rgba >> 8) & 0xFF) as f64 / 255.0;
-        let a = (rgba & 0xFF) as f64 / 255.0;
-        let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
-        let d = mx - mn;
-        let v = mx;
-        let s = if mx == 0.0 { 0.0 } else { d / mx };
-        let mut h = if d == 0.0 {
-            hue.unwrap_or(0.0)
-        } else if mx == r {
-            60.0 * (((g - b) / d) % 6.0)
-        } else if mx == g {
-            60.0 * ((b - r) / d + 2.0)
-        } else {
-            60.0 * ((r - g) / d + 4.0)
-        };
-        if h < 0.0 {
-            h += 360.0;
-        }
-        if (s == 0.0 || v == 0.0)
-            && let Some(hue) = hue
-        {
-            h = hue;
-        }
+        Hsva::from_rgba_hint(rgba, hue.map(|h| (h, 0.0)))
+    }
+
+    /// Like [`Hsva::from_rgba`], with a `(hue, saturation)` hint for what black and gray leave undefined.
+    pub fn from_rgba_hint(rgba: u32, hint: Option<(f64, f64)>) -> Hsva {
+        let (rgb, a) = colorpick::unpack(rgba);
+        let [h, s, v] = colorpick::rgb_to_hsv(rgb, hint);
         Hsva { h, s, v, a }
     }
 
     pub fn rgba(&self) -> u32 {
-        let c = self.v * self.s;
-        let hp = (self.h % 360.0) / 60.0;
-        let x = c * (1.0 - ((hp % 2.0) - 1.0).abs());
-        let (r1, g1, b1) = match hp as i32 {
-            0 => (c, x, 0.0),
-            1 => (x, c, 0.0),
-            2 => (0.0, c, x),
-            3 => (0.0, x, c),
-            4 => (x, 0.0, c),
-            _ => (c, 0.0, x),
-        };
-        let m = self.v - c;
-        let byte = |f: f64| (f * 255.0).round().clamp(0.0, 255.0) as u32;
-        byte(r1 + m) << 24 | byte(g1 + m) << 16 | byte(b1 + m) << 8 | byte(self.a)
+        colorpick::pack(colorpick::hsv_to_rgb([self.h, self.s, self.v]), self.a)
+    }
+}
+
+/// The edited color in every space the selectors use. `hsva` always matches the `0xRRGGBBAA` value; `hsl` is kept
+/// beside it so an HSL slider holds its value (an RGB round trip would nudge it) and gray keeps its hue.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spaces {
+    pub hsva: Hsva,
+    /// Hue (degrees), saturation and lightness (0...1).
+    pub hsl: [f64; 3],
+}
+
+impl Spaces {
+    pub fn rgba(&self) -> u32 {
+        self.hsva.rgba()
+    }
+
+    /// Follows a color that was changed elsewhere (palette, eyedropper, typed hex), keeping hue and saturation where
+    /// the new color leaves them undefined.
+    pub fn set_rgba(&mut self, rgba: u32) {
+        let (rgb, a) = colorpick::unpack(rgba);
+        self.hsva = Hsva::from_rgba_hint(rgba, Some((self.hsva.h, self.hsva.s)));
+        self.hsl = colorpick::rgb_to_hsl(rgb, Some((self.hsl[0], self.hsl[1])));
+        self.hsva.a = a;
+    }
+
+    pub fn set_hsv(&mut self, h: f64, s: f64, v: f64) {
+        self.hsva = Hsva { h, s, v, a: self.hsva.a };
+        let rgb = colorpick::unpack(self.hsva.rgba()).0;
+        self.hsl = colorpick::rgb_to_hsl(rgb, Some((h, self.hsl[1])));
+    }
+
+    pub fn set_hsl(&mut self, h: f64, s: f64, l: f64) {
+        self.hsl = [h, s, l];
+        let a = self.hsva.a;
+        let rgba = colorpick::pack(colorpick::hsl_to_rgb([h, s, l]), a);
+        self.hsva = Hsva::from_rgba_hint(rgba, Some((h, self.hsva.s)));
+    }
+
+    pub fn set_alpha(&mut self, a: f64) {
+        self.hsva.a = a;
     }
 }
 
@@ -83,9 +97,11 @@ fn parse_hex(text: &str, alpha: f64) -> Option<u32> {
 }
 
 /// Saturation (x) and value (y) of the current hue (`SVPlane`). Returns true if the user changed them.
-fn sv_plane(ui: &mut Ui, hsva: &mut Hsva) -> bool {
+fn sv_plane(ui: &mut Ui, sp: &mut Spaces) -> bool {
+    let hsva = sp.hsva;
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 96.0), Sense::click_and_drag());
-    let base = rgba_color(Hsva { s: 1.0, v: 1.0, a: 1.0, ..*hsva }.rgba());
+    response.widget_info(|| WidgetInfo::labeled(egui::WidgetType::Button, true, "Saturation and value"));
+    let base = rgba_color(Hsva { s: 1.0, v: 1.0, a: 1.0, ..hsva }.rgba());
     let radius = crate::theme::radius::CONTROL as f32;
     let painter = ui.painter();
     widgets::draw_gradient(painter, rect, radius, 48, 24, |p| {
@@ -106,15 +122,23 @@ fn sv_plane(ui: &mut Ui, hsva: &mut Hsva) -> bool {
         let s = (((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0)) as f64;
         let v = 1.0 - (((p.y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0)) as f64;
         changed = s != hsva.s || v != hsva.v;
-        hsva.s = s;
-        hsva.v = v;
+        if changed {
+            sp.set_hsv(hsva.h, s, v);
+        }
     }
     changed
 }
 
 /// A horizontal track with a draggable thumb; `paint` draws the track (`TrackSlider`).
-fn track_slider(ui: &mut Ui, value: &mut f64, range: (f64, f64), paint: impl FnOnce(&Painter, Rect)) -> bool {
+pub(super) fn track_slider(
+    ui: &mut Ui,
+    name: &str,
+    value: &mut f64,
+    range: (f64, f64),
+    paint: impl FnOnce(&Painter, Rect),
+) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::click_and_drag());
+    response.widget_info(|| WidgetInfo::slider(true, *value, name));
     let painter = ui.painter();
     paint(painter, rect);
     let f = ((*value - range.0) / (range.1 - range.0)).clamp(0.0, 1.0) as f32;
@@ -146,22 +170,132 @@ fn target_button(ui: &mut Ui, name: &str, rgba: u32, selected: bool) -> bool {
     response.on_hover_text(format!("Edit the {name} color")).clicked()
 }
 
-/// The Color section: saturation-value plane, hue and alpha sliders, hex, alpha and HSV fields. Edits the
-/// primary or the secondary color, whichever is selected in the header (or on the tool rail).
+/// The hex field with a swatch of the color, and optionally an alpha field. Returns whether alpha changed and the
+/// color typed into the hex field on commit.
+fn hex_row(ui: &mut Ui, st_hex: &mut String, current: u32, sp: &mut Spaces, with_alpha: bool) -> (bool, Option<u32>) {
+    let c = Colors::of(ui.ctx());
+    let hex_id = Id::new("inspector_hex");
+    let mut changed = false;
+    let mut typed = None;
+    ui.spacing_mut().item_spacing.x = 6.0;
+    ui.horizontal(|ui| {
+        let w = if with_alpha { ui.available_width() - 6.0 - 70.0 } else { ui.available_width() };
+        let (rect, _) = ui.allocate_exact_size(vec2(w, metric::CONTROL), Sense::hover());
+        let focused = ui.memory(|m| m.has_focus(hex_id));
+        ui.painter().rect_filled(rect, crate::theme::radius::FIELD, c.field);
+        if focused {
+            ui.painter().rect_stroke(
+                rect,
+                crate::theme::radius::FIELD,
+                Stroke::new(1.5, c.accent_line),
+                StrokeKind::Middle,
+            );
+        }
+        let chip = Rect::from_center_size(pos2(rect.left() + space::SM + 6.0, rect.center().y), vec2(12.0, 12.0));
+        widgets::paint_swatch(ui.painter(), chip, current, 3.0, 2.4);
+        let text_rect =
+            Rect::from_min_max(pos2(chip.right() + 6.0, rect.top()), pos2(rect.right() - space::SM, rect.bottom()));
+        let edit = TextEdit::singleline(st_hex)
+            .id(hex_id)
+            .font(ui_font(font::BODY))
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .vertical_align(egui::Align::Center)
+            .desired_width(text_rect.width());
+        let r = widgets::put_in(ui, text_rect, edit).on_hover_text("Hex color: RRGGBB");
+        if r.lost_focus() {
+            match parse_hex(st_hex, sp.hsva.a) {
+                Some(rgba) => {
+                    sp.set_rgba(rgba);
+                    typed = Some(sp.rgba());
+                }
+                None => *st_hex = hex_string(current),
+            }
+        }
+        if with_alpha {
+            let opts = NumberOpts {
+                step: 0.5,
+                unit: "%",
+                width: Some(70.0),
+                help: "Alpha. Drag the label to scrub.",
+                ..Default::default()
+            };
+            let mut a = sp.hsva.a * 100.0;
+            if ds_number_field(ui, "color_a", "A", &mut a, &opts).changed {
+                sp.set_alpha(a / 100.0);
+                changed = true;
+            }
+        }
+    });
+    (changed, typed)
+}
+
+/// Paints the alpha track: a checkerboard under the color from transparent to opaque.
+pub(super) fn paint_alpha_track(p: &Painter, rect: Rect, rgb: [f64; 3]) {
+    widgets::draw_checker(p, rect, 4.0, 7.0);
+    widgets::draw_gradient(p, rect, 7.0, 36, 1, |pos| {
+        let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+        rgba_color(colorpick::pack(rgb, t))
+    });
+}
+
+/// The alpha slider of the selectors that have no alpha row.
+fn alpha_slider(ui: &mut Ui, sp: &mut Spaces) -> bool {
+    let rgb = colorpick::unpack(sp.rgba()).0;
+    let mut a = sp.hsva.a;
+    let changed = track_slider(ui, "Alpha", &mut a, (0.0, 1.0), |p, rect| paint_alpha_track(p, rect, rgb));
+    if changed {
+        sp.set_alpha(a);
+    }
+    changed
+}
+
+/// The Spectrum selector's H, S and V fields.
+fn hsv_fields(ui: &mut Ui, sp: &mut Spaces) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let w = (ui.available_width() - 12.0) / 3.0;
+        let Hsva { h, s, v, .. } = sp.hsva;
+        let mut hh = h;
+        let hue = NumberOpts { range: (0.0, 359.0), unit: "°", width: Some(w), help: "Hue", ..Default::default() };
+        if ds_number_field(ui, "color_h", "H", &mut hh, &hue).changed {
+            sp.set_hsv(hh, s, v);
+            changed = true;
+        }
+        let pct = |help| NumberOpts { step: 0.5, unit: "%", width: Some(w), help, ..Default::default() };
+        let mut ss = s * 100.0;
+        if ds_number_field(ui, "color_s", "S", &mut ss, &pct("Saturation")).changed {
+            sp.set_hsv(h, ss / 100.0, v);
+            changed = true;
+        }
+        let mut vv = v * 100.0;
+        if ds_number_field(ui, "color_v", "V", &mut vv, &pct("Value")).changed {
+            sp.set_hsv(h, s, vv / 100.0);
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// The Color section: a selector menu in the header (Spectrum, Wheel, RGB, HSV and HSL sliders, Gray, Normal
+/// map), the picked selector, and the hex field. Edits the primary or the secondary color, whichever is selected
+/// in the header (or on the tool rail).
 pub fn section(ui: &mut Ui, st: &mut InspectorState, primary: &mut u32, secondary: &mut u32, doc: &Doc) {
     let hex_id = Id::new("inspector_hex");
     let hex_focused = ui.memory(|m| m.has_focus(hex_id));
     let current = if st.secondary { *secondary } else { *primary };
     // `pull`: follow changes made elsewhere (palette, eyedropper, swap, rail).
-    if current != st.hsva.rgba() {
-        st.hsva = Hsva::from_rgba(current, Some(st.hsva.h));
+    if current != st.spaces.rgba() {
+        st.spaces.set_rgba(current);
     }
     if !hex_focused {
         st.hex = hex_string(current);
     }
 
     let (secondary_target, prim, sec) = (st.secondary, *primary, *secondary);
+    let selector = st.picker.selector;
     let mut new_target = None;
+    let mut new_selector = None;
     let mut new_color: Option<u32> = None;
     inspector_section(
         ui,
@@ -176,118 +310,81 @@ pub fn section(ui: &mut Ui, st: &mut InspectorState, primary: &mut u32, secondar
             if target_button(ui, "primary", prim, !secondary_target) {
                 new_target = Some(false);
             }
+            new_selector = selectors::selector_menu(ui, selector);
         },
         |ui| {
-            let c = Colors::of(ui.ctx());
             ui.spacing_mut().item_spacing.y = space::SM;
-            let hsva = &mut st.hsva;
-            let mut changed = sv_plane(ui, hsva);
-
-            let hue_color = |h: f64| rgba_color(Hsva { h, s: 1.0, v: 1.0, a: 1.0 }.rgba());
-            changed |= track_slider(ui, &mut hsva.h, (0.0, 360.0), |p, rect| {
-                widgets::draw_gradient(p, rect, 7.0, 36, 1, |pos| {
-                    hue_color(((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * 360.0)
-                });
-            });
-            let (h, s, v) = (hsva.h, hsva.s, hsva.v);
-            changed |= track_slider(ui, &mut hsva.a, (0.0, 1.0), |p, rect| {
-                widgets::draw_checker(p, rect, 4.0, 7.0);
-                widgets::draw_gradient(p, rect, 7.0, 36, 1, |pos| {
-                    let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
-                    rgba_color(Hsva { h, s, v, a: t }.rgba())
-                });
-            });
-
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.horizontal(|ui| {
-                // Hex field with a swatch of the current color.
-                let w = ui.available_width() - 6.0 - 70.0;
-                let (rect, _) = ui.allocate_exact_size(vec2(w, metric::CONTROL), Sense::hover());
-                let focused = ui.memory(|m| m.has_focus(hex_id));
-                ui.painter().rect_filled(rect, crate::theme::radius::FIELD, c.field);
-                if focused {
-                    ui.painter().rect_stroke(
-                        rect,
-                        crate::theme::radius::FIELD,
-                        Stroke::new(1.5, c.accent_line),
-                        StrokeKind::Middle,
-                    );
-                }
-                let chip =
-                    Rect::from_center_size(pos2(rect.left() + space::SM + 6.0, rect.center().y), vec2(12.0, 12.0));
-                widgets::paint_swatch(ui.painter(), chip, current, 3.0, 2.4);
-                let text_rect = Rect::from_min_max(
-                    pos2(chip.right() + 6.0, rect.top()),
-                    pos2(rect.right() - space::SM, rect.bottom()),
-                );
-                let edit = TextEdit::singleline(&mut st.hex)
-                    .id(hex_id)
-                    .font(ui_font(font::BODY))
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::ZERO)
-                    .vertical_align(egui::Align::Center)
-                    .desired_width(text_rect.width());
-                let r = widgets::put_in(ui, text_rect, edit).on_hover_text("Hex color: RRGGBB");
-                if r.lost_focus() {
-                    match parse_hex(&st.hex, st.hsva.a) {
-                        Some(rgba) => {
-                            st.hsva = Hsva::from_rgba(rgba, Some(st.hsva.h));
-                            new_color = Some(st.hsva.rgba());
-                        }
-                        None => st.hex = hex_string(current),
+            let sp = &mut st.spaces;
+            let mut changed = false;
+            let mut alpha_field = true;
+            match selector {
+                Selector::Spectrum => {
+                    changed |= sv_plane(ui, sp);
+                    let hsva = sp.hsva;
+                    let hue_color = |h: f64| rgba_color(colorpick::pack(colorpick::hsv_to_rgb([h, 1.0, 1.0]), 1.0));
+                    let mut h = hsva.h;
+                    if track_slider(ui, "Hue", &mut h, (0.0, 360.0), |p, rect| {
+                        widgets::draw_gradient(p, rect, 7.0, 36, 1, |pos| {
+                            hue_color(((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * 360.0)
+                        });
+                    }) {
+                        sp.set_hsv(h, hsva.s, hsva.v);
+                        changed = true;
                     }
+                    changed |= alpha_slider(ui, sp);
                 }
-                let hsva = &mut st.hsva;
-                let opts = NumberOpts {
-                    step: 0.5,
-                    unit: "%",
-                    width: Some(70.0),
-                    help: "Alpha. Drag the label to scrub.",
-                    ..Default::default()
-                };
-                let mut a = hsva.a * 100.0;
-                if ds_number_field(ui, "color_a", "A", &mut a, &opts).changed {
-                    hsva.a = a / 100.0;
-                    changed = true;
+                Selector::Wheel => {
+                    changed |= selectors::wheel(ui, &mut st.picker, sp);
+                    changed |= alpha_slider(ui, sp);
                 }
-            });
-            ui.horizontal(|ui| {
-                let hsva = &mut st.hsva;
-                let w = (ui.available_width() - 12.0) / 3.0;
-                let mut h = hsva.h;
-                let hue =
-                    NumberOpts { range: (0.0, 359.0), unit: "°", width: Some(w), help: "Hue", ..Default::default() };
-                if ds_number_field(ui, "color_h", "H", &mut h, &hue).changed {
-                    hsva.h = h;
-                    changed = true;
+                Selector::Normal => {
+                    changed |= selectors::normal_disc(ui, &mut st.picker, sp);
+                    changed |= alpha_slider(ui, sp);
                 }
-                let pct = |help| NumberOpts { step: 0.5, unit: "%", width: Some(w), help, ..Default::default() };
-                let mut s = hsva.s * 100.0;
-                if ds_number_field(ui, "color_s", "S", &mut s, &pct("Saturation")).changed {
-                    hsva.s = s / 100.0;
-                    changed = true;
+                Selector::Rgb => {
+                    changed |= selectors::rgb_sliders(ui, sp);
+                    alpha_field = false;
                 }
-                let mut v = hsva.v * 100.0;
-                if ds_number_field(ui, "color_v", "V", &mut v, &pct("Value")).changed {
-                    hsva.v = v / 100.0;
-                    changed = true;
+                Selector::Hsv => {
+                    changed |= selectors::hsv_sliders(ui, sp);
+                    alpha_field = false;
                 }
-            });
+                Selector::Hsl => {
+                    changed |= selectors::hsl_sliders(ui, sp);
+                    alpha_field = false;
+                }
+                Selector::Gray => {
+                    changed |= selectors::gray_slider(ui, sp);
+                    alpha_field = false;
+                }
+            }
+            let (alpha_changed, typed) = hex_row(ui, &mut st.hex, current, sp, alpha_field);
+            changed |= alpha_changed;
+            if selector == Selector::Spectrum {
+                changed |= hsv_fields(ui, sp);
+            }
             if changed {
-                new_color = Some(st.hsva.rgba());
+                new_color = Some(sp.rgba());
+            }
+            if typed.is_some() {
+                new_color = typed;
             }
         },
     );
     if let Some(secondary_target) = new_target {
         st.secondary = secondary_target;
     }
+    if let Some(s) = new_selector {
+        st.picker.selector = s;
+    }
     if let Some(rgba) = new_color {
-        if st.secondary {
-            *secondary = rgba;
-        } else {
-            *primary = doc.snap_color(rgba);
+        // Only a real change repaints: a held pointer on a snapping or quantizing control re-sends the same color.
+        let target = if st.secondary { &mut *secondary } else { &mut *primary };
+        let rgba = if st.secondary { rgba } else { doc.snap_color(rgba) };
+        if *target != rgba {
+            *target = rgba;
+            ui.ctx().request_repaint();
         }
-        ui.ctx().request_repaint();
     }
 }
 

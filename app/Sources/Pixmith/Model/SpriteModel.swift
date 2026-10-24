@@ -13,6 +13,7 @@ enum Tool: String, CaseIterable {
     case slice
     case curve, contour, text
     case shapePolygon = "polygon (draw)"
+    case blur, jumble
 
     var icon: String {
         switch self {
@@ -35,6 +36,8 @@ enum Tool: String, CaseIterable {
         case .contour: "scribble"
         case .shapePolygon: "hexagon"
         case .text: "textformat"
+        case .blur: "drop.halffull"
+        case .jumble: "shuffle"
         }
     }
 }
@@ -209,13 +212,13 @@ final class SpriteModel: ObservableObject {
     func undo() {
         guard !MainWindow.hasSheet else { return }
         opts.shape = nil
-        if pixmith_undo(doc) { clampSelection(); revision &+= 1 }
+        if pixmith_undo(doc) { clampSelection(); ScriptSessions.shared.fromUndo = true; revision &+= 1 }
     }
 
     func redo() {
         guard !MainWindow.hasSheet else { return }
         opts.shape = nil
-        if pixmith_redo(doc) { clampSelection(); revision &+= 1 }
+        if pixmith_redo(doc) { clampSelection(); ScriptSessions.shared.fromUndo = true; revision &+= 1 }
     }
 
     func step(_ delta: Int) {
@@ -279,17 +282,20 @@ final class SpriteModel: ObservableObject {
 
     func open() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = Self.documentTypes + [.png]
+        panel.allowedContentTypes = Self.documentTypes + [.png] + ImageFormats.openTypes
         if panel.runModal() == .OK, let url = panel.url { open(url) }
     }
 
     func open(_ url: URL) {
+        // An extension package installs instead of opening.
+        if ExtensionLibrary.isPackage(url) { ExtensionLibrary.shared.install(url); return }
         // A project folder opens as a project (Finder, the Dock and drag and drop can hand us one).
         if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
             AppRoute.shared.openProject(url)
             return
         }
         if url.pathExtension.lowercased() == "png" { return importPNG(url) }
+        if ImageFormats.isImage(url) { return importImage(url) }
         let key = url.resolvingSymlinksInPath()
         if let i = slots.firstIndex(where: { $0.fileURL?.resolvingSymlinksInPath() == key }) {
             AppRoute.shared.enterEditor()
@@ -348,20 +354,22 @@ final class SpriteModel: ObservableObject {
     }
 
     private func write(to url: URL) {
+        if let message = writeChecked(to: url) { errorMessage = message }
+    }
+
+    /// Saves the active document to `url`. Returns why it failed, if it did; nothing is shown.
+    func writeChecked(to url: URL) -> String? {
         let key = url.resolvingSymlinksInPath()
         if let other = slots.first(where: { $0 !== activeSlotObject && $0.fileURL?.resolvingSymlinksInPath() == key }) {
-            errorMessage = "“\(name(of: other))” is already open in another tab. Close that tab first."
-            return
+            return "“\(name(of: other))” is already open in another tab. Close that tab first."
         }
         finishShape()  // an open polygon or curve is part of the document being saved
-        if url.path.withCString({ pixmith_save(doc, $0) }) {
-            fileURL = url
-            pixmith_mark_saved(doc)
-            savedRevision = revision
-            Autosaver.shared.discard()
-        } else {
-            errorMessage = lastError
-        }
+        guard url.path.withCString({ pixmith_save(doc, $0) }) else { return lastError }
+        fileURL = url
+        pixmith_mark_saved(doc)
+        savedRevision = revision
+        Autosaver.shared.discard()
+        return nil
     }
 
     func exportPNG(sheet: Bool) {

@@ -46,21 +46,33 @@ extension SpriteModel {
 }
 
 private let formatNames = ["PNG (one frame)", "Animated GIF", "Animated PNG", "Sprite sheet", "PNG sequence"]
-private let formatExtensions = ["png", "gif", "png", "png", "png"]
+    + ImageFormats.exportFormats.map(\.title)
+private let formatExtensions = ["png", "gif", "png", "png", "png"] + ImageFormats.exportFormats.map(\.ext)
 
 struct ExportOptionsSheet: View {
     @ObservedObject var model: SpriteModel
     let dismiss: () -> Void
     @State private var s: ExportSettings
+    @State private var img: ImageExportOptions
     @State private var jobs = 1
 
-    init(model: SpriteModel, dismiss: @escaping () -> Void) {
+    init(model: SpriteModel, dismiss: @escaping () -> Void, initialFormat: Int? = nil) {
         self.model = model
         self.dismiss = dismiss
         var settings = ExportSettings.load(for: model.fileURL)
         if settings.tag >= model.tagCount { settings.tag = -1 }
         if settings.outputPath.isEmpty { settings.outputPath = Self.defaultPath(model, settings.format) }
+        if let f = initialFormat, f != settings.format, formatNames.indices.contains(f) {
+            // Keep the folder and name of the last export, switch the extension.
+            settings.format = f
+            var base = URL(fileURLWithPath: settings.outputPath).deletingPathExtension()
+            if base.lastPathComponent.hasSuffix("-sheet") {
+                base = base.deletingLastPathComponent().appendingPathComponent(String(base.lastPathComponent.dropLast(6)))
+            }
+            settings.outputPath = base.appendingPathExtension(formatExtensions[f]).path
+        }
         _s = State(initialValue: settings)
+        _img = State(initialValue: ImageExportOptions.load(for: model.fileURL))
     }
 
     private static func defaultPath(_ m: SpriteModel, _ format: Int) -> String {
@@ -72,7 +84,7 @@ struct ExportOptionsSheet: View {
         return dir.appendingPathComponent("\(base)\(suffix).\(formatExtensions[format])").path
     }
 
-    private var animated: Bool { s.format == 1 || s.format == 2 }
+    private var animated: Bool { s.format == 1 || s.format == 2 || s.format == 11 || (s.format == 5 && img.animated) }
 
     private let labelWidth: CGFloat = 84
 
@@ -150,6 +162,7 @@ struct ExportOptionsSheet: View {
                 }
                 check("Write JSON metadata", $s.writeJSON)
             }
+            ImageFormatOptions(format: s.format, o: $img, labelWidth: labelWidth)
             Rectangle().fill(DSColor.separatorSoft).frame(height: 1)
             DSFormRow(label: s.format == 4 ? "Base name" : "File", labelWidth: labelWidth) {
                 TextField(s.format == 4 ? "Base name" : "File", text: $s.outputPath).dsTextField()
@@ -164,6 +177,7 @@ struct ExportOptionsSheet: View {
     private var summary: String {
         if jobs < 1 { return "These options cannot be exported." }
         if s.format == 4 { return jobs == 1 ? "Writes name-001.png, name-002.png, …" : "Writes \(jobs) numbered sequences." }
+        if s.format >= 5 && !animated { return jobs == 1 ? "Writes frame \(model.frame + 1) as one file." : "Writes frame \(model.frame + 1) of \(jobs) outputs, with the layer or tag name added to each file name." }
         return jobs == 1 ? "Writes one file." : "Writes \(jobs) files, with the layer or tag name added to each file name."
     }
 
@@ -197,7 +211,7 @@ struct ExportOptionsSheet: View {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = URL(fileURLWithPath: s.outputPath).lastPathComponent
         panel.directoryURL = URL(fileURLWithPath: s.outputPath).deletingLastPathComponent()
-        panel.allowedContentTypes = [s.format == 1 ? .gif : .png]
+        panel.allowedContentTypes = [UTType(filenameExtension: formatExtensions[s.format]) ?? .png]
         if panel.runModal() == .OK, let url = panel.url { s.outputPath = url.path }
     }
 
@@ -205,8 +219,9 @@ struct ExportOptionsSheet: View {
         var o = options()
         // The sequence format wants a base name; the field shows a file name for convenience.
         let path = s.format == 4 ? URL(fileURLWithPath: s.outputPath).deletingPathExtension().path : s.outputPath
-        let n = path.withCString { pixmith_export_run(model.doc, &o, $0) }
+        let n = path.withCString { p in img.json.withCString { pixmith_export_run_ex(model.doc, &o, $0, p) } }
         s.save(for: model.fileURL)
+        img.save(for: model.fileURL)
         if n < 0 {
             model.errorMessage = String(cString: pixmith_last_error())
         } else {

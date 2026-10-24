@@ -37,7 +37,9 @@ The two apps are meant to be indistinguishable apart from the platform's native 
 | `render/` | Partial rendering for viewers (`view.rs`) and dirty-region tracking (`dirty.rs`). |
 | `paint/` | Tools that change pixels: shapes, ink, curves, font, filters, transform, selection. |
 | `palette/` | Palette editing, built-in presets, palette files. |
+| `colorpick.rs` | Color-picker math for the inspector's selectors: HSV/HSL conversions, color-wheel geometry and bitmaps, harmony hues, tangent-space normal encoding. Pure functions; C ABI `pixmith_cp_*` in `pixmith_colorpick.h`, called directly by the egui app. |
 | `formats/` | `.pxmt`, `.aseprite`, PNG, GIF, APNG, sprite sheets, JSON, export planning, durable file writes. |
+| `extensions/` | `.pixmith-extension` packages (scripts, palettes, themes): a strict zip reader, manifest and theme parsing, install, list, enable and uninstall into `<app data>/Extensions/` (see [`EXTENSIONS.md`](EXTENSIONS.md)). |
 | `project.rs` | Project folders of canvases (`.pxmt` plus a `.pixmith` folder) and their C ABI. |
 | `gamedev/` | Auto-tiling, tweening, the Godot 4 exporter. |
 | `ffi/` | The C ABI plumbing and the document-level entry points. |
@@ -49,6 +51,7 @@ The two apps are meant to be indistinguishable apart from the platform's native 
 - `Editor` wraps a `Sprite` with the undo and redo stacks of whole-sprite snapshots. `checkpoint()` must be called once before any change that should be undoable. It also carries the selection state (`paint/selection.rs`), the saved-state tracker (`history/mod.rs`), a label per undo step and a transaction counter: inside `begin_transaction` / `end_transaction` only the first checkpoint is recorded, so a multi-part operation undoes as one step.
 - `Sprite` also holds the tilesets, the color mode and transparent index, linked-cel bookkeeping, and `extra` (the sprite's user data and its slices).
 - `history/mod.rs`: gives every document state an id parallel to the undo and redo stacks. "Modified" means the current id differs from the id recorded at the last save, so undoing back to the saved state is clean. Edits that skip the undo stack call `pixmith_touch`. Its C ABI also exposes transactions, step labels and the history list (`pixmith_history_*`) used by the History panel.
+- `document/spritedata.rs`: the color profile (`ColorProfile`: none, sRGB or an embedded ICC profile, kept as read and written back by `ase.rs`, never applied to pixels), cel z-indexes (`Cel::z_index`, applied by `layers::drawing_order`) and reference layers (layer flag 0x40; excluded from `Sprite::render` and so from every export, drawn only by `pixmith_render` / `pixmith_render_rect` at `Editor::reference_display` percent; a locked one refuses `cel_mut`), with their C ABI (`pixmith_spritedata.h`).
 - `document/slices.rs`: slices (bounds per frame, 9-patch center, pivot) and user data (text, color, raw property bytes) with their .aseprite chunks.
 
 ### File formats
@@ -74,6 +77,7 @@ The two apps are meant to be indistinguishable apart from the platform's native 
 
 - `paint/selection.rs`: selection mask (marquee, wand, lasso, polygon, set operations, modify), selection-aware drawing, move and transform, clipboard and floating paste, crop and canvas resize.
 - `paint/shapes.rs`: pencil strokes with pixel-perfect mode and pen pressure, line, rectangle, ellipse, spray, flood fill, mirroring. The painter it defines is shared by the tools below, so ink modes, brushes and symmetry apply to them as well.
+- `paint/retouch.rs`: the Blur and Jumble brush tools (`pixmith_retouch_begin/to/size/end_doc`, declared in `pixmith_shapes.h`): a stroke of dabs that average (alpha-weighted 3x3, mixed by strength) or randomly swap the pixels under the global brush, with mirroring, selection clipping and a seeded RNG.
 - `paint/curves.rs`: Bezier curves and polygons, outline or filled.
 - `paint/font.rs`: the built-in 5x8 bitmap font and text stamping.
 - `paint/transform.rs`: free transform sessions (scale, rotate, skew, move with a live preview, RotSprite-style resampling).
@@ -95,7 +99,11 @@ Every feature module exposes its functions as `#[no_mangle] pub unsafe extern "C
 - File writes go through `formats/durable.rs`: a temporary file in the same directory, `fsync` of the file and then of the directory, an atomic rename, the original's permissions kept, symbolic links written through, and stale `*.pixmith-tmp` files cleaned up. A failed or interrupted save leaves the original untouched.
 - The release profile unwinds on panic, and every entry point body runs inside `crate::ffi::guarded(name, doc, || ...)` (inserted mechanically; a test fails if one is missing). A panic returns false/0/NULL, sets `pixmith_last_error()` to "internal error: ...", rewinds the document to its last undo step (the undone work stays on the redo stack) and bumps `pixmith_panic_count()`; `pixmith_last_panic()` describes it so the app can warn the user and offer to save a copy (`pixmith_safety.h`).
 
-Each module's declarations live in a header under `app/Sources/PixmithCore/` (`pixmith.h` for `ffi/document.rs`, `pixmith_selection.h`, `pixmith_shapes.h`, `pixmith_ink.h`, `pixmith_layers.h`, `pixmith_filters.h`, `pixmith_curves.h`, `pixmith_transform.h`, `pixmith_tilemap.h`, `pixmith_colormode.h`, `pixmith_palette_edit.h`, `pixmith_slices.h`, `pixmith_io.h` for import and export, `pixmith_history.h`, `pixmith_project.h` for `.pxmt` saving, thumbnails and projects). `module.modulemap` lists them and links `pixmith_core`, so Swift sees them as `import PixmithCore`.
+Each module's declarations live in a header under `app/Sources/PixmithCore/` (`pixmith.h` for `ffi/document.rs`, `pixmith_selection.h`, `pixmith_shapes.h`, `pixmith_ink.h`, `pixmith_layers.h`, `pixmith_filters.h`, `pixmith_curves.h`, `pixmith_transform.h`, `pixmith_tilemap.h`, `pixmith_colormode.h`, `pixmith_colorpick.h` (pure color-picker math, no document), `pixmith_palette_edit.h`, `pixmith_slices.h`, `pixmith_io.h` for import and export, `pixmith_history.h`, `pixmith_project.h` for `.pxmt` saving, thumbnails and projects). `module.modulemap` lists them and links `pixmith_core`, so Swift sees them as `import PixmithCore`.
+
+### Live mode
+
+`ffi/live.rs` is the core's half of Pixmith Live (`docs/LIVE_PROTOCOL.md`): `pixmith_encode_document` gives a document as `.pxmt` bytes, `pixmith_apply_document` (and `pixmith_apply_document_selection`) swaps decoded `.pxmt` or `.aseprite` bytes in as one labelled undo step through the ordinary `checkpoint` and `label_last`, validating before it touches anything, so bad bytes leave the document as it was. `pixmith_live_selection` and `pixmith_state_id` let a front end report the selection and notice that a document changed. The network side belongs to each front end: `desktop/src/live/` (a `TcpListener` and one thread per connection) and `app/Sources/Pixmith/App/Live.swift` (BSD sockets, same structure). Both hand every request after `hello` to the UI thread, which answers it between frames, so documents are still only touched by their owning thread (see Threading below). Each document tab has a stable id and a revision that goes up whenever it changes (the tab's own revision counter combined with `pixmith_state_id`, so a change that forgot to bump the counter is still seen); `documents.apply` is refused with a stale-revision error when the client's base revision is not the current one.
 
 ### Threading
 
@@ -125,6 +133,7 @@ Sources are grouped by area; `Sources/PixmithMain/PixmithApp.swift` is the `@mai
 | `Tools/` | `ToolsPanel`, `TopBar`, `DrawingTools`, `InkTools` | The tool rail, the context bar with the active tool's options, colors, ink modes and brushes, the Drawing menu. |
 | `Panels/` | `Inspector`, `ColorPanel`, `PaletteEditor`, `Timeline`, `TagsView`, `LayerTools`, `LayerDrag`, `HistoryPanel`, `TilemapView`, `AutotileView`, `TweenView`, `PreviewWindow`, `ViewOptionsWindow` | Inspector sections (Color, Palette, Layer, Cel, Tileset, Slices, Sprite), the timeline (layers column, cel grid, tags), layer dialogs and drag reordering, the History panel, tilemap and terrain (auto-tile) editing, the tween panel with dope sheet and Bezier editor, the preview and view options windows. |
 | `Dialogs/` | `ExportOptionsSheet`, `GodotExport`, `GodotTilesetExport`, `ColorModeView`, `FiltersView`, `CurvesEditor`, `ProgressSheet` | File > Export…, Godot SpriteFrames and TileSet export, color mode, FX sheets and the curves editor, `Background.run` (work off the main thread behind a progress sheet). |
+| `App/Live.swift` | `LiveServer`, `LiveHandler`, `LiveChip` | Pixmith Live: the loopback server, the main-thread request handler, discovery file and the "AI connected" chip. |
 | `DesignSystem/` | `DesignSystem` | Design tokens (spacing, radii, type, adaptive colors) and the reusable controls every view is built from: `IconButton`, `ToolButton`, `DSChip`, `DSSegmented`, `DSPopup`, `DSNumberField`, `DSSlider`, `Swatch`, `InspectorSection`, `DSDialog`. |
 
 ### Dirty tracking and recovery

@@ -38,6 +38,24 @@
 			<string>Alternate</string>
 		</dict>
 		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>pixmith-extension</string>
+			</array>
+			<key>CFBundleTypeIconFile</key>
+			<string>AppIcon</string>
+			<key>CFBundleTypeName</key>
+			<string>Pixmith Extension</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.pixmith.extension</string>
+			</array>
+		</dict>
+		<dict>
 			<key>CFBundleTypeName</key>
 			<string>PNG Image</string>
 			<key>CFBundleTypeRole</key>
@@ -47,6 +65,34 @@
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.png</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>webp</string>
+				<string>jpg</string>
+				<string>jpeg</string>
+				<string>bmp</string>
+				<string>tga</string>
+				<string>ico</string>
+				<string>pcx</string>
+				<string>flc</string>
+				<string>fli</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>Image (opens as a new sprite)</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>None</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.webmproject.webp</string>
+				<string>public.jpeg</string>
+				<string>com.microsoft.bmp</string>
+				<string>com.truevision.tga-image</string>
+				<string>com.microsoft.ico</string>
 			</array>
 		</dict>
 	</array>
@@ -61,9 +107,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.4.2</string>
+	<string>0.5.0</string>
 	<key>CFBundleVersion</key>
-	<string>7</string>
+	<string>8</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
@@ -91,6 +137,28 @@
 				<key>public.filename-extension</key>
 				<array>
 					<string>pxmt</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.archive</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Pixmith Extension</string>
+			<key>UTTypeIconFiles</key>
+			<array>
+				<string>AppIcon</string>
+			</array>
+			<key>UTTypeIdentifier</key>
+			<string>com.pixmith.extension</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>pixmith-extension</string>
 				</array>
 			</dict>
 		</dict>

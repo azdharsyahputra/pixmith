@@ -235,9 +235,16 @@ pub fn render_frame(s: &Sprite, frame: usize) -> Vec<u8> {
 /// Like `render_frame`, for the pixels of the rectangle `(x, y, w, h)` only; the result is `w * h * 4`
 /// bytes, tightly packed, and identical to cropping the full render. The rectangle is clipped to the canvas.
 pub fn render_frame_rect(s: &Sprite, frame: usize, rect: (usize, usize, usize, usize)) -> Vec<u8> {
+    render_frame_rect_with(s, frame, rect, 0)
+}
+
+/// `render_frame_rect` for an editor view: `references` is how opaque reference layers are drawn, in percent
+/// (0 leaves them out, which is what every export wants).
+pub fn render_frame_rect_with(s: &Sprite, frame: usize, rect: (usize, usize, usize, usize), references: u8) -> Vec<u8> {
     let (cw, ch) = (s.width as usize, s.height as usize);
     let (x, y) = (rect.0.min(cw), rect.1.min(ch));
-    let region = Region { x, y, w: rect.2.min(cw - x), h: rect.3.min(ch - y), stride: cw };
+    let region =
+        Region { x, y, w: rect.2.min(cw - x), h: rect.3.min(ch - y), stride: cw, references: references.min(100) };
     let mut out = vec![0u8; region.w * region.h * 4];
     if frame < s.cels.len() && !out.is_empty() {
         composite_range_in(s, frame, 0, s.layers.len(), region, &mut out, 0);
@@ -254,11 +261,13 @@ pub(crate) struct Region {
     w: usize,
     h: usize,
     stride: usize,
+    /// How opaque reference layers are drawn, in percent; 0 skips them.
+    references: u8,
 }
 
 impl Region {
     fn full(s: &Sprite) -> Region {
-        Region { x: 0, y: 0, w: s.width as usize, h: s.height as usize, stride: s.width as usize }
+        Region { x: 0, y: 0, w: s.width as usize, h: s.height as usize, stride: s.width as usize, references: 0 }
     }
 
     /// Where the source rows start: canvas-sized images (cels) are read at the region's offset, images that
@@ -343,11 +352,9 @@ pub(crate) fn composite_range_in(
     out: &mut [u8],
     depth: usize,
 ) {
-    let mut i = start;
-    while i < end {
+    for (i, next) in drawing_order(s, frame, start, end) {
         let layer = &s.layers[i];
-        let next = if layer.is_group() { s.subtree_end(i).min(end) } else { i + 1 };
-        if layer.visible {
+        if layer.visible && (!layer.is_reference() || r.references > 0) {
             if layer.is_group() {
                 let plain = layer.opacity == 255 && s.layers[i..next].iter().all(|l| l.blend_mode == 0);
                 if let Some(tw) = crate::gamedev::tween::tweened(s, frame, i) {
@@ -362,7 +369,7 @@ pub(crate) fn composite_range_in(
                     composite_flat(s, frame, i, next, r, out);
                 } else if plain {
                     composite_range_in(s, frame, i + 1, next, r, out, depth + 1);
-                } else if has_visible_cels(s, frame, i + 1, next) {
+                } else if has_visible_cels(s, frame, i + 1, next, r) {
                     let mut group = vec![0u8; out.len()];
                     composite_range_in(s, frame, i + 1, next, r, &mut group, depth + 1);
                     composite_image(out, &group, r.buffer_geom(), layer.opacity as u32, layer.blend_mode);
@@ -370,17 +377,51 @@ pub(crate) fn composite_range_in(
             } else if let Some(cel) =
                 crate::gamedev::tween::tweened(s, frame, i).as_ref().or_else(|| s.cel_for_render(frame, i))
             {
-                let opacity = layer.opacity as u32 * cel.opacity as u32 / 255;
+                let opacity = reference_scaled(layer, r, layer.opacity as u32 * cel.opacity as u32 / 255);
                 composite_image(out, &cel.pixels, r.canvas_geom(), opacity, layer.blend_mode);
             }
         }
-        i = next;
     }
 }
 
+/// Opacity of a layer's cel once the editor's reference layer opacity is applied.
+fn reference_scaled(layer: &Layer, r: Region, opacity: u32) -> u32 {
+    if layer.is_reference() {
+        opacity * r.references as u32 / 100
+    } else {
+        opacity
+    }
+}
+
+/// The entries of one group (or of the root) as `(first layer, one past its subtree)` in drawing order. Layers
+/// draw bottom to top, except that a cel with a z-index draws as if its layer sat that many places higher (or
+/// lower, when negative): entries are ordered by layer index + z-index, and ties keep the lower layer index
+/// first. Layer indexes are positions in the whole layer list (groups count), like Aseprite's. Groups have no
+/// z-index.
+fn drawing_order(s: &Sprite, frame: usize, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut entries = Vec::new();
+    let mut custom = false;
+    let mut i = start;
+    while i < end {
+        let layer = &s.layers[i];
+        let next = if layer.is_group() { s.subtree_end(i).min(end) } else { i + 1 };
+        let z = if layer.is_group() { 0 } else { s.cel_for_render(frame, i).map_or(0, |c| c.z_index as i64) };
+        custom |= z != 0;
+        entries.push((i, next, i as i64 + z));
+        i = next;
+    }
+    if custom {
+        entries.sort_by_key(|&(i, _, order)| (order, i));
+    }
+    entries.into_iter().map(|(i, next, _)| (i, next)).collect()
+}
+
 /// Whether any layer in `start..end` could draw something in `frame`.
-fn has_visible_cels(s: &Sprite, frame: usize, start: usize, end: usize) -> bool {
-    (start..end).any(|i| !s.layers[i].is_group() && s.layers[i].visible && s.cel_for_render(frame, i).is_some())
+fn has_visible_cels(s: &Sprite, frame: usize, start: usize, end: usize, r: Region) -> bool {
+    (start..end).any(|i| {
+        let l = &s.layers[i];
+        !l.is_group() && l.visible && (!l.is_reference() || r.references > 0) && s.cel_for_render(frame, i).is_some()
+    })
 }
 
 /// Composites the subtree `start..end` without isolating groups, in one pass without recursion: a
@@ -398,13 +439,13 @@ fn composite_flat(s: &Sprite, frame: usize, start: usize, end: usize, r: Region,
         let opacity = parent_opacity * layer.opacity as u32 / 255;
         if layer.is_group() {
             groups.push((layer.child_level, opacity, shown));
-        } else if shown {
+        } else if shown && (!layer.is_reference() || r.references > 0) {
             if let Some(cel) = s.cel_for_render(frame, i) {
                 composite_image(
                     out,
                     &cel.pixels,
                     r.canvas_geom(),
-                    opacity * cel.opacity as u32 / 255,
+                    reference_scaled(layer, r, opacity * cel.opacity as u32 / 255),
                     layer.blend_mode,
                 );
             }
@@ -562,7 +603,12 @@ impl Sprite {
             return None;
         }
         let (top, below) = (&self.layers[i], &self.layers[i - 1]);
-        if top.is_group() || below.is_group() || top.child_level != below.child_level {
+        if top.is_group()
+            || below.is_group()
+            || top.is_reference()
+            || below.is_reference()
+            || top.child_level != below.child_level
+        {
             return None;
         }
         self.flush_links();
@@ -736,7 +782,7 @@ impl Sprite {
         if !matches!(self.cels.get(frame).and_then(|r| r.get(layer)), Some(Some(_))) {
             return false;
         }
-        match self.cel_mut(layer, frame) {
+        match self.cel_mut_any(layer, frame) {
             Some(c) => c.opacity = opacity,
             None => return false,
         }
@@ -1031,7 +1077,7 @@ impl Default for PlayState {
 // MARK: C ABI
 
 /// Runs an edit on the sprite as one undo step. The edit must not touch the sprite when it fails.
-fn undoable<R>(e: &mut Editor, f: impl FnOnce(&mut Sprite) -> Option<R>) -> Option<R> {
+pub(crate) fn undoable<R>(e: &mut Editor, f: impl FnOnce(&mut Sprite) -> Option<R>) -> Option<R> {
     let before = e.sprite.clone();
     match f(&mut e.sprite) {
         Some(r) => {
@@ -1092,10 +1138,13 @@ pub unsafe extern "C" fn pixmith_layer_can_merge_down(doc: *const Editor, layer:
         let Some(s) = doc.as_ref().map(|e| &e.sprite) else { return false };
         let i = layer as usize;
         i > 0
-            && s.layers
-                .get(i)
-                .zip(s.layers.get(i - 1))
-                .is_some_and(|(a, b)| !a.is_group() && !b.is_group() && a.child_level == b.child_level)
+            && s.layers.get(i).zip(s.layers.get(i - 1)).is_some_and(|(a, b)| {
+                !a.is_group()
+                    && !b.is_group()
+                    && !a.is_reference()
+                    && !b.is_reference()
+                    && a.child_level == b.child_level
+            })
     })
 }
 

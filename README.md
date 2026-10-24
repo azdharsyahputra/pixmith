@@ -38,9 +38,9 @@ Every build is on [Releases](https://github.com/azdharsyahputra/pixmith/releases
 | macOS 13 or newer, Apple silicon | `Pixmith-<version>.dmg` | The native SwiftUI app. Open the disk image and drag Pixmith to Applications. |
 | Windows 10 or newer, x64 | `Pixmith-Setup-<version>-x64.exe` | **Recommended.** The installer for the egui app: per-user by default (no administrator rights), or for all users. Adds a Start Menu entry, makes `.pxmt` open with Pixmith (and `.aseprite` if you tick it), and puts the `pixmith` command on your PATH. Upgrades in place; remove it in Settings → Apps. |
 | Windows 10 or newer, x64 | `Pixmith-<version>-windows-x64.zip` | Portable: unzip anywhere and run `Pixmith.exe`; the `pixmith` command is `bin\pixmith.exe` (not on the PATH until you add that folder). |
-| Linux, x64 | `Pixmith-<version>-linux-x64.tar.gz` | The egui app. Needs a desktop with OpenGL or Vulkan and X11 or Wayland. Unpack and run `./Pixmith`; the `pixmith` command is `bin/pixmith`. |
+| Linux, x64 | `Pixmith-<version>-linux-x64.tar.gz` | **Best effort.** The egui app, built and tested automatically in CI but not tried by hand on Linux desktops, and not packaged for any distribution. Needs OpenGL or Vulkan and X11 or Wayland. Unpack and run `./Pixmith`; the `pixmith` command is `bin/pixmith`. |
 
-The Windows and Linux builds are the first phase of the egui front end (see [desktop/README.md](desktop/README.md) for what works); the macOS app is the complete one.
+The Windows and Linux builds use the egui front end, which mirrors the macOS app (see [desktop/README.md](desktop/README.md) for the few differences).
 
 The apps are not signed or notarized yet. On macOS, Gatekeeper blocks the first launch ("Apple could not verify Pixmith…"): click **Done**, open **System Settings → Privacy & Security**, click **Open Anyway** next to the Pixmith message and confirm. You only do this once. Or run:
 
@@ -61,7 +61,7 @@ open build/Pixmith.app
 cd core && cargo test       # Rust unit and CLI integration tests
 ```
 
-``.aseprite`, `.ase` and `.png` files can be opened from the Open panel, from Finder (Open With), or by dropping them on the Dock icon. Animated GIFs and sprite sheets with JSON metadata are opened from File > Import.
+``.aseprite`, `.ase` and `.png` files can be opened from the Open panel, from Finder (Open With), or by dropping them on the Dock icon. WebP, JPEG, BMP, TGA, ICO, PCX and FLI/FLC files open the same way, as new unsaved sprites (an icon with several sizes asks which one). Animated GIFs and sprite sheets with JSON metadata are opened from File > Import.
 
 ### End-to-end tests
 
@@ -94,7 +94,7 @@ The script builds a universal (arm64 + x86_64) app when the Rust toolchain has b
 ## Features
 
 **Drawing**
-- Pencil (optional pixel-perfect mode), eraser, flood fill (contiguous or global), eyedropper, line, rectangle, ellipse, polygon, Bezier curve, freehand contour, spray, gradient and text tools. Shapes can be filled or outlined; Shift constrains lines, squares and circles.
+- Pencil (optional pixel-perfect mode), eraser, flood fill (contiguous or global), eyedropper, line, rectangle, ellipse, polygon, Bezier curve, freehand contour, spray, blur, jumble, gradient and text tools. Blur averages the pixels under the brush as you paint (with a strength option); Jumble swaps nearby pixels at random. Both use the brush size and shape, mirroring, the selection, and are one undo step per stroke. Shapes can be filled or outlined; Shift constrains lines, squares and circles.
 - Square or round brushes of size 1-64, custom brushes captured from a selection, horizontal and vertical mirroring, pen pressure for size and opacity on tablets.
 - Ink modes: Simple, Alpha Compositing, Lock Alpha, Behind and Shading (steps along the palette). The right mouse button draws with the secondary color.
 - Text with a built-in 5x8 pixel font or a system font.
@@ -111,6 +111,9 @@ The script builds a universal (arm64 + x86_64) app when the Rust toolchain has b
 - Animation tags with forward, reverse and ping-pong directions and tag-aware playback.
 - Tilemap layers with tilesets: create, convert, rename, duplicate and delete tiles, share flipped copies, and a stamp mode.
 - Slices (including 9-patch centers and pivots) and user data (text, color) for the sprite, layers, cels, tags and slices.
+- Cel z-index (Cel Properties, `cel.zIndex` in Lua): a cel draws as if its layer sat that many places higher or lower, following Aseprite's rule (order = layer index plus z-index, ties by layer index).
+- Reference layers (Layer > New Reference Layer from File…): an image, scaled to fit the canvas, on a locked layer with its own timeline icon. The editor draws it (View > Reference Layers: opaque, semi-transparent, faint or hidden); exports, GIFs and sprite sheets never include it.
+- Color profile (Sprite > Sprite Properties…): the sRGB or embedded ICC profile of a file is kept and written back; you can assign sRGB or remove it. Pixels are never converted.
 
 **Game development**
 - Godot 4 export: SpriteFrames `.tres` with an atlas PNG (trim, extrude, padding, one animation per tag) and an optional `AnimatedSprite2D` scene; TileSet `.tres` from tilemap layers with terrains, peering bits and flipped alternatives. Re-export keeps resource uids stable.
@@ -119,10 +122,13 @@ The script builds a universal (arm64 + x86_64) app when the Rust toolchain has b
 
 **Scripting**
 - Lua 5.4 scripts from the script folder (File > Scripts) with access to the sprite, layers, frames, cels, tags, slices, tilesets, selection and palette; a script runs as one undo step and an error leaves the document untouched. See [docs/LUA_API.md](docs/LUA_API.md).
+- Lua dialogs (`Dialog{}` with labels, buttons, checks, radios, entries, numbers, sliders, colors, combo boxes, file pickers and shades), plugins that add File > Scripts commands, and app and sprite events. See [docs/LUA_DIALOG.md](docs/LUA_DIALOG.md).
+- Extensions (`.pixmith-extension`, like Aseprite's): a zip with a `package.json` that adds Lua plugins, palettes (which join the palette presets) and color themes. Preferences > Extensions installs (also by opening or dropping the file), enables, disables and uninstalls them; Preferences > Appearance > Color theme switches the look live. Packages are validated before anything is written (no path traversal, size limits). `scripts/extension-template/` is a sample with a packing script; the format is in [docs/EXTENSIONS.md](docs/EXTENSIONS.md).
 
 **Color and effects**
 - RGBA, grayscale and indexed color modes (with optional ordered dithering), palette from sprite (exact or quantized).
 - Palette editor: reorder, insert, duplicate and remove entries, color ramps, live entry editing that keeps indexed sprites consistent, built-in presets, GIMP `.gpl` and `.hex` import and export, sorting by hue or luminance.
+- Color selectors in the inspector's Color section (menu in the section header, remembered between launches): Spectrum, Color Wheel (HSV or HSL, with a value or lightness bar and complementary, triadic, analogous, split-complementary and square harmony markers), RGB, HSV and HSL sliders, Gray and a Normal Map picker (a tangent-space normal from a hemisphere disc with X/Y/Z fields). Every selector has alpha and respects the indexed color mode.
 - FX menu: replace color, invert, desaturate, hue/saturation/lightness, brightness/contrast, color balance, curves, outline, drop shadow, remove isolated pixels, blur, sharpen, scale sprite.
 
 **View**
@@ -130,7 +136,9 @@ The script builds a universal (arm64 + x86_64) app when the Rust toolchain has b
 
 **Import and export**
 - Export a frame as PNG, an animated GIF (frame durations, transparency, scale), an animated PNG (APNG), a numbered PNG sequence, or a sprite sheet (horizontal, vertical or grid, padding, scale) with Aseprite-style JSON metadata.
+- Export as WebP (lossless or lossy with a quality, animated), JPEG (quality; transparent pixels are flattened onto a background color), BMP (32 bit with alpha, 8 bit or 24 bit), TGA (RLE, 8, 24 or 32 bit), a Windows icon (ICO with the sizes you pick), PCX, or an Autodesk Animator FLC (256 colors, all frames and durations). They use the same frame, tag, layer, trim and scale choices as the other exports. Details: [docs/IMAGE_FORMATS.md](docs/IMAGE_FORMATS.md).
 - Import a PNG as a new sprite, an animated GIF as a new sprite (frames and delays, disposal methods applied), a sprite sheet PNG as frames (by cell size), a sprite sheet with Aseprite JSON (array or hash format: frame rectangles, durations, trimmed frames, tags and slices), or a PNG as a new layer.
+- Open WebP (still or animated), JPEG, BMP, TGA, ICO, PCX and FLI/FLC (animation with frame durations and the file's palette) as new sprites, from File > Open, drag and drop, or File > Import > Image.
 - WebP is not supported; it needs an encoder this project does not bundle.
 
 **App**
@@ -158,6 +166,8 @@ The single-key shortcuts below are the defaults. They can be rebound in Preferen
 | `C` | Curve |
 | `D` | Contour (freehand) |
 | `A` | Spray |
+| `R` | Blur |
+| `Shift-R` | Jumble |
 | `Shift-G` | Gradient |
 | `T` | Text |
 | `S` | Slice |
@@ -214,6 +224,12 @@ The single-key shortcuts below are the defaults. They can be rebound in Preferen
 
 Other commands (export GIF, APNG, PNG sequence and sprite sheet, import, layer and cel properties, tags, slices and user data, tilemaps, palette, FX and color mode) live in the File, Sprite, Layer, Drawing, Palette, Tilemap and FX menus.
 
+## Live mode
+
+Pixmith can be driven by an AI agent through the [Pixmith MCP server](https://github.com/azdharsyahputra/pixmith-mcp). While Live mode is on, the app listens on a loopback port and writes a small discovery file (`Application Support/Pixmith/Live/<pid>.json`); the MCP server finds it, reads the open documents and sends back edits, which appear in the window as they happen. Each edit is one undo step labelled `AI: ...`, so Cmd/Ctrl+Z takes it back, and an edit made from a stale copy of the document (you drew in the meantime) is refused instead of overwriting your work. The title row shows an "AI connected" chip with a Disconnect command while a client is connected.
+
+Live mode is on by default and can be switched off in Preferences > General ("Allow AI agents to control Pixmith"). Only programs on the same computer that can read your user's files (the token is in the discovery file, readable by you alone) can connect. Both apps speak the same protocol, described in [docs/LIVE_PROTOCOL.md](docs/LIVE_PROTOCOL.md).
+
 ## Command-line tool
 
 `pixmith-cli` inspects, converts and exports Pixmith (`.pxmt`) and `.aseprite` files without the app; every command accepts either format (detected from the file's content). It ships with the app:
@@ -240,6 +256,14 @@ pixmith-cli export hero.aseprite --png-seq out/hero      # out/hero-001.png, out
 
 pixmith-cli export hero.aseprite --tag walk --gif walk.gif     # only the frames of one tag
 pixmith-cli export hero.aseprite --layer Body --png body.png   # only layers with this name
+
+# WebP, JPEG, BMP, TGA, ICO, PCX and FLC (a command per output, options after)
+pixmith-cli export hero.aseprite --webp hero.webp --lossy --quality 80
+pixmith-cli export hero.aseprite --jpg hero.jpg --quality 90 --background '#202020' --scale 4
+pixmith-cli export hero.aseprite --ico hero.ico --ico-sizes 16,32,48,256
+pixmith-cli export hero.aseprite --flc hero.flc --tga hero.tga --bmp hero.bmp --pcx hero.pcx
+pixmith-cli convert logo.ico logo.pxmt       # any of these formats can be read
+pixmith-cli convert hero.pxmt hero.webp      # and written
 
 # Batch: with several inputs every output path needs {name} (the input's name without extension).
 pixmith-cli export sprites/*.aseprite --png 'out/{name}.png' --scale 2
@@ -268,7 +292,10 @@ Notes and limitations:
 - Group opacity and blend mode are honored only when the file header says they are valid (Aseprite 1.3 and later); older files store an unused 0 there, which would otherwise hide the group.
 - Indexed pixels that use a palette index beyond the stored palette get black palette entries so they survive saving.
 - Pixel ratio and grid settings are preserved. Tilesets that no layer uses are kept, as Aseprite keeps them.
-- Color profile, external-file and cel-extra chunks and cel z-indexes are not kept on save. Custom user-data properties are preserved as raw bytes but cannot be edited.
+- The color profile chunk (none, sRGB or an embedded ICC profile, with its fixed-gamma fields) and each cel's z-index are read, kept and written back; reference layers (layer flag 0x40) round trip too. External-file and cel-extra chunks are not kept on save. Custom user-data properties are preserved as raw bytes but cannot be edited.
+- Pixels are never converted for a color profile (Aseprite does not convert by default either): the profile is kept and shown, and other programs may use it.
+- Z-index orders the cels of one group (or the root) by layer index plus z-index, counting groups in the layer index like Aseprite; a cel cannot move into or out of a group. Linked cels share one z-index (like their opacity), so the z-index of a linked cel chunk that differs from its source is not kept. Groups nested more than 8 deep ignore z-index.
+- Reference layers are left out of every render except the editor's (View > Reference Layers). They are locked when created and refuse drawing while locked. Their image is one canvas-sized cel, so what does not fit the canvas is cropped; "from File" scales the image to fit.
 - Blend modes follow Aseprite's output: normal blending is bit-exact on the reference files, and the other 18 modes are within 3 per channel (exact for opaque backdrops).
 - Diagonal tile flips are verified only for the case where all three flip flags are set; other combinations follow the Tiled convention.
 - Canvas size is limited to 65535 x 65535 pixels (files above 100 million pixels are rejected); the New Sprite dialog limits it to 4096.
@@ -278,9 +305,11 @@ Notes and limitations:
 
 ## Known limitations
 
-- The macOS app (13 or newer) is the complete front end. The egui app for Windows and Linux is in progress and does not have every feature yet; see [desktop/README.md](desktop/README.md). The core and the CLI are portable.
+- The macOS app (13 or newer) and the egui app for Windows have the same features; the small differences are listed in [desktop/README.md](desktop/README.md). The core and the CLI are portable.
+- **Linux is best effort.** The Linux build is produced and tested by CI, but nobody tests it by hand and there are no distribution packages (deb, rpm, Flatpak). Pen pressure is not available on Linux (the windowing library does not report it); tablets work as a mouse. Contributions for Linux are welcome.
 - The GIF format has 1 bit of transparency and at most 255 colors per frame; frames with more colors are quantized.
-- GIF import turns every frame into a full-canvas cel; animated PNG and WebP cannot be imported.
+- GIF import turns every frame into a full-canvas cel; animated PNG cannot be imported.
+- WebP, JPEG, BMP, TGA, ICO, PCX and FLI/FLC open as RGBA sprites. A palette in the file (PCX, FLC, 8 bit BMP and TGA) becomes the sprite's palette, but the sprite is not converted to Indexed mode. JPEG, PCX and FLC have no transparency, so exports flatten onto a background color. WebP images larger than about 8.3 million pixels (3840 x 2160) cannot be opened.
 - Releases are ad-hoc signed unless you provide a Developer ID identity, so Gatekeeper asks you to approve the app on other Macs.
 
 ## Project layout

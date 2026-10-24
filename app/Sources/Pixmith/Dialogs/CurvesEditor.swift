@@ -69,7 +69,7 @@ struct CurvesEditor: View {
                     let c = CGPoint(x: CGFloat(p.x), y: size.height - 1 - CGFloat(p.y))
                     let r: CGFloat = i == selected ? 5 : 4
                     let dot = Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
-                    ctx.fill(dot, with: .color(i == selected ? .accentColor : Color(nsColor: .windowBackgroundColor)))
+                    ctx.fill(dot, with: .color(i == selected ? DSColor.accent : Color(nsColor: .windowBackgroundColor)))
                     ctx.stroke(dot, with: .color(Self.colors[channel]), lineWidth: 1.5)
                 }
             }

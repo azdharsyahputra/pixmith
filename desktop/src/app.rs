@@ -31,13 +31,15 @@ pub enum Tool {
     Text,
     Picker,
     Slice,
+    Blur,
+    Jumble,
 }
 
 impl Tool {
     /// Rail groups, in order: select, paint, shapes, other (`Tool.groups` in `ToolsPanel.swift`).
     pub const GROUPS: [&'static [Tool]; 4] = [
         &[Tool::Marquee, Tool::Lasso, Tool::Polygon, Tool::Wand, Tool::Move],
-        &[Tool::Pencil, Tool::Eraser, Tool::Spray, Tool::Fill, Tool::Gradient],
+        &[Tool::Pencil, Tool::Eraser, Tool::Spray, Tool::Blur, Tool::Jumble, Tool::Fill, Tool::Gradient],
         &[Tool::Line, Tool::Rectangle, Tool::Ellipse, Tool::Curve, Tool::ShapePolygon, Tool::Contour],
         &[Tool::Text, Tool::Picker, Tool::Slice],
     ];
@@ -64,6 +66,8 @@ impl Tool {
             Tool::Text => "Text",
             Tool::Picker => "Eyedropper",
             Tool::Slice => "Slice",
+            Tool::Blur => "Blur",
+            Tool::Jumble => "Jumble",
         }
     }
 
@@ -90,6 +94,8 @@ impl Tool {
             Tool::Text => i::TEXT_AA,
             Tool::Picker => i::EYEDROPPER,
             Tool::Slice => i::CROP,
+            Tool::Blur => i::DROP_HALF,
+            Tool::Jumble => i::SHUFFLE,
         }
     }
 
@@ -115,6 +121,8 @@ impl Tool {
             Tool::Text => "T",
             Tool::Picker => "I",
             Tool::Slice => "S",
+            Tool::Blur => "R",
+            Tool::Jumble => "⇧R",
         }
     }
 }
@@ -178,6 +186,10 @@ pub struct PixmithApp {
     pub menus: ui::menus::MenusState,
     /// The Home screen, project view and project switcher.
     pub projects: ui::projects::ProjectsState,
+    /// The Extensions tab of Preferences.
+    pub extensions: ui::extensions::ExtensionsState,
+    /// Live mode: the server other tools connect to, and the ids and revisions of the open documents.
+    pub live: crate::live::LiveState,
 }
 
 impl PixmithApp {
@@ -188,11 +200,15 @@ impl PixmithApp {
             projects: ui::projects::ProjectsState::load(cc.storage),
             ..PixmithApp::default()
         };
+        app.inspector.picker.load(cc.storage);
         // Pixmith opens on Home; opening a file straight away (command line, drop) goes to the editor instead.
         app.go_home();
         ui::menus::apply_appearance(&mut app, &cc.egui_ctx);
         app.canvas.tools.enable_persistence(ui::tools::view::ViewSettings::default_path());
         app.gamedev.start();
+        app.extensions.plugins.enabled = true;
+        // Pixmith Live follows the preference (on by default); the server starts with the first frame.
+        app.live.managed = true;
         app
     }
 
@@ -210,6 +226,7 @@ impl PixmithApp {
 
     /// Lays out the whole window. Panels are added outside-in, which is how egui assigns space.
     pub fn ui(&mut self, root: &mut egui::Ui) {
+        crate::live::frame(self, root.ctx());
         let doc_id = self.tab().doc.raw() as usize;
         self.tilemap.sync(self.tool, doc_id);
         ui::menus::shortcuts_first(self, root.ctx());
@@ -262,7 +279,9 @@ impl PixmithApp {
         ui::tilemap::show_sheets(self, root.ctx());
         ui::tools::show_windows(self, root.ctx());
         ui::gamedev::show(self, root.ctx());
+        ui::lua_dialog::show(self, root.ctx());
         ui::menus::show(self, root.ctx());
+        ui::extensions::show(self, root.ctx());
     }
 }
 
@@ -286,6 +305,8 @@ impl Default for PixmithApp {
             gamedev: Default::default(),
             menus: Default::default(),
             projects: Default::default(),
+            extensions: Default::default(),
+            live: Default::default(),
         }
     }
 }
@@ -297,11 +318,14 @@ impl eframe::App for PixmithApp {
 
     /// A clean exit leaves no recovery copies behind.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.gamedev.lua.stop_all();
+        self.live.stop();
         self.discard_recovery_copies();
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.menus.save(storage);
         self.projects.save(storage);
+        self.inspector.picker.save(storage);
     }
 }

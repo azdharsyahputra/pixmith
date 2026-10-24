@@ -1,6 +1,6 @@
 [package]
 name = "pixmith-desktop"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 description = "Pixmith, the lightweight pixel-art editor: cross-platform desktop front end built with egui"
 license = "MIT"
@@ -17,6 +17,7 @@ rfd = "0.17.2"
 ab_glyph = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
 pollster = "1.0.1"
+getrandom = "0.3"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }

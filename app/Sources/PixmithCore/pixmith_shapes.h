@@ -19,6 +19,14 @@ void pixmith_stroke_end_doc(PixmithDoc *doc); // ends only that document's runni
 bool pixmith_rollback(PixmithDoc *doc);
 void pixmith_spray(PixmithDoc *doc, uint32_t layer, uint32_t frame, int32_t x, int32_t y, uint32_t rgba,
                 uint32_t radius, uint32_t density, uint32_t seed, uint32_t flags);
+// Blur (kind 0) and Jumble (kind 1) brush tools; the stroke is one undo step when begun after pixmith_begin_stroke.
+// strength 1...100 (blur: how far toward the neighbourhood average; jumble: chance a pixel is swapped), seed drives
+// Jumble, flags are the mirror bits. Uses the global brush shape. core/src/paint/retouch.rs
+void pixmith_retouch_begin(PixmithDoc *doc, uint32_t layer, uint32_t frame, int32_t x, int32_t y, uint32_t kind,
+                        uint32_t size, uint32_t strength, uint32_t seed, uint32_t flags);
+void pixmith_retouch_to(PixmithDoc *doc, int32_t x, int32_t y);
+void pixmith_retouch_size(PixmithDoc *doc, uint32_t size); // pen pressure: resize the running stroke
+void pixmith_retouch_end_doc(PixmithDoc *doc);
 void pixmith_fill_mode(PixmithDoc *doc, uint32_t layer, uint32_t frame, int32_t x, int32_t y,
                     uint32_t rgba, bool contiguous);
 

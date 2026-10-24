@@ -5,7 +5,7 @@
 //! method here whenever a panel needs another entry point; keep the `unsafe` inside this file.
 
 use pixmith_core::Editor;
-use pixmith_core::ffi::{self, document as core};
+use pixmith_core::ffi::{self, document as core, live};
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 
@@ -113,6 +113,91 @@ impl Doc {
     /// Marks the document changed; call after every mutation (`SpriteModel.changed()` calls `pixmith_touch`).
     pub fn touch(&mut self) {
         unsafe { pixmith_core::history::pixmith_touch(self.ptr) }
+    }
+
+    /// Unique for the life of the process, unlike the document's address.
+    pub fn uid(&self) -> u64 {
+        // SAFETY: `self.ptr` is a live document.
+        unsafe { (*self.ptr).uid() }
+    }
+
+    /// Identifies the state of the document's history; it differs after every edit, undo and redo.
+    pub fn state_id(&self) -> u64 {
+        // SAFETY: `self.ptr` is a live document.
+        unsafe { (*self.ptr).states.current_id() }
+    }
+
+    /// The document as `.pxmt` bytes (Live mode).
+    pub fn encode(&mut self) -> Result<Vec<u8>, String> {
+        let mut len = 0usize;
+        // SAFETY: `self.ptr` is a live document and `len` is a valid out pointer.
+        let bytes = unsafe { live::pixmith_encode_document(self.ptr, &mut len) };
+        if bytes.is_null() {
+            return Err(last_error());
+        }
+        // SAFETY: the core returned `len` readable bytes, which are freed right after the copy.
+        let out = unsafe { std::slice::from_raw_parts(bytes, len) }.to_vec();
+        unsafe { live::pixmith_bytes_free(bytes, len) };
+        Ok(out)
+    }
+
+    /// Swaps in `.pxmt` or `.aseprite` bytes as one undo step named `label` (Live mode). The document is
+    /// unchanged on failure.
+    pub fn apply_document(&mut self, bytes: &[u8], label: &str) -> Result<(), String> {
+        let label = CString::new(label.replace('\0', "")).unwrap_or_default();
+        // SAFETY: `self.ptr` is a live document; the bytes and the label outlive the call.
+        if unsafe { live::pixmith_apply_document(self.ptr, bytes.as_ptr(), bytes.len(), label.as_ptr()) } {
+            Ok(())
+        } else {
+            Err(last_error())
+        }
+    }
+
+    /// The selection's bounding rectangle with one mask byte per pixel (Live mode); `None` when nothing is selected.
+    pub fn live_selection(&self) -> Option<live::Region> {
+        let (mut x, mut y, mut w, mut h, mut len) = (0i32, 0i32, 0u32, 0u32, 0usize);
+        // SAFETY: `self.ptr` is a live document and every out pointer is valid.
+        let bytes = unsafe { live::pixmith_live_selection(self.ptr, &mut x, &mut y, &mut w, &mut h, &mut len) };
+        if bytes.is_null() {
+            return None;
+        }
+        // SAFETY: the core returned `len` readable bytes, which are freed right after the copy.
+        let mask = unsafe { std::slice::from_raw_parts(bytes, len) }.to_vec();
+        unsafe { live::pixmith_bytes_free(bytes, len) };
+        Some(live::Region { x, y, w, h, mask })
+    }
+
+    /// Like `apply_document`, also keeping, clearing or replacing the selection in the same undo step.
+    pub fn apply_document_selection(
+        &mut self,
+        bytes: &[u8],
+        label: &str,
+        selection: &live::SelectionChange,
+    ) -> Result<(), String> {
+        let label = CString::new(label.replace('\0', "")).unwrap_or_default();
+        let (mode, region) = match selection {
+            live::SelectionChange::Keep => (0, None),
+            live::SelectionChange::Clear => (1, None),
+            live::SelectionChange::Set(r) => (2, Some(r)),
+        };
+        let (x, y, w, h, mask) = region.map_or((0, 0, 0, 0, &[][..]), |r| (r.x, r.y, r.w, r.h, &r.mask[..]));
+        // SAFETY: `self.ptr` is a live document; the bytes, the label and the mask outlive the call.
+        let ok = unsafe {
+            live::pixmith_apply_document_selection(
+                self.ptr,
+                bytes.as_ptr(),
+                bytes.len(),
+                label.as_ptr(),
+                mode,
+                x,
+                y,
+                w,
+                h,
+                mask.as_ptr(),
+                mask.len(),
+            )
+        };
+        if ok { Ok(()) } else { Err(last_error()) }
     }
 
     pub fn undo(&mut self) -> bool {

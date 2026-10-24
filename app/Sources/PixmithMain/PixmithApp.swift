@@ -3,7 +3,17 @@ import SwiftUI
 @testable import PixmithKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) { Prefs.applyAppearance() }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Prefs.applyAppearance()
+        LiveServer.shared.applyPreference()
+        // Scripts that enabled extensions contribute load as plugins.
+        PluginHost.shared.syncExtensions()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        ScriptSessions.shared.stopAll()
+        LiveServer.shared.stop()
+    }
 
     /// Files and project folders from Finder, the Dock or `open`; opening one skips the Home screen.
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -70,18 +80,19 @@ struct PixmithCommands: Commands {
             .disabled(!route.isEditor)
         }
         CommandGroup(replacing: .undoRedo) {
-            Button("Undo") { model.undo() }.keyboardShortcut("z")
-            Button("Redo") { model.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
+            Button("Undo") { ScriptSessions.shared.command("Undo") { model.undo() } }.keyboardShortcut("z")
+            Button("Redo") { ScriptSessions.shared.command("Redo") { model.redo() } }.keyboardShortcut("z", modifiers: [.command, .shift])
         }
         SelectionCommands(model: model)
         DrawingCommands(model: model)
         CommandMenu("Sprite") {
-            Button("New Layer") { model.addLayer() }.keyboardShortcut("n", modifiers: [.command, .shift]).disabled(sheet.isOpen)
-            Button("Delete Layer") { model.removeLayer() }.disabled(sheet.isOpen)
+            Button("New Layer") { ScriptSessions.shared.command("New Layer") { model.addLayer() } }.keyboardShortcut("n", modifiers: [.command, .shift]).disabled(sheet.isOpen)
+            Button("Delete Layer") { ScriptSessions.shared.command("Delete Layer") { model.removeLayer() } }.disabled(sheet.isOpen)
             Divider()
-            Button("New Frame") { model.addFrame(duplicate: false) }.keyboardShortcut("n", modifiers: [.command, .option]).disabled(sheet.isOpen)
-            Button("Duplicate Frame") { model.addFrame(duplicate: true) }.keyboardShortcut("d", modifiers: [.command, .shift]).disabled(sheet.isOpen)
-            Button("Delete Frame") { model.removeFrame() }.disabled(sheet.isOpen)
+            Button("New Frame") { ScriptSessions.shared.command("New Frame") { model.addFrame(duplicate: false) } }.keyboardShortcut("n", modifiers: [.command, .option]).disabled(sheet.isOpen)
+            Button("Duplicate Frame") { ScriptSessions.shared.command("Duplicate Frame") { model.addFrame(duplicate: true) } }.keyboardShortcut("d", modifiers: [.command, .shift]).disabled(sheet.isOpen)
+            Button("Delete Frame") { ScriptSessions.shared.command("Delete Frame") { model.removeFrame() } }.disabled(sheet.isOpen)
+            SpriteDataSpriteMenuItems(model: model).disabled(sheet.isOpen)
             SpriteSelectionMenuItems(model: model)
             SlicesMenuItems(model: model)
             Divider()

@@ -5,9 +5,13 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var model: SpriteModel
     @ObservedObject private var route = AppRoute.shared
+    @ObservedObject private var themes = ThemeStore.shared
 
     var body: some View {
         screen
+        // A new color theme (Preferences > Appearance) rebuilds the views so every color is resolved again.
+        .id(themes.revision)
+        .tint(themes.selected == nil ? nil : DSColor.accent)
         .frame(minWidth: 1000, minHeight: 640)
         .background(DSColor.panel)
         .navigationTitle(route.title)

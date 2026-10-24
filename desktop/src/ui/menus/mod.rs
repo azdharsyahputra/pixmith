@@ -14,6 +14,7 @@ pub mod hooks;
 pub mod prefs;
 mod sheets;
 pub mod shortcuts;
+pub mod spritedata;
 
 use crate::app::{DocTab, PixmithApp};
 use eframe::Storage;
@@ -45,6 +46,8 @@ pub struct MenusState {
     pub scale: Option<filters::ScaleSession>,
     pub canvas_size: Option<sheets::CanvasSizeSession>,
     pub cel: Option<sheets::CelSession>,
+    /// Sprite > Sprite Properties… is open.
+    pub sprite_props: bool,
     /// Files opened or saved, newest first (`RecentFiles`).
     pub recents: Vec<PathBuf>,
     seen: HashSet<PathBuf>,
@@ -71,6 +74,7 @@ impl Default for MenusState {
             scale: None,
             canvas_size: None,
             cel: None,
+            sprite_props: false,
             recents: Vec::new(),
             seen: HashSet::new(),
         }
@@ -150,6 +154,7 @@ impl MenusState {
             || self.scale.is_some()
             || self.canvas_size.is_some()
             || self.cel.is_some()
+            || self.sprite_props
             || self.about_open
             || self.cli_open
     }
@@ -162,6 +167,7 @@ pub fn blocked(app: &PixmithApp) -> bool {
         || app.files.new_sheet.is_some()
         || app.files.export.is_some()
         || app.projects.has_sheet()
+        || app.gamedev.lua.modal_open()
         || app.menus.sheet_open()
 }
 
@@ -178,6 +184,7 @@ pub fn apply_prefs(app: &mut PixmithApp) {
 pub fn apply_appearance(app: &mut PixmithApp, ctx: &egui::Context) {
     let system_dark = ctx.input(|i| i.raw.system_theme) != Some(egui::Theme::Light);
     app.dark = app.menus.prefs.wants_dark(system_dark);
+    crate::ui::extensions::apply_theme(&app.menus.prefs.theme);
     crate::theme::apply(ctx, app.dark);
     app.files.new_size = (app.menus.prefs.new_width, app.menus.prefs.new_height);
     app.menus.synced_new_size = app.files.new_size;
@@ -212,6 +219,9 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
         && !sheets::cel(app, ctx, &mut s)
     {
         app.menus.cel = Some(s);
+    }
+    if app.menus.sprite_props && spritedata::sprite_properties(app, ctx) {
+        app.menus.sprite_props = false;
     }
     if app.menus.about_open && sheets::about(ctx) {
         app.menus.about_open = false;

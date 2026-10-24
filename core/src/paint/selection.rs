@@ -378,7 +378,7 @@ impl State {
         self.reset_interaction();
     }
 
-    fn reset_interaction(&mut self) {
+    pub(crate) fn reset_interaction(&mut self) {
         self.float = None;
         self.xform = None;
         self.drag = None;
@@ -998,6 +998,7 @@ pub fn resize_canvas(e: &mut Editor, nw: i32, nh: i32, ox: i32, oy: i32) -> bool
             pixels: px,
             tiles,
             user_data: cel.user_data.clone(),
+            z_index: cel.z_index,
             ..Default::default()
         });
         done.insert(key, moved.clone());

@@ -86,6 +86,12 @@ impl States {
     pub fn is_dirty(&self) -> bool {
         self.current != self.saved
     }
+
+    /// Identifies the state the document is in; it differs after every checkpoint, undo, redo and touch
+    /// (front ends use it to notice that a document changed).
+    pub fn current_id(&self) -> u64 {
+        self.current
+    }
 }
 
 /// Sets how many bytes of memory the undo history of a document may hold beyond the live

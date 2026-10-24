@@ -4,6 +4,7 @@
 
 pub mod color;
 mod palette;
+pub mod selectors;
 
 use crate::app::{DocTab, PixmithApp};
 use crate::theme::{Colors, font, space, ui_font};
@@ -42,7 +43,9 @@ pub const BLEND_MODES: [&str; 19] = [
 pub struct InspectorState {
     /// Which drawing color the Color section edits (`ColorTarget.secondary`).
     pub secondary: bool,
-    hsva: color::Hsva,
+    spaces: color::Spaces,
+    /// The Color section's selector and its settings (`ColorSelector`).
+    pub picker: selectors::PickerState,
     hex: String,
     layer_name: String,
     /// The opacity scrub in progress already started its undo step.

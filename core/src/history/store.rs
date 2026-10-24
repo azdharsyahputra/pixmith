@@ -175,6 +175,7 @@ enum HintChange {
 #[derive(Clone, Debug)]
 struct CelDelta {
     opacity: u8,
+    z_index: i16,
     user_data: UserData,
     tiles: GridChange,
     pixels: RegionDelta,
@@ -328,10 +329,11 @@ impl Compact {
     /// Writes the older values of a delta into `cel` (a cel only the caller owns) and returns the
     /// delta that restores the values it had.
     fn patch_in_place(cel: &mut Cel, d: CelDelta, width: usize) -> CelDelta {
-        let CelDelta { opacity, user_data, tiles, pixels, indices } = d;
+        let CelDelta { opacity, z_index, user_data, tiles, pixels, indices } = d;
         let inverse_pixels = pixels.capture_from(&cel.pixels, width);
         pixels.apply(&mut cel.pixels, width);
         let inverse_opacity = std::mem::replace(&mut cel.opacity, opacity);
+        let inverse_z = std::mem::replace(&mut cel.z_index, z_index);
         let inverse_user = std::mem::replace(&mut cel.user_data, user_data);
         let inverse_tiles = match tiles {
             GridChange::Same => GridChange::Same,
@@ -353,6 +355,7 @@ impl Compact {
         };
         CelDelta {
             opacity: inverse_opacity,
+            z_index: inverse_z,
             user_data: inverse_user,
             tiles: inverse_tiles,
             pixels: inverse_pixels,
@@ -382,7 +385,7 @@ impl Compact {
 
     /// Builds the older cel from a delta by copying the newer cel.
     fn rebuild(d: CelDelta, newer: Option<&Cel>, width: usize) -> Cel {
-        let CelDelta { opacity, user_data, tiles, pixels, indices } = d;
+        let CelDelta { opacity, z_index, user_data, tiles, pixels, indices } = d;
         let mut px = newer.map(|n| n.pixels.clone()).unwrap_or_default();
         pixels.apply(&mut px, width);
         let grid = match tiles {
@@ -399,7 +402,7 @@ impl Compact {
                 Arc::new(v)
             }),
         };
-        Cel { opacity, pixels: px, tiles: grid, user_data, indices: hints }
+        Cel { opacity, pixels: px, tiles: grid, user_data, indices: hints, z_index }
     }
 
     /// Calls `f(address, bytes)` for the memory this entry holds: its own delta data and every
@@ -495,7 +498,7 @@ fn slot_for(
     // pixel count) the buffer is kept whole.
     let Some(n) = n.filter(|n| same_canvas && n.pixels.len() == arc.pixels.len()) else { return Slot::Full(arc) };
     // Exhaustive on purpose: a new `Cel` field must be handled here before this compiles.
-    let Cel { opacity, pixels, tiles, user_data, indices } = &*arc;
+    let Cel { opacity, pixels, tiles, user_data, indices, z_index } = &*arc;
     let pixel_delta = RegionDelta::diff(pixels, &n.pixels, 4, width).unwrap_or_else(|| RegionDelta::empty(4));
     *bytes += pixel_delta.bytes() + std::mem::size_of::<CelDelta>();
     let grid = if *tiles == n.tiles {
@@ -517,6 +520,7 @@ fn slot_for(
     };
     let slot = Slot::Delta(Box::new(CelDelta {
         opacity: *opacity,
+        z_index: *z_index,
         user_data: user_data.clone(),
         tiles: grid,
         pixels: pixel_delta,

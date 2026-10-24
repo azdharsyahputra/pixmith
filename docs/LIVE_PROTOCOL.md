@@ -53,6 +53,9 @@ The file is UTF-8 JSON, readable only by the user (mode 0600 on macOS and Linux)
 ## Methods
 
 Document ids are strings chosen by the app and stable while the tab is open (for example `"doc-3"`).
+When a tab's document is replaced by another (a blank tab reused by `documents.new` or `documents.open`, or the last
+tab closed and replaced by a fresh one), the new document gets a new id and starts at revision 1. A `hello` that asks
+for a `protocol` other than 1 is refused with `-32602`.
 `revision` is an integer per document that goes up whenever the document changes, whether the user or a client
 changed it.
 
@@ -60,15 +63,17 @@ changed it.
 | --- | --- | --- |
 | `hello` | `{"token", "client": "pixmith-mcp", "client_version", "protocol": 1}` | `{"app", "version", "front_end", "platform", "protocol": 1}` |
 | `documents.list` | `{}` | `{"documents": [Doc…], "active": "doc-3" or null}` |
-| `documents.get` | `{"id"}` | `{"document": Doc, "pxmt": "<base64>"}` |
-| `documents.apply` | `{"id", "base_revision", "pxmt": "<base64>", "label", "layer"?, "frame"?}` | `{"document": Doc}` |
-| `documents.new` | `{"width", "height", "name"?}` | `{"document": Doc}`, opened in a new tab and made active |
-| `documents.open` | `{"path"}` | `{"document": Doc}`, or the already open tab of that file |
-| `documents.save` | `{"id", "path"?}` | `{"document": Doc}`, saved to `path` or to its own file; `.pxmt` / `.aseprite` by extension |
+| `documents.get` | `{"id"}` | `{"document": Doc, "pxmt": "<base64>", "selection": Selection or null}` |
+| `documents.apply` | `{"id", "base_revision", "pxmt": "<base64>", "label", "layer"?, "frame"?, "selection"?}` | `{"document": Doc}` |
+| `documents.undo` | `{"id", "steps"?: 1}` | `{"document": Doc, "steps": n}`, `n` being the steps actually undone (0 when there is nothing to undo) |
+| `documents.redo` | `{"id", "steps"?: 1}` | `{"document": Doc, "steps": n}`, likewise |
+| `documents.new` | `{"width", "height", "name"?}` | `{"document": Doc}`, opened in a new tab and made active (a blank, never edited untitled tab is reused, like opening a file does) |
+| `documents.open` | `{"path"}` | `{"document": Doc}`, or the already open tab of that file; `path` must be absolute |
+| `documents.save` | `{"id", "path"?}` | `{"document": Doc}`, saved to `path` (absolute) or to its own file; `.pxmt` or `.aseprite` / `.ase` by extension, anything else is `-32602` |
 | `documents.activate` | `{"id"}` | `{"document": Doc}` |
 | `documents.close` | `{"id", "discard": false}` | `{}`; refused with `-32011` when the document has unsaved changes and `discard` is false |
-| `view.get` | `{}` | `{"document": id or null, "layer", "frame", "zoom", "tool"}` |
-| `view.set` | `{"id"?, "layer"?, "frame"?}` | the same shape as `view.get` |
+| `view.get` | `{}` | `{"document": id or null, "layer", "frame", "zoom", "tool"}` for the active document |
+| `view.set` | `{"id"?, "layer"?, "frame"?}` | the same shape as `view.get`, for the document `id` (default: the active one); `layer` and `frame` are clamped to the document |
 
 `Doc` is:
 
@@ -79,6 +84,13 @@ changed it.
 
 - `path` is null for an unsaved document.
 - `layer` and `frame` are the app's current layer and frame for that document, 0-based like the core.
+- In `view.get`, `zoom` is screen points per sprite pixel (8 is 800%) and `tool` is the current tool as a lower-case
+  name: `marquee`, `lasso`, `polygon`, `wand`, `move`, `pencil`, `eraser`, `spray`, `fill`, `gradient`, `line`,
+  `rectangle`, `ellipse`, `curve`, `shape_polygon`, `contour`, `text`, `picker`, `slice`, `blur` or `jumble`.
+
+`Selection` is the user's selection: `{"x", "y", "w", "h", "mask": "<base64>"}`. The rectangle is the bounding
+box of the selected pixels, in canvas pixels; `mask` is `w * h` bytes, row-major inside that rectangle, 1 for a
+selected pixel and 0 for one that is not. `documents.get` returns `"selection": null` when nothing is selected.
 
 ### `documents.apply`
 
@@ -88,18 +100,25 @@ changed it.
    The replacement is **one undo step** named `AI: <label>`. Selection, zoom and scroll are kept, except that the
    selection is cleared when the canvas size changed.
 3. When `layer` or `frame` is given, the app makes it current, clamped to the new document.
-4. The document becomes dirty and its revision goes up. The result carries the new `Doc`.
+4. The optional `selection` follows the same shape (in the coordinates of the new document): left out keeps the
+   selection as in step 2, an object replaces it, `null` clears it. A mask whose size is not `w * h` is `-32602`.
+   Pixels outside the canvas are ignored. The selection change is part of the same undo step.
+5. The document becomes dirty and its revision goes up. The result carries the new `Doc`.
+
+`documents.undo` and `documents.redo` walk the same history the user sees (so they also undo the user's own edits).
+The revision goes up when `steps` is more than 0. They follow the rules for busy and unknown documents below.
 
 Applies run on the app's UI thread between frames. A stroke the user is drawing in the middle of an apply is
-finished first. If a modal sheet is open (for example a save prompt), the app may refuse with `-32010` (busy), and
-the client retries a little later.
+finished first. If a modal sheet is open (for example a save prompt) or a shape is half drawn, the app refuses every request
+that changes something (everything except `documents.list`, `documents.get` and `view.get`) with `-32010` (busy),
+and the client retries a little later. An unknown id is reported (`-32004`) before busy.
 
 ## Errors
 
 | Code | Meaning |
 | --- | --- |
 | `-32700`, `-32600`, `-32601`, `-32602` | Standard JSON-RPC errors: parse error, invalid request, unknown method, bad params |
-| `-32001` | Unauthorized: no `hello` yet, or a wrong token |
+| `-32001` | Unauthorized: no `hello` yet, a wrong token, or, with the message "disconnected by the user", the user pressed Disconnect (see User control) |
 | `-32004` | Unknown document id |
 | `-32009` | Stale revision. Fetch again with `documents.get` and retry. |
 | `-32010` | Busy: a modal sheet is open or a stroke is in progress |
@@ -114,11 +133,19 @@ and also available to Rust callers:
 - `pixmith_encode_document(doc, &len) -> bytes` gives the document as `.pxmt` bytes. Free them with
   `pixmith_bytes_free`.
 - `pixmith_apply_document(doc, bytes, len, label)` decodes `.pxmt` or `.aseprite` bytes and swaps them in as one
-  undo step named `label`.
+  undo step named `label`. `pixmith_apply_document_selection` does the same and also keeps, clears or replaces the
+  selection in that step.
+- `pixmith_live_selection(doc, &x, &y, &w, &h, &len) -> bytes` gives the selection as above (NULL: no selection).
+- `pixmith_state_id(doc)` changes after every edit, undo and redo; the apps compare it to notice that a document
+  changed, which is what bumps its `revision`.
+
+Both apps label the undo step `AI: <label>`.
 
 ## User control
 
 - Preferences have a switch, **Allow AI agents to control Pixmith (Live mode)**, which is on by default. Turning it
   off closes the port and removes the discovery file.
 - While a client is connected, the title row shows a small "AI connected" chip. Its menu lists the client and offers
-  **Disconnect**.
+  **Disconnect**. Disconnect closes every connection and makes the app refuse later `hello`s with `-32001` and the
+  message "disconnected by the user", until Live mode is turned off and on again in Preferences (which starts
+  over with a new port and token). A client should stop reconnecting when it sees that message.

@@ -9,12 +9,14 @@
 //! | `view.rs` | `ViewSettings.swift` and `CanvasOverlays.swift` |
 //! | `view_options.rs` | `ViewOptionsWindow.swift` |
 //! | `preview.rs` | `PreviewWindow.swift` |
+//! | `retouch.rs` | the Blur and Jumble parts of `DrawingTools.swift` |
 //!
 //! The canvas calls into `draw` from its pointer handling and into `view` when it paints. A menu bar calls the
 //! `pub fn`s at the bottom of this file.
 
 pub mod draw;
 pub mod preview;
+pub mod retouch;
 pub mod text;
 pub mod view;
 pub mod view_options;

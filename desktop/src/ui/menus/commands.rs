@@ -6,6 +6,7 @@
 
 use super::filters::FilterKind;
 use super::hooks;
+use super::spritedata;
 use crate::app::{PixmithApp, Tool};
 use crate::doc::Doc;
 use crate::ui::canvas::{INKS, fit_zoom};
@@ -32,6 +33,8 @@ pub enum Cmd {
     ExportGif,
     ExportApng,
     ExportSequence,
+    /// WebP, JPEG, BMP, TGA, ICO, PCX or FLC (index into `image_formats::EXPORT_KINDS`).
+    ExportImage(usize),
     ExportToGodot,
     ReexportToGodot,
     ExportTileset,
@@ -41,11 +44,14 @@ pub enum Cmd {
     ImportSheetJson,
     ImportGif,
     ImportPngLayer,
+    ImportImage,
     Script(usize),
     RunScript,
     OpenScriptsFolder,
     InstallExamples,
     RescanScripts,
+    /// A command a Lua plugin added to File > Scripts (index into `LuaState::commands`).
+    PluginCommand(usize),
     Quit,
     // Edit
     Undo,
@@ -64,6 +70,7 @@ pub enum Cmd {
     ModifySelection(u32),
     SelectByColor,
     // Sprite
+    SpriteProperties,
     CanvasSize,
     CropToSelection,
     SliceProperties,
@@ -83,6 +90,8 @@ pub enum Cmd {
     DuplicateLayer,
     MergeLayerDown,
     NewGroup,
+    NewReferenceLayer,
+    ToggleReferenceLayer,
     // Frame
     NewFrame,
     DuplicateFrame,
@@ -127,6 +136,7 @@ pub enum Cmd {
     TiledMode(usize),
     ShowReference,
     LoadReference,
+    ReferenceDisplay(usize),
     History,
     ViewOptions,
     Tween,
@@ -189,6 +199,11 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
             if script_entries.is_empty() {
                 script_entries.push(Entry::Note("No scripts found"));
             }
+            let plugin_commands = app.gamedev.lua.commands().len();
+            if plugin_commands > 0 {
+                script_entries.push(Sep);
+                script_entries.extend((0..plugin_commands).map(|i| Item(Cmd::PluginCommand(i))));
+            }
             script_entries.extend([
                 Sep,
                 Item(Cmd::RunScript),
@@ -214,6 +229,10 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
                 Item(Cmd::ExportGif),
                 Item(Cmd::ExportApng),
                 Item(Cmd::ExportSequence),
+                sub(
+                    "Export As",
+                    (0..crate::ui::image_formats::EXPORT_KINDS.len()).map(|i| Item(Cmd::ExportImage(i))).collect(),
+                ),
                 Sep,
                 Item(Cmd::ExportToGodot),
                 Item(Cmd::ReexportToGodot),
@@ -228,6 +247,7 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
                         Item(Cmd::ImportSheetJson),
                         Item(Cmd::ImportGif),
                         Item(Cmd::ImportPngLayer),
+                        Item(Cmd::ImportImage),
                     ],
                 ),
                 sub("Scripts", script_entries),
@@ -261,6 +281,8 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
             Item(Cmd::SelectByColor),
         ],
         "Sprite" => vec![
+            Item(Cmd::SpriteProperties),
+            Sep,
             Item(Cmd::CanvasSize),
             Item(Cmd::CropToSelection),
             Sep,
@@ -304,6 +326,8 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
             Item(Cmd::DuplicateLayer),
             Item(Cmd::MergeLayerDown),
             Item(Cmd::NewGroup),
+            Item(Cmd::NewReferenceLayer),
+            Item(Cmd::ToggleReferenceLayer),
         ],
         "Frame" => vec![
             Item(Cmd::NewFrame),
@@ -385,6 +409,10 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
             sub("Tiled Mode", (0..4).map(|i| Item(Cmd::TiledMode(i))).collect()),
             Item(Cmd::ShowReference),
             Item(Cmd::LoadReference),
+            sub(
+                "Reference Layers",
+                (0..spritedata::REFERENCE_DISPLAY.len()).map(|i| Item(Cmd::ReferenceDisplay(i))).collect(),
+            ),
             Item(Cmd::History),
             Item(Cmd::ViewOptions),
             Item(Cmd::Tween),
@@ -437,6 +465,7 @@ impl Cmd {
             Cmd::ExportGif => t("Export Animated GIF\u{2026}"),
             Cmd::ExportApng => t("Export Animated PNG\u{2026}"),
             Cmd::ExportSequence => t("Export PNG Sequence\u{2026}"),
+            Cmd::ExportImage(i) => t(crate::ui::image_formats::menu_label(crate::ui::image_formats::EXPORT_KINDS[i])),
             Cmd::ExportToGodot => t("Export to Godot\u{2026}"),
             Cmd::ReexportToGodot => t("Re-export to Godot"),
             Cmd::ExportTileset => t("Export Tileset to Godot\u{2026}"),
@@ -446,11 +475,13 @@ impl Cmd {
             Cmd::ImportSheetJson => t("Sprite Sheet with JSON\u{2026}"),
             Cmd::ImportGif => t("Animated GIF as New Sprite\u{2026}"),
             Cmd::ImportPngLayer => t("PNG as New Layer\u{2026}"),
+            Cmd::ImportImage => t("Image (WebP, JPEG, BMP, TGA, ICO, PCX, FLC) as New Sprite\u{2026}"),
             Cmd::Script(i) => hooks::script_names(app).get(i).cloned().unwrap_or_default(),
             Cmd::RunScript => t("Run Script\u{2026}"),
             Cmd::OpenScriptsFolder => t("Open Scripts Folder"),
             Cmd::InstallExamples => t("Install Example Scripts"),
             Cmd::RescanScripts => t("Rescan"),
+            Cmd::PluginCommand(i) => app.lua_command(i).map_or_else(String::new, |c| c.title.clone()),
             Cmd::Quit => t("Quit Pixmith"),
             Cmd::Undo => t("Undo"),
             Cmd::Redo => t("Redo"),
@@ -469,6 +500,7 @@ impl Cmd {
             Cmd::InvertSelection => t("Invert Selection"),
             Cmd::ModifySelection(k) => t(MODIFY[k.min(2) as usize]),
             Cmd::SelectByColor => t("Select by Color"),
+            Cmd::SpriteProperties => t("Sprite Properties\u{2026}"),
             Cmd::CanvasSize => t("Canvas Size\u{2026}"),
             Cmd::CropToSelection => t("Crop to Selection"),
             Cmd::SliceProperties => t("Slice Properties\u{2026}"),
@@ -488,6 +520,8 @@ impl Cmd {
             Cmd::DuplicateLayer => t("Duplicate Layer"),
             Cmd::MergeLayerDown => t("Merge Layer Down"),
             Cmd::NewGroup => t("New Group"),
+            Cmd::NewReferenceLayer => t("New Reference Layer from File\u{2026}"),
+            Cmd::ToggleReferenceLayer => t("Reference Layer"),
             Cmd::NewFrame => t("New Frame"),
             Cmd::DuplicateFrame => t("Duplicate Frame"),
             Cmd::DeleteFrame => t("Delete Frame"),
@@ -526,6 +560,9 @@ impl Cmd {
             Cmd::TiledMode(i) => t(TILED_MODES[i.min(3)]),
             Cmd::ShowReference => t("Show Reference Image"),
             Cmd::LoadReference => t("Load Reference Image\u{2026}"),
+            Cmd::ReferenceDisplay(i) => {
+                t(spritedata::REFERENCE_DISPLAY[i.min(spritedata::REFERENCE_DISPLAY.len() - 1)].0)
+            }
             Cmd::History => t("History"),
             Cmd::ViewOptions => t("View Options\u{2026}"),
             Cmd::Tween => t("Tween"),
@@ -604,6 +641,7 @@ impl Cmd {
         let doc = &tab.doc;
         match self {
             Cmd::OpenRecent(_) => true,
+            Cmd::PluginCommand(i) => app.lua_command(i).is_some_and(|c| c.enabled) && !app.job_running(),
             Cmd::ClearRecent => !app.menus.recents.is_empty(),
             Cmd::Undo => doc.history_counts().0 > 0,
             Cmd::Redo => doc.history_counts().1 > 0,
@@ -620,6 +658,7 @@ impl Cmd {
             Cmd::MoveFrameRight => tab.frame + 1 < doc.frame_count(),
             Cmd::DeleteFrame => doc.frame_count() > 1,
             Cmd::MergeLayerDown => doc.can_merge_down(tab.layer),
+            Cmd::ToggleReferenceLayer => !doc.layer_is_group(tab.layer),
             Cmd::NextTab | Cmd::PreviousTab => app.tabs.len() > 1,
             _ => true,
         }
@@ -640,16 +679,28 @@ impl Cmd {
             Cmd::TileStamp => hooks::tile_stamp(app),
             Cmd::OnionSkin => app.timeline.onion_skin,
             Cmd::Grid => app.timeline.show_grid,
+            Cmd::PluginCommand(i) => match app.lua_command(i) {
+                Some(c) if c.checked => true,
+                _ => return None,
+            },
             Cmd::Preview => hooks::preview_open(app),
             Cmd::TiledMode(i) => hooks::tiled_mode(app) == i,
             Cmd::ShowReference => hooks::show_reference(app),
+            Cmd::ToggleReferenceLayer => app.tab().doc.layer_is_reference(app.tab().layer),
+            Cmd::ReferenceDisplay(i) => spritedata::reference_display_is(app, i),
             Cmd::History => app.menus.history_open,
             _ => return None,
         })
     }
 
-    /// What the entry does.
+    /// What the entry does, announced to Lua scripts as `beforecommand` / `aftercommand`.
     pub fn run(self, app: &mut PixmithApp, ctx: &egui::Context) {
+        crate::ui::lua_dialog::before_command(app, self);
+        self.run_command(app, ctx);
+        crate::ui::lua_dialog::after_command(app, self);
+    }
+
+    fn run_command(self, app: &mut PixmithApp, ctx: &egui::Context) {
         match self {
             Cmd::Home => app.go_home(),
             Cmd::New => app.request_new_sprite(),
@@ -674,6 +725,7 @@ impl Cmd {
             Cmd::ExportGif => app.request_export(ExportKind::Gif),
             Cmd::ExportApng => app.request_export(ExportKind::Apng),
             Cmd::ExportSequence => app.request_export(ExportKind::Sequence),
+            Cmd::ExportImage(i) => app.request_export(crate::ui::image_formats::EXPORT_KINDS[i]),
             Cmd::ExportToGodot => hooks::export_to_godot(app),
             Cmd::ReexportToGodot => hooks::reexport_to_godot(app),
             Cmd::ExportTileset => hooks::export_tileset_to_godot(app),
@@ -687,6 +739,7 @@ impl Cmd {
             Cmd::ImportSheetJson => hooks::import_sheet_with_json(app),
             Cmd::ImportGif => hooks::import_gif_as_sprite(app),
             Cmd::ImportPngLayer => hooks::import_png_as_layer(app),
+            Cmd::ImportImage => app.import_image_dialog(),
             Cmd::Script(i) => {
                 if let Some(name) = hooks::script_names(app).get(i).cloned() {
                     hooks::run_script(app, &name);
@@ -696,6 +749,7 @@ impl Cmd {
             Cmd::OpenScriptsFolder => hooks::open_scripts_folder(app),
             Cmd::InstallExamples => hooks::install_example_scripts(app),
             Cmd::RescanScripts => hooks::rescan_scripts(app),
+            Cmd::PluginCommand(i) => app.lua_run_command(i),
             Cmd::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Cmd::Undo => {
                 let tab = app.tab_mut();
@@ -721,6 +775,7 @@ impl Cmd {
             Cmd::InvertSelection => hooks::invert_selection(app),
             Cmd::ModifySelection(k) => hooks::modify_selection(app, k),
             Cmd::SelectByColor => hooks::select_by_color(app),
+            Cmd::SpriteProperties => app.menus.sprite_props = true,
             Cmd::CanvasSize => app.menus.open_canvas_size(app.tab().doc.width(), app.tab().doc.height()),
             Cmd::CropToSelection => hooks::crop_to_selection(app),
             Cmd::SliceProperties => hooks::slice_properties(app),
@@ -765,6 +820,8 @@ impl Cmd {
             Cmd::DuplicateLayer => layer_edit(app, |d, l| d.duplicate_layer(l)),
             Cmd::MergeLayerDown => layer_edit(app, |d, l| d.merge_layer_down(l)),
             Cmd::NewGroup => layers::add_group(app.tab_mut()),
+            Cmd::NewReferenceLayer => spritedata::new_reference_layer(app),
+            Cmd::ToggleReferenceLayer => spritedata::toggle_reference(app),
             Cmd::NewFrame => header::add_frame(app.tab_mut(), false),
             Cmd::DuplicateFrame => header::add_frame(app.tab_mut(), true),
             Cmd::DeleteFrame => {
@@ -868,6 +925,7 @@ impl Cmd {
                 hooks::set_show_reference(app, on);
             }
             Cmd::LoadReference => hooks::load_reference_image(app, ctx),
+            Cmd::ReferenceDisplay(i) => spritedata::set_reference_display(app, i),
             Cmd::History => app.menus.history_open ^= true,
             Cmd::ViewOptions => hooks::view_options(app),
             Cmd::Tween => hooks::toggle_tween(app),

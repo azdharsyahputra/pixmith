@@ -5,9 +5,8 @@
 //! responsive and the document is not touched while it runs; a successful result is applied as one undo step.
 
 use super::paths;
-use super::{Notice, ScriptOutcome};
 use crate::app::PixmithApp;
-use crate::calls::gamedev::{Snapshot, example_scripts, script_cancel};
+use crate::calls::gamedev::example_scripts;
 use crate::theme::{Colors, font, ui_font};
 use crate::ui::widgets::{self, DialogAction};
 use eframe::egui;
@@ -169,8 +168,9 @@ impl PixmithApp {
         }
     }
 
-    /// Runs the script at `path` on a snapshot of the active document (`runScript(at:)`). A successful run is
-    /// one undo step; a failing one leaves the document untouched.
+    /// Runs the script at `path` on a snapshot of the active document (`runScript(at:)`) as a Lua session
+    /// (`ui::lua_dialog`): dialogs it opens are drawn by the app, and a successful run is one undo step; a failing
+    /// one leaves the document untouched.
     pub fn run_script_at(&mut self, path: &Path) {
         if self.job_running() {
             return;
@@ -180,51 +180,7 @@ impl PixmithApp {
             self.error = Some(format!("Could not read {name}."));
             return;
         };
-        let tab = self.tab_mut();
-        tab.playing = false;
-        let Some(snapshot) = tab.doc.snapshot() else { return };
-        let (target, layer, frame) = (tab.doc.raw() as usize, tab.layer, tab.frame);
-        script_cancel(false);
-        self.start_job(&format!("Running {name}\u{2026}"), true, Some(|| script_cancel(true)), move || {
-            let outcome = snapshot.run_script(&source, layer, frame);
-            Box::new(move |app: &mut PixmithApp| app.script_finished(&name, target, snapshot, outcome))
-        });
-    }
-
-    fn script_finished(&mut self, name: &str, target: usize, snapshot: Snapshot, outcome: ScriptOutcome) {
-        let index = self.tabs.iter().position(|t| t.doc.raw() as usize == target);
-        if let (true, Some(i)) = (outcome.ok, index) {
-            self.tabs[i].doc.apply_job(&snapshot);
-        }
-        let failure = (!outcome.ok).then_some(outcome.failure);
-        let (selection, messages) = split_selection(&outcome.messages);
-        if let (None, Some(i), Some((l, f))) = (&failure, index, selection) {
-            let tab = &mut self.tabs[i];
-            let (layers, frames) = (tab.doc.layer_count().max(1), tab.doc.frame_count().max(1));
-            tab.layer = l.saturating_sub(1).min(layers - 1);
-            tab.frame = f.saturating_sub(1).min(frames - 1);
-        }
-        if let Some(i) = index {
-            // A script may have removed the current layer or frame.
-            let tab = &mut self.tabs[i];
-            (tab.layer, tab.frame) = tab.doc.clamp_selection(tab.layer, tab.frame);
-            tab.changed();
-        }
-        if failure.as_deref() == Some("script cancelled") {
-            return;
-        }
-        if messages.is_empty() && failure.is_none() {
-            return;
-        }
-        let mut parts = vec![messages];
-        if let Some(f) = &failure {
-            parts.push(format!("{f}\nThe document was not changed."));
-        }
-        self.gamedev.notice = Some(Notice {
-            title: if failure.is_none() { name.to_string() } else { format!("Script error in {name}") },
-            text: parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n"),
-            warning: failure.is_some(),
-        });
+        self.lua_start_script(&name, &source);
     }
 }
 
@@ -277,17 +233,17 @@ mod tests {
         dir
     }
 
-    /// Runs the job queue until the running job has completed.
+    /// Runs the frames of the Lua side until the script's session is over.
     fn finish_job(app: &mut PixmithApp) {
         let ctx = egui::Context::default();
         for _ in 0..2000 {
-            super::super::jobs::poll(app, &ctx);
-            if !app.job_running() {
+            crate::ui::lua_dialog::show(app, &ctx);
+            if !app.job_running() && app.gamedev.lua.sessions().next().is_none() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("job did not finish");
+        panic!("script did not finish");
     }
 
     #[test]

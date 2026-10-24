@@ -217,7 +217,10 @@ impl PixmithApp {
     /// The Open panel: Pixmith documents, Aseprite files and PNGs.
     pub fn open_dialog(&mut self) {
         let picked = rfd::FileDialog::new()
-            .add_filter("Pixmith, Aseprite or PNG", &["pxmt", "aseprite", "ase", "png"])
+            .add_filter(
+                "Pixmith, Aseprite, images or extensions",
+                &[&crate::ui::image_formats::OPEN_EXTENSIONS[..], &["pixmith-extension"]].concat(),
+            )
             .add_filter("Pixmith", &["pxmt"])
             .add_filter("Aseprite", &["aseprite", "ase"])
             .add_filter("PNG", &["png"])
@@ -229,32 +232,43 @@ impl PixmithApp {
 
     /// Opens `path` in a tab (or switches to the tab that already has it). Errors go to `self.error`.
     pub fn open_path(&mut self, path: &Path) {
+        // An extension package installs instead of opening.
+        if pixmith_core::extensions::is_package(path) {
+            self.install_extension(path);
+            return;
+        }
         // A folder opens as a project (dropped on the window, or given on the command line).
         if path.is_dir() {
             self.open_project(path);
             return;
         }
+        if crate::ui::image_formats::is_image_path(path) {
+            self.open_image_path(path);
+            return;
+        }
+        if let Err(e) = self.open_file_in_tab(path) {
+            self.error = Some(e);
+        }
+    }
+
+    /// Opens a document file or PNG in a tab, or switches to the tab that already has it; the tab is active
+    /// afterwards. The error is returned instead of shown.
+    pub fn open_file_in_tab(&mut self, path: &Path) -> Result<(), String> {
         let is_png = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"));
         if is_png {
-            match Doc::import_png(path) {
-                Ok(mut doc) => {
-                    self.add_recent(path);
-                    doc.touch();
-                    self.present(doc);
-                }
-                Err(e) => self.error = Some(e),
-            }
-            return;
+            let mut doc = Doc::import_png(path)?;
+            self.add_recent(path);
+            doc.touch();
+            self.present(doc);
+            return Ok(());
         }
         if let Some(i) = self.tabs.iter().position(|t| t.doc.path.as_deref().is_some_and(|p| same_file(p, path))) {
             self.active = i;
             self.show_editor();
-            return;
+            return Ok(());
         }
-        match Doc::open(path) {
-            Ok(doc) => self.present(doc),
-            Err(e) => self.error = Some(e),
-        }
+        self.present(Doc::open(path)?);
+        Ok(())
     }
 
     // --- Saving --------------------------------------------------------------------------------
@@ -301,25 +315,28 @@ impl PixmithApp {
     }
 
     fn write_to(&mut self, i: usize, path: &Path) -> bool {
-        if let Some(other) = (0..self.tabs.len())
-            .find(|&j| j != i && self.tabs[j].doc.path.as_deref().is_some_and(|p| same_file(p, path)))
-        {
-            self.error = Some(format!(
-                "\u{201C}{}\u{201D} is already open in another tab. Close that tab first.",
-                self.tab_name(other)
-            ));
-            return false;
-        }
-        match self.tabs[i].doc.save_marked(path) {
-            Ok(()) => {
-                self.sync_untitled();
-                true
-            }
+        match self.write_checked(i, path) {
+            Ok(()) => true,
             Err(e) => {
                 self.error = Some(e);
                 false
             }
         }
+    }
+
+    /// Saves tab `i` to `path` (`.pxmt` unless the path says `.aseprite`); the error is returned instead of shown.
+    pub fn write_checked(&mut self, i: usize, path: &Path) -> Result<(), String> {
+        if let Some(other) = (0..self.tabs.len())
+            .find(|&j| j != i && self.tabs[j].doc.path.as_deref().is_some_and(|p| same_file(p, path)))
+        {
+            return Err(format!(
+                "\u{201C}{}\u{201D} is already open in another tab. Close that tab first.",
+                self.tab_name(other)
+            ));
+        }
+        self.tabs[i].doc.save_marked(path)?;
+        self.sync_untitled();
+        Ok(())
     }
 
     // --- Closing and quitting ------------------------------------------------------------------
@@ -337,7 +354,7 @@ impl PixmithApp {
     }
 
     /// Removes tab `i` without asking. The last tab becomes a fresh untitled document.
-    fn close_tab(&mut self, i: usize, return_to: Option<usize>) {
+    pub(crate) fn close_tab(&mut self, i: usize, return_to: Option<usize>) {
         if self.tabs.len() <= 1 {
             if !self.is_pristine(0) {
                 let (w, h) = self.files.new_size;
@@ -440,8 +457,15 @@ impl PixmithApp {
             ExportKind::Png | ExportKind::Apng | ExportKind::Sequence => (format!("{base}.png"), ("PNG", "png")),
             ExportKind::Sheet => (format!("{base}-sheet.png"), ("PNG", "png")),
             ExportKind::Gif => (format!("{base}.gif"), ("GIF", "gif")),
+            other => (crate::ui::image_formats::save_name(other, &base).0, ("", "")),
         };
-        let mut dialog = rfd::FileDialog::new().add_filter(filter.0, &[filter.1]).set_file_name(name);
+        let mut dialog = rfd::FileDialog::new().set_file_name(name);
+        dialog = if crate::ui::image_formats::is_image_kind(opts.kind) {
+            let (title, exts) = crate::ui::image_formats::save_name(opts.kind, &base).1;
+            dialog.add_filter(title, exts)
+        } else {
+            dialog.add_filter(filter.0, &[filter.1])
+        };
         if let Some(dir) = tab.doc.path.as_ref().and_then(|p| p.parent()) {
             dialog = dialog.set_directory(dir);
         }
@@ -462,6 +486,10 @@ impl PixmithApp {
                     return;
                 }
                 doc.export_png_sequence(scale, &base)
+            }
+            kind => {
+                let frame = (!opts.image.all_frames(kind)).then_some(tab.frame);
+                doc.export_image(frame, scale, &path, &opts.image.json())
             }
         };
         if let Err(e) = result {

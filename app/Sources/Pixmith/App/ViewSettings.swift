@@ -214,6 +214,7 @@ struct ViewCommands: Commands {
             }
             Toggle("Show Reference Image", isOn: $settings.showReference).disabled(settings.referenceImage == nil)
             Button("Load Reference Image…") { settings.chooseReference() }
+            ReferenceLayerViewMenu(model: model)
             Button("History") { HistoryController.shared.toggle(model: model) }
                 .keyboardShortcut("y", modifiers: [.command, .option])
             Button("View Options…") { ViewOptionsController.shared.show() }

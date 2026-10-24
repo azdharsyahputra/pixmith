@@ -71,6 +71,7 @@ pub fn canvas_size(app: &mut PixmithApp, ctx: &egui::Context, s: &mut CanvasSize
 /// The Cel Properties sheet: opacity of the current cel and linking of cels across frames.
 pub struct CelSession {
     pub opacity: i32,
+    pub z_index: i32,
     pub from: u32,
     pub to: u32,
 }
@@ -80,6 +81,7 @@ impl CelSession {
         let frames = tab.doc.frame_count().max(1);
         CelSession {
             opacity: tab.doc.cel_opacity(tab.layer, tab.frame).unwrap_or(255) as i32,
+            z_index: tab.doc.cel_z_index(tab.layer, tab.frame).unwrap_or(0),
             from: tab.frame + 1,
             to: (tab.frame + 2).min(frames),
         }
@@ -112,8 +114,20 @@ pub fn cel(app: &mut PixmithApp, ctx: &egui::Context, s: &mut CelSession) -> boo
                 }
             });
         });
+        ui.add_enabled_ui(has_cel, |ui| {
+            widgets::form_row(ui, "Z-index", |ui| {
+                super::spritedata::signed_field(ui, &mut s.z_index, -32768..=32767);
+                if super::spritedata::button(ui, "Apply") {
+                    changed |= tab.doc.set_cel_z_index(layer, frame, s.z_index);
+                }
+            });
+        });
+        widgets::note(
+            ui,
+            "Cels draw in order of layer position plus z-index; equal positions keep the lower layer first.",
+        );
         divider(ui);
-        widgets::note(ui, "Linked cels share their image: editing one edits all.");
+        widgets::note(ui, "Linked cels share their image, opacity and z-index: editing one edits all.");
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             widgets::number_field(ui, "From", &mut s.from, 1..=frames, "", 110.0);

@@ -8,7 +8,7 @@ use crate::app::{DocTab, PixmithApp, Tool};
 use crate::doc::Doc;
 use crate::theme::{Colors, space};
 use crate::ui::selection::{self, SelectionState};
-use crate::ui::tools::{draw, view};
+use crate::ui::tools::{draw, retouch, view};
 use crate::ui::widgets;
 use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Sense, Vec2};
 use std::collections::HashMap;
@@ -55,6 +55,8 @@ pub struct DrawOptions {
     pub fill_pattern: usize,
     /// Spray density in percent (`sprayDensity`).
     pub spray_density: f64,
+    /// Blur strength in percent (`retouchStrength`).
+    pub retouch_strength: f64,
     /// Size of the custom brush taken from a selection, if any (`customBrush`).
     pub custom_brush: Option<(i32, i32)>,
 }
@@ -75,6 +77,7 @@ impl Default for DrawOptions {
             gradient_dither: 0,
             fill_pattern: 0,
             spray_density: 40.0,
+            retouch_strength: 50.0,
             custom_brush: None,
         }
     }
@@ -398,6 +401,18 @@ fn interact(
     }
 }
 
+/// Ends the pointer gesture in progress, if any, as if the button was released (Live mode does this before it
+/// changes a document). Returns whether there was one.
+pub fn finish_gesture(app: &mut PixmithApp) -> bool {
+    let Some(gesture) = app.canvas.gesture.take() else { return false };
+    if let Gesture::Tool(g) = gesture
+        && let Some(tab) = app.tabs.iter_mut().find(|t| t.doc.raw() as usize == g.doc)
+    {
+        finish(&mut app.canvas, tab, &g);
+    }
+    true
+}
+
 fn mutated(tab: &mut DocTab) {
     tab.doc.touch();
     tab.changed();
@@ -449,6 +464,7 @@ fn begin(
             tab.doc.stroke_begin(layer, frame, p.0, p.1, pen.map_or(c, |v| v.0), pen.map_or(brush, |v| v.1), flags);
             mutated(tab);
         }
+        Tool::Blur | Tool::Jumble => retouch::down(state, tab, tool, brush, p),
         Tool::Line | Tool::Rectangle | Tool::Ellipse => {
             begin_edit(tab, tool.title());
             apply_ink(state, tab, *primary, secondary, right);
@@ -502,6 +518,7 @@ fn drag(
             tab.doc.stroke_to(p.0, p.1);
             mutated(tab);
         }
+        Tool::Blur | Tool::Jumble => retouch::drag(state, tab, brush, p),
         Tool::Spray | Tool::Gradient | Tool::Curve | Tool::ShapePolygon | Tool::Contour => {
             let right = g.button == PointerButton::Secondary;
             draw::drag(state, tab, g.tool, g.start, right, g.color, p, constrain);
@@ -518,6 +535,9 @@ fn drag(
 
 fn finish(state: &mut CanvasState, tab: &mut DocTab, g: &ToolGesture) {
     draw::up(state, tab, g.tool);
+    if retouch::is_retouch(g.tool) {
+        retouch::up(tab);
+    }
     if matches!(g.tool, Tool::Pencil | Tool::Eraser | Tool::Line | Tool::Rectangle | Tool::Ellipse) {
         tab.doc.stroke_end();
         mutated(tab);
@@ -638,6 +658,7 @@ fn handle_keys(app: &mut PixmithApp, ctx: &egui::Context) {
         draw::handle_key(canvas, &mut tabs[*active], ctx);
     }
     if undo || redo {
+        crate::ui::lua_dialog::note_undo(app);
         app.canvas.gesture = None;
         let tab = app.tab_mut();
         let moved = if redo { tab.doc.redo() } else { tab.doc.undo() };

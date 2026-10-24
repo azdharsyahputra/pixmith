@@ -107,7 +107,7 @@ private struct TimelineCanvas: View, Equatable {
         let guide = dark ? Color.white.opacity(0.035) : Color.black.opacity(0.05)
         let dot = dark ? Color(white: 0.64) : Color(white: 0.40)
         let faint = dark ? Color(white: 0.46) : Color(white: 0.60)
-        let accent = Color.accentColor
+        let accent = DSColor.accent
 
         // Selected layer row, current frame column.
         if let r = row(of: input.layer) {
@@ -517,6 +517,9 @@ private struct TimelineLayerRow: View {
                     if pixmith_layer_is_tilemap(model.doc, UInt32(index)) {
                         Image(systemName: "square.grid.3x3").font(.system(size: 9)).foregroundStyle(DSColor.textSecondary)
                     }
+                    if model.isReference(index) {
+                        Image(systemName: "photo").font(.system(size: 10, weight: .semibold)).foregroundStyle(DSColor.accent)
+                    }
                 }
                 .frame(width: 16, height: 16)
                 .clipShape(RoundedRectangle(cornerRadius: 3))
@@ -529,6 +532,16 @@ private struct TimelineLayerRow: View {
                 .opacity(visible ? 1 : 0.5)
                 .lineLimit(1)
             Spacer(minLength: 0)
+            if !group, model.isReference(index) {
+                Button { model.setLocked(index, !model.isLocked(index)) } label: {
+                    Image(systemName: model.isLocked(index) ? "lock.fill" : "lock.open").font(.system(size: 10))
+                        .foregroundStyle(DSColor.textTertiary)
+                        .frame(width: DS.Metric.control, height: DS.Metric.control)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(model.isLocked(index) ? "Reference layer is locked: click to allow drawing" : "Lock the reference layer")
+            }
             Button { model.setVisible(index, !visible) } label: {
                 Image(systemName: visible ? "eye" : "eye.slash").font(.system(size: 12))
                     .foregroundStyle(visible ? DSColor.textTertiary : DSColor.textSecondary)

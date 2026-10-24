@@ -66,14 +66,19 @@ Each file mirrors a Swift file, so a change in one app is easy to carry over to 
 | `src/app.rs` | `App/ContentView.swift` layout, `Tool`, per-tab state |
 | `src/doc.rs`, `src/calls/*.rs` | `Model/SpriteModel.swift`: safe wrappers over the `pixmith_*` entry points (all `unsafe` lives here) |
 | `src/ui/title_row.rs` | `Tools/TopBar.swift` `TitleRow`, `App/Documents.swift` `TabBar` |
+| `src/ui/image_formats.rs`, `src/calls/images.rs` | `Dialogs/ImageFormats.swift` (WebP, JPEG, BMP, TGA, ICO, PCX, FLC: import, icon size question, export options) |
 | `src/ui/dialogs.rs`, `src/calls/files.rs` | `NewSpriteSheet`, `App/FileActions.swift`, `App/Documents.swift` |
 | `src/ui/tool_rail.rs` | `Tools/ToolsPanel.swift` |
 | `src/ui/tilemap/*.rs`, `src/calls/tilemap.rs` | `Panels/TilemapView.swift`, `Panels/AutotileView.swift`, `Canvas/SlicesView.swift` (tileset, terrain brush, slices, their sheets and canvas overlays) |
+| `src/ui/lua_dialog.rs`, `src/ui/lua_dialog/`, `src/calls/script_ui.rs` | `App/ScriptHost.swift` (Lua dialogs, events and plugin commands, `docs/LUA_DIALOG.md`): `model` is the dialog JSON and its events, `render` the widgets, `lua_dialog.rs` the sessions, messages, File > Scripts commands and app events; `script_ui.rs` is the only code that calls `pixmith_core::scripting::host` (and has a `FakeHost` for tests) |
 | `src/ui/gamedev/`, `src/calls/gamedev.rs` | `Panels/TweenView.swift`, `Dialogs/GodotExport.swift`, `Dialogs/GodotTilesetExport.swift`, `App/Scripts.swift`, `Autosaver` in `App/FileActions.swift`, `ProgressSheet.swift` |
 | `src/ui/menus/` (`bar.rs`, `commands.rs`) | the menus of `PixmithApp.swift` and every `CommandMenu` in `app/Sources/Pixmith` |
 | `src/ui/menus/filters.rs`, `calls/menus.rs` | `Dialogs/FiltersView.swift`, `Dialogs/CurvesEditor.swift`, `Dialogs/ColorModeView.swift` |
 | `src/ui/menus/history.rs`, `prefs.rs`, `shortcuts.rs`, `help.rs` | `Panels/HistoryPanel.swift`, `App/Preferences.swift`, `App/Shortcuts.swift` |
+| `src/live/` (`mod.rs`, `net.rs`) | `App/Live.swift`: Pixmith Live, the loopback server for AI agents (`docs/LIVE_PROTOCOL.md`); the chip is in `src/ui/title_row.rs` |
+| `src/ui/menus/spritedata.rs`, `src/calls/spritedata.rs` | `Panels/SpriteDataUI.swift` (Sprite Properties with the color profile, cel z-index in Cel Properties, reference layers: the New Reference Layer command, the timeline icon and lock, the View > Reference Layers display) |
 | `src/ui/projects/`, `src/calls/projects.rs` | Home (recent canvases and projects), the project view (canvas grid, trash, reorder), the editor's project switcher; the `.pxmt` and project core calls |
+| `src/ui/inspector/color.rs`, `inspector/selectors.rs` | `Panels/ColorPanel.swift` (Color section, Spectrum), `Panels/ColorSelectors.swift` (wheel, sliders, Gray, Normal map); both use the core's `colorpick` module |
 | `src/ui/context_bar.rs`, `canvas.rs`, `inspector.rs`, `timeline.rs` | `Tools/TopBar.swift` `ContextBar`, `Canvas/`, `Panels/Inspector.swift`, `Panels/Timeline.swift` |
 
 ## Status: phase 1
@@ -84,7 +89,7 @@ Works now:
 - Title row: document tabs with the unsaved-changes dot, close button on hover, middle-click and a context menu to close, the active tab on the lifted panel color, "+" for a new tab; zoom out, a zoom menu (presets, Zoom to Fit, Actual Size) and zoom in, bound to the active tab; the blue Export menu.
 - New sprite sheet (width and height, 1 to 4096), Open (`.aseprite`, `.ase` and `.png`, which opens as a new unsaved sprite), Save, Save As (`.aseprite`), and dropping files on the window. An already open file switches to its tab.
 - The unsaved-changes question (Save, Don't Save, Cancel) when closing a dirty tab or the window; closing the last tab leaves a fresh untitled sprite.
-- Export of PNG (current frame), sprite sheet (strip or grid, padding, scale, JSON), animated GIF, animated PNG and PNG sequence, all through the same core calls as the macOS app.
+- Export of PNG (current frame), sprite sheet (strip or grid, padding, scale, JSON), animated GIF, animated PNG and PNG sequence, all through the same core calls as the macOS app. WebP, JPEG, BMP, TGA, ICO, PCX and FLC are exported from the Export menu ("Other formats" / File > Export As) with their options, and open from Open, File > Import > Image and drag and drop (`src/ui/image_formats.rs`, `src/calls/images.rs`).
 - Errors from the core show in a dialog.
 
 | Shortcut | Action |
@@ -97,6 +102,25 @@ Works now:
 | Ctrl/Cmd+= and Ctrl/Cmd+- | Zoom in and out |
 
 Not in phase 1: the macOS app's other import commands (GIF, sprite sheet, PNG as layer), Open Recent, autosave and crash recovery, the Export options and Godot export sheets, tab reordering by drag, and the panels and canvas tools that are still being ported (see the Swift sources for the full target). Exports run on the UI thread, so very large sprites pause the window while they write.
+
+## Live mode
+
+Like the macOS app, the egui app can be driven by the Pixmith MCP server (`docs/LIVE_PROTOCOL.md`). `src/live/net.rs` runs a `TcpListener` on `127.0.0.1` (port picked by the OS) on background threads and writes `<app data>/Live/<pid>.json` (mode 0600 on Linux and macOS; `%APPDATA%\Pixmith\Live` on Windows), which is removed when the app exits or Live mode is switched off. Requests are newline-delimited JSON-RPC; after `hello` with the token they are queued to the UI thread, which answers them at the start of each frame (`live::frame`, called from `PixmithApp::ui`), so documents are only touched by the UI thread. A request is refused with `-32010` while a sheet is open; a mouse stroke in progress is finished first. Each tab gets an id (`doc-N`) and a revision that goes up on every change. The switch is in Preferences > General (on by default, saved with the other preferences) and the title row shows an "AI connected" chip with Disconnect. `tests/live.rs` starts the server on a temporary app folder and plays the client with a plain `TcpStream`.
+
+## Clipboard and pen pressure
+
+**Clipboard.** Copy and Cut put the selection (or the whole cel) on the system clipboard as an image (`arboard::Clipboard::set_image`, `src/ui/sysclip.rs`), so other apps can paste it, and keep the app's own copy, so pasting inside Pixmith lands where the pixels came from. If the system clipboard refuses the image, a text marker is put there instead. Paste takes an image from another app and puts it, floating, in the middle of the canvas. egui-winit turns Ctrl/Cmd+V into a text `Paste` event and swallows the key press, so with an image-only clipboard (a screenshot, another editor) nothing arrives on press; `PasteWatch` also reacts to the release of V while Ctrl/Cmd is held, once per key press.
+
+**Pen pressure.** Pressure scales the brush size (and the color's opacity for the pencil and eraser) when the options are on.
+
+| OS | What reaches the app | Pressure |
+| --- | --- | --- |
+| Windows 8 and later | winit 0.30 reads the pen's `WM_POINTER` message (`GetPointerPenInfo`, pressure 1 to 1024) and sends a `Touch` event with `force`, which egui passes on as `Event::Touch { force }`; this is what `ui/tools/draw.rs::track_pressure` reads. Needs a Windows Ink driver (the Wacom, Huion and XP-Pen drivers have a Windows Ink option; "Surface"-type pens work as they are). Tilt and the eraser end are not used. | Yes |
+| Linux, X11 | winit 0.30 only reports XInput2 touch events, without pressure (`force: None`). A graphics tablet acts as a mouse. | No (full pressure, so strokes are not thinned) |
+| Linux, Wayland | winit 0.30 has no tablet protocol support; touch events carry no force. | No, as above |
+| macOS | The Swift app is the macOS front end and reads `NSEvent.pressure`; the egui build on macOS gets no pressure. | No |
+
+Without pressure the brush is used at its full size, so nothing breaks; switching a stylus to "Windows Ink" mode (or running the macOS app) is the way to get pressure. A real X11 path would read the pressure valuator of the XInput2 pen device through `x11rb`; it is not included because it could not be tested here.
 
 ## Projects and `.pxmt`
 

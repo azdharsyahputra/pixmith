@@ -394,6 +394,8 @@ pub struct GamedevState {
     pub godot: Option<GodotSheet>,
     pub tileset: Option<TilesetSheet>,
     pub scripts: scripts::ScriptLibrary,
+    /// Lua sessions, dialogs and plugin commands (`ui::lua_dialog`).
+    pub lua: crate::ui::lua_dialog::LuaState,
     pub job: Option<jobs::Job>,
     pub notice: Option<Notice>,
     pub autosave: autosave::Autosaver,
@@ -408,6 +410,7 @@ impl GamedevState {
         self.prefs = prefs::Prefs::at(paths::prefs_file());
         self.autosave.start();
         self.scripts.rescan();
+        self.lua.start();
     }
 }
 

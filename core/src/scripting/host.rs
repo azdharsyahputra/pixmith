@@ -7,15 +7,14 @@
 //! *commit* that the front end applies on its own thread with `pixmith_script_apply`.
 
 use super::dialog::{self, Dlg, Reaction};
+use super::events::{event_bit, EventsH, Listener};
+use super::plugins::{self, Command, Prefs};
 use super::{clean_error, conform_changed_cels, new_sandbox, Ctx, Limits, SpriteH, MARKER};
 use crate::document::{Editor, Sprite};
 use crate::formats::json::{self, Value as J};
 use crate::paint::selection::Selection;
 use mlua::chunk::ChunkMode;
-use mlua::{
-    AnyUserData, Error, Function, IntoLuaMulti, Lua, MultiValue, Result as LuaResult, Table, UserData, UserDataFields,
-    UserDataMethods, Value, VmState,
-};
+use mlua::{AnyUserData, Error, Function, IntoLuaMulti, Lua, Result as LuaResult, Table, Value, VmState};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::{c_char, CStr, CString};
@@ -32,25 +31,7 @@ pub const MAX_SESSIONS: usize = 64;
 const MAX_COMMITS: usize = 64;
 /// Messages kept for a front end that does not poll.
 const MAX_QUEUED: usize = 50_000;
-/// Largest `plugin.preferences` file, and deepest nesting.
-const MAX_PREFS: usize = 1 << 20;
-const MAX_JSON_DEPTH: u32 = 16;
 const WORKER_STACK: usize = 16 << 20;
-
-/// Event kinds a session can listen for (bit positions of `Shared::listens`).
-const EVENTS: [(&str, &str, u32); 7] = [
-    ("app", "sitechange", 1),
-    ("app", "fgcolorchange", 2),
-    ("app", "bgcolorchange", 4),
-    ("app", "beforecommand", 8),
-    ("app", "aftercommand", 16),
-    ("sprite", "change", 32),
-    ("sprite", "filenamechange", 64),
-];
-
-fn event_bit(scope: &str, name: &str) -> Option<u32> {
-    EVENTS.iter().find(|e| e.0 == scope && e.1 == name).map(|e| e.2)
-}
 
 // MARK: Messages and commits
 
@@ -88,11 +69,11 @@ struct Commit {
     label: String,
 }
 
-struct Shared {
+pub(super) struct Shared {
     id: u64,
     tx: Sender<Cmd>,
     cancel: Arc<AtomicBool>,
-    listens: AtomicU32,
+    pub(super) listens: AtomicU32,
 }
 
 struct Inner {
@@ -105,6 +86,8 @@ struct Inner {
     commits: Mutex<VecDeque<((u64, u64), Commit)>>,
     /// `fg << 32 | bg`
     colors: AtomicU64,
+    /// Budgets of one transaction.
+    limits: Limits,
 }
 
 impl Inner {
@@ -153,7 +136,13 @@ pub enum Spec {
 
 impl Host {
     pub fn new() -> Host {
+        Host::with_limits(Limits::default())
+    }
+
+    /// A host whose sessions use these per-transaction budgets (tests; the C ABI uses the defaults).
+    pub fn with_limits(limits: Limits) -> Host {
         Host(Arc::new(Inner {
+            limits,
             next_id: AtomicU64::new(1),
             sessions: Mutex::new(Vec::new()),
             queue: Mutex::new(VecDeque::new()),
@@ -316,55 +305,31 @@ impl Budget {
     }
 }
 
-struct Listener {
-    id: u64,
-    scope: &'static str,
-    event: String,
-    f: Function,
-    /// Sprite listeners fire for the document that was active when they were registered.
-    tag: Option<u64>,
-}
-
-struct Command {
-    id: String,
-    title: String,
-    onclick: Option<Function>,
-    onenabled: Option<Function>,
-    onchecked: Option<Function>,
-    enabled: bool,
-    checked: bool,
-}
-
-struct Prefs {
-    table: Table,
-    path: Option<String>,
-    last: String,
-}
-
 /// The worker side of a session. Lives in an `Rc` shared by the Lua closures of that session.
 pub(super) struct Rt {
     host: Arc<Inner>,
-    shared: Arc<Shared>,
+    pub(super) shared: Arc<Shared>,
     rx: Receiver<Cmd>,
     pending: RefCell<VecDeque<Cmd>>,
     ctx: RefCell<Weak<Ctx>>,
     dialogs: RefCell<Vec<Dlg>>,
     dialog_seq: Cell<u32>,
-    listeners: RefCell<Vec<Listener>>,
-    listener_seq: Cell<u64>,
-    commands: RefCell<Vec<Command>>,
+    pub(super) listeners: RefCell<Vec<Listener>>,
+    pub(super) listener_seq: Cell<u64>,
+    pub(super) commands: RefCell<Vec<Command>>,
     state: Cell<&'static str>,
     txn_seq: Cell<u64>,
     in_txn: Cell<bool>,
-    cur_tag: Cell<u64>,
+    pub(super) cur_tag: Cell<u64>,
     budget: Rc<Budget>,
     plugin: bool,
     stopping: Cell<bool>,
-    prefs: RefCell<Option<Prefs>>,
+    pub(super) prefs: RefCell<Option<Prefs>>,
 }
 
-struct Report {
-    fatal: bool,
+pub(super) struct Report {
+    pub(super) fatal: bool,
+    pub(super) ok: bool,
 }
 
 impl Rt {
@@ -376,15 +341,15 @@ impl Rt {
         self.shared.id
     }
 
-    fn ctx(&self) -> Rc<Ctx> {
+    pub(super) fn ctx(&self) -> Rc<Ctx> {
         self.ctx.borrow().upgrade().expect("script context outlives its runtime")
     }
 
-    fn emit(&self, ty: &str, fields: Vec<(&str, J)>) {
+    pub(super) fn emit(&self, ty: &str, fields: Vec<(&str, J)>) {
         self.host.push(obj(ty, self.id(), fields));
     }
 
-    fn set_state(&self, s: &'static str) {
+    pub(super) fn set_state(&self, s: &'static str) {
         if self.state.get() != s {
             self.state.set(s);
             self.emit("state", vec![("state", J::Str(s.into()))]);
@@ -453,7 +418,7 @@ impl Rt {
     }
 
     /// Calls a Lua callback; when it fails, what it did to the sprite and selection is undone.
-    fn run_callback(&self, _lua: &Lua, f: &Function, args: impl IntoLuaMulti) -> LuaResult<()> {
+    pub(super) fn run_callback(&self, _lua: &Lua, f: &Function, args: impl IntoLuaMulti) -> LuaResult<()> {
         let ctx = self.ctx();
         let (sprite, mask) = (ctx.sprite().clone(), ctx.mask.borrow().clone());
         let r = f.call::<()>(args);
@@ -577,130 +542,14 @@ impl Rt {
         }
     }
 
-    fn on_command(&self, lua: &Lua, ev: &J) -> LuaResult<()> {
-        let id = jstr(ev, "id").unwrap_or("");
-        let found = self.commands.borrow().iter().find(|c| c.id == id).map(|c| (c.onclick.clone(), c.title.clone()));
-        if let Some((Some(f), title)) = found {
-            let ctx = self.ctx();
-            ctx.label.borrow_mut().get_or_insert(title);
-            self.run_callback(lua, &f, ())?;
-        }
-        Ok(())
-    }
-
-    fn on_app_event(&self, lua: &Lua, ev: &J) -> LuaResult<()> {
-        let scope = if jstr(ev, "type") == Some("sprite.event") { "sprite" } else { "app" };
-        let name = jstr(ev, "name").unwrap_or("");
-        let ctx = self.ctx();
-        let tag = self.cur_tag.get();
-        let fs: Vec<Function> = self
-            .listeners
-            .borrow()
-            .iter()
-            .filter(|l| {
-                l.scope == scope && l.event == name && (scope == "app" || (l.tag == Some(tag) && ctx.has_doc.get()))
-            })
-            .map(|l| l.f.clone())
-            .collect();
-        for f in fs {
-            let t = lua.create_table()?;
-            if let J::Obj(m) = ev {
-                for (k, v) in m {
-                    if k != "type" {
-                        t.set(k.as_str(), json_to_lua(lua, v, 0)?)?;
-                    }
-                }
-            }
-            if let Some(c) = jstr(ev, "command") {
-                t.set("name", c)?;
-            }
-            self.run_callback(lua, &f, t)?;
-        }
-        Ok(())
-    }
-
-    /// Re-evaluates `onenabled` / `onchecked` of the plugin's commands and reports changes.
-    fn refresh_commands(&self, lua: &Lua) {
-        let n = self.commands.borrow().len();
-        for i in 0..n {
-            let (id, oe, oc, was) = {
-                let c = self.commands.borrow();
-                let Some(c) = c.get(i) else { break };
-                (c.id.clone(), c.onenabled.clone(), c.onchecked.clone(), (c.enabled, c.checked))
-            };
-            let eval = |f: &Option<Function>, default: bool| match f {
-                Some(f) => {
-                    let ctx = self.ctx();
-                    let (sprite, mask) = (ctx.sprite().clone(), ctx.mask.borrow().clone());
-                    let r =
-                        f.call::<Value>(()).map(|v| !matches!(v, Value::Nil | Value::Boolean(false))).unwrap_or(false);
-                    // They must not change the document.
-                    *ctx.sprite() = sprite;
-                    *ctx.mask.borrow_mut() = mask;
-                    r
-                }
-                None => default,
-            };
-            let _ = lua;
-            let enabled = eval(&oe, true);
-            let checked = eval(&oc, false);
-            if (enabled, checked) != was {
-                if let Some(c) = self.commands.borrow_mut().get_mut(i) {
-                    c.enabled = enabled;
-                    c.checked = checked;
-                }
-                self.emit(
-                    "command.update",
-                    vec![(
-                        "command",
-                        J::Obj(vec![
-                            ("id".into(), J::Str(id)),
-                            ("enabled".into(), J::Bool(enabled)),
-                            ("checked".into(), J::Bool(checked)),
-                        ]),
-                    )],
-                );
-            }
-        }
-    }
-
     fn alive(&self) -> bool {
-        self.plugin || !self.listeners.borrow().is_empty() || self.dialogs.borrow().iter().any(|d| d.borrow().open)
-    }
-
-    fn update_listens(&self) {
-        let mut bits = 0;
-        for l in self.listeners.borrow().iter() {
-            bits |= event_bit(l.scope, &l.event).unwrap_or(0);
-        }
-        if self.commands.borrow().iter().any(|c| c.onenabled.is_some() || c.onchecked.is_some()) {
-            bits |= 1 | 32;
-        }
-        self.shared.listens.store(bits, Ordering::Relaxed);
-    }
-
-    // MARK: Events registration (app.events / sprite.events)
-
-    fn add_listener(&self, scope: &'static str, event: String, f: Function) -> u64 {
-        self.listener_seq.set(self.listener_seq.get() + 1);
-        let id = self.listener_seq.get();
-        let tag = self.ctx().has_doc.get().then(|| self.cur_tag.get());
-        self.listeners.borrow_mut().push(Listener { id, scope, event, f, tag });
-        self.update_listens();
-        id
-    }
-
-    fn remove_listener(&self, scope: &str, by_id: Option<u64>, by_fn: Option<&Function>) {
-        self.listeners
-            .borrow_mut()
-            .retain(|l| !(l.scope == scope && (by_id == Some(l.id) || by_fn.is_some_and(|f| *f == l.f))));
-        self.update_listens();
+        self.plugin || self.has_listeners() || self.dialogs.borrow().iter().any(|d| d.borrow().open)
     }
 
     // MARK: Transactions
 
     /// Runs `body` as one transaction against `doc`, then reports it to the front end.
-    fn run_txn(&self, lua: &Lua, doc: Option<DocSnap>, body: impl FnOnce() -> LuaResult<()>) -> Report {
+    pub(super) fn run_txn(&self, lua: &Lua, doc: Option<DocSnap>, body: impl FnOnce() -> LuaResult<()>) -> Report {
         let ctx = self.ctx();
         let ed = ctx.editor();
         let (has_doc, tag) = (doc.is_some(), doc.as_ref().map_or(0, |d| d.tag));
@@ -744,10 +593,13 @@ impl Rt {
         self.in_txn.set(true);
         let result = catch_unwind(AssertUnwindSafe(|| {
             body()?;
-            self.refresh_commands(lua);
+            self.refresh_commands();
             Ok::<(), Error>(())
         }));
         self.in_txn.set(false);
+        if matches!(result, Ok(Ok(()))) {
+            self.save_prefs();
+        }
 
         let messages: Vec<J> = ctx.messages.borrow_mut().drain(..).map(J::Str).collect();
         let label = ctx.label.borrow().clone();
@@ -814,34 +666,8 @@ impl Rt {
                 J::Obj(vec![("layer".into(), J::Num((l + 1) as f64)), ("frame".into(), J::Num((f + 1) as f64))]),
             ));
         }
-        if ok {
-            self.save_prefs();
-        }
         self.emit("txn", fields);
-        Report { fatal: fatal || (error.is_some() && self.stopping.get()) }
-    }
-
-    // MARK: Preferences
-
-    fn save_prefs(&self) {
-        let mut p = self.prefs.borrow_mut();
-        let Some(p) = p.as_mut() else { return };
-        let mut budget = 100_000usize;
-        let Some(j) = lua_to_json(&Value::Table(p.table.clone()), 0, &mut budget) else { return };
-        let text = json::to_string(&j);
-        if text == p.last || text.len() > MAX_PREFS {
-            return;
-        }
-        if let Some(path) = &p.path {
-            if let Some(dir) = std::path::Path::new(path).parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            if crate::formats::durable::write_file(path, text.as_bytes()).is_ok() {
-                p.last = text;
-            }
-        } else {
-            p.last = text;
-        }
+        Report { fatal: fatal || (error.is_some() && self.stopping.get()), ok }
     }
 }
 
@@ -850,7 +676,7 @@ fn cancelled() -> Error {
 }
 
 /// Errors that end a transaction even inside a modal dialog (limits, cancel) instead of being reported.
-fn is_fatal(e: &Error) -> bool {
+pub(super) fn is_fatal(e: &Error) -> bool {
     matches!(e, Error::MemoryError(_)) || {
         let s = e.to_string();
         s.contains("script cancelled") || s.contains("script stopped:")
@@ -863,192 +689,6 @@ fn is_change(ev: &J) -> bool {
 
 fn same_widget(a: &J, b: &J) -> bool {
     is_change(b) && jstr(a, "dialog") == jstr(b, "dialog") && jstr(a, "id") == jstr(b, "id")
-}
-
-// MARK: JSON <-> Lua
-
-fn json_to_lua(lua: &Lua, v: &J, depth: u32) -> LuaResult<Value> {
-    Ok(match v {
-        J::Null => Value::Nil,
-        J::Bool(b) => Value::Boolean(*b),
-        J::Num(n) if n.fract() == 0.0 && n.abs() < 9.0e15 => Value::Integer(*n as i64),
-        J::Num(n) => Value::Number(*n),
-        J::Str(s) => Value::String(lua.create_string(s)?),
-        J::Arr(a) if depth < MAX_JSON_DEPTH => {
-            let t = lua.create_table()?;
-            for (i, x) in a.iter().enumerate() {
-                t.raw_set(i + 1, json_to_lua(lua, x, depth + 1)?)?;
-            }
-            Value::Table(t)
-        }
-        J::Obj(m) if depth < MAX_JSON_DEPTH => {
-            let t = lua.create_table()?;
-            for (k, x) in m {
-                t.raw_set(k.as_str(), json_to_lua(lua, x, depth + 1)?)?;
-            }
-            Value::Table(t)
-        }
-        _ => Value::Nil,
-    })
-}
-
-/// A Lua value as JSON: booleans, numbers, strings and tables of them (functions and userdata are skipped).
-fn lua_to_json(v: &Value, depth: u32, budget: &mut usize) -> Option<J> {
-    *budget = budget.checked_sub(1)?;
-    Some(match v {
-        Value::Nil => J::Null,
-        Value::Boolean(b) => J::Bool(*b),
-        Value::Integer(i) => J::Num(*i as f64),
-        Value::Number(n) if n.is_finite() => J::Num(*n),
-        Value::Number(_) => J::Null,
-        Value::String(s) => J::Str(s.to_string_lossy()),
-        Value::Table(t) if depth < MAX_JSON_DEPTH => {
-            let len = t.raw_len();
-            let mut pairs = Vec::new();
-            for p in t.pairs::<Value, Value>() {
-                let (k, x) = p.ok()?;
-                pairs.push((k, x));
-            }
-            if len > 0 && pairs.len() == len {
-                let mut arr = Vec::with_capacity(len);
-                for i in 1..=len {
-                    let x: Value = t.raw_get(i).ok()?;
-                    arr.push(lua_to_json(&x, depth + 1, budget).unwrap_or(J::Null));
-                }
-                J::Arr(arr)
-            } else {
-                let mut o = Vec::new();
-                for (k, x) in pairs {
-                    let key = match k {
-                        Value::String(s) => s.to_string_lossy(),
-                        Value::Integer(i) => i.to_string(),
-                        Value::Number(n) => n.to_string(),
-                        _ => continue,
-                    };
-                    if matches!(x, Value::Function(_) | Value::UserData(_) | Value::Thread(_)) {
-                        continue;
-                    }
-                    o.push((key, lua_to_json(&x, depth + 1, budget)?));
-                }
-                J::Obj(o)
-            }
-        }
-        _ => return None,
-    })
-}
-
-// MARK: Lua API: app.events, sprite.events, plugin
-
-pub(super) struct EventsH {
-    pub ctx: Rc<Ctx>,
-    pub scope: &'static str,
-}
-
-impl UserData for EventsH {
-    fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
-        m.add_method("on", |_, this, (name, f): (String, Function)| {
-            if event_bit(this.scope, &name).is_none() {
-                return Err(Error::runtime(format!("unknown event '{name}'")));
-            }
-            let rt = this.ctx.rt.borrow().clone();
-            // Without a front end (command line) nothing can fire; accept the call and do nothing.
-            Ok(rt.map_or(0, |rt| rt.add_listener(this.scope, name, f)))
-        });
-        m.add_method("off", |_, this, what: Value| {
-            if let Some(rt) = this.ctx.rt.borrow().clone() {
-                match what {
-                    Value::Function(f) => rt.remove_listener(this.scope, None, Some(&f)),
-                    Value::Integer(i) if i > 0 => rt.remove_listener(this.scope, Some(i as u64), None),
-                    _ => return Err(Error::runtime("events:off expects a listener id or a function")),
-                }
-            }
-            Ok(())
-        });
-    }
-}
-
-struct PluginH {
-    ctx: Rc<Ctx>,
-    name: String,
-    path: String,
-    prefs: Table,
-}
-
-impl UserData for PluginH {
-    fn add_fields<F: UserDataFields<Self>>(f: &mut F) {
-        f.add_field_method_get("name", |_, p| Ok(p.name.clone()));
-        f.add_field_method_get("path", |_, p| Ok(p.path.clone()));
-        f.add_field_method_get("preferences", |_, p| Ok(p.prefs.clone()));
-    }
-
-    fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
-        m.add_method("newCommand", |_, p, t: Table| {
-            let rt = p.ctx.rt.borrow().clone().ok_or_else(|| Error::runtime("plugins need the Pixmith app"))?;
-            let id: String = t.get::<Option<String>>("id")?.ok_or_else(|| Error::runtime("newCommand needs an id"))?;
-            let title: String =
-                t.get::<Option<String>>("title")?.ok_or_else(|| Error::runtime("newCommand needs a title"))?;
-            let group = t.get::<Option<String>>("group")?.unwrap_or_else(|| "file_scripts".into());
-            let func = |key: &str| -> LuaResult<Option<Function>> {
-                match t.get::<Value>(key)? {
-                    Value::Function(f) => Ok(Some(f)),
-                    Value::Nil => Ok(None),
-                    _ => Err(Error::runtime(format!("'{key}' must be a function"))),
-                }
-            };
-            let cmd = Command {
-                id: id.clone(),
-                title: title.clone(),
-                onclick: func("onclick")?,
-                onenabled: func("onenabled")?,
-                onchecked: func("onchecked")?,
-                enabled: true,
-                checked: false,
-            };
-            if rt.commands.borrow().len() >= 256 {
-                return Err(Error::runtime("too many commands"));
-            }
-            let existed = rt.commands.borrow().iter().any(|c| c.id == id);
-            rt.commands.borrow_mut().retain(|c| c.id != id);
-            if existed {
-                rt.emit("command.remove", vec![("id", J::Str(id.clone()))]);
-            }
-            rt.commands.borrow_mut().push(cmd);
-            rt.update_listens();
-            rt.emit(
-                "command.add",
-                vec![
-                    ("plugin", J::Str(p.name.clone())),
-                    (
-                        "command",
-                        J::Obj(vec![
-                            ("id".into(), J::Str(id)),
-                            ("title".into(), J::Str(title)),
-                            ("group".into(), J::Str(group)),
-                            ("enabled".into(), J::Bool(true)),
-                            ("checked".into(), J::Bool(false)),
-                        ]),
-                    ),
-                ],
-            );
-            Ok(())
-        });
-        m.add_method("deleteCommand", |_, p, id: String| {
-            if let Some(rt) = p.ctx.rt.borrow().clone() {
-                let before = rt.commands.borrow().len();
-                rt.commands.borrow_mut().retain(|c| c.id != id);
-                if rt.commands.borrow().len() != before {
-                    rt.emit("command.remove", vec![("id", J::Str(id))]);
-                }
-                rt.update_listens();
-            }
-            Ok(())
-        });
-        for name in ["newMenuGroup", "newMenuSeparator"] {
-            m.add_method(name, move |_, _, _: MultiValue| -> LuaResult<()> {
-                Err(Error::runtime(format!("plugin:{name} is not supported by Pixmith")))
-            });
-        }
-    }
 }
 
 /// Adds `Dialog`, `app.events`, `app.isUIAvailable` and the table form of `app.alert` to a sandbox.
@@ -1094,7 +734,7 @@ fn worker(inner: &Arc<Inner>, shared: &Arc<Shared>, rx: Receiver<Cmd>, spec: Spe
         Spec::Plugin { source, name, dir, prefs_path } => (source, name, true, dir, prefs_path),
     };
     let ctx = Rc::new(Ctx::new(&mut editor));
-    let limits = Limits::default();
+    let limits = inner.limits;
     let budget = Rc::new(Budget {
         executed: Cell::new(0),
         started: Cell::new(Instant::now()),
@@ -1157,26 +797,7 @@ fn worker(inner: &Arc<Inner>, shared: &Arc<Shared>, rx: Receiver<Cmd>, spec: Spe
     // The plugin object (preferences are loaded before `init`).
     let mut plugin_obj: Option<AnyUserData> = None;
     if plugin {
-        let made = (|| -> LuaResult<AnyUserData> {
-            let prefs = match prefs_path.as_deref().and_then(read_prefs) {
-                Some(j) => match json_to_lua(&lua, &j, 0)? {
-                    Value::Table(t) => t,
-                    _ => lua.create_table()?,
-                },
-                None => lua.create_table()?,
-            };
-            *rt.prefs.borrow_mut() = Some(Prefs {
-                table: prefs.clone(),
-                path: prefs_path.clone(),
-                last: prefs_path.as_deref().and_then(read_prefs).map(|j| json::to_string(&j)).unwrap_or_default(),
-            });
-            lua.create_userdata(PluginH {
-                ctx: ctx.clone(),
-                name: name.clone(),
-                path: dir.clone().unwrap_or_default(),
-                prefs,
-            })
-        })();
+        let made = plugins::create(&rt, &lua, &ctx, &name, dir.as_deref(), prefs_path.as_deref());
         match made {
             Ok(p) => plugin_obj = Some(p),
             Err(e) => {
@@ -1190,15 +811,14 @@ fn worker(inner: &Arc<Inner>, shared: &Arc<Shared>, rx: Receiver<Cmd>, spec: Spe
         let plugin_obj = plugin_obj.clone();
         rt.run_txn(&lua, first, || {
             lua.load(source.as_str()).set_name(format!("={name}")).set_mode(ChunkMode::Text).exec()?;
-            if let Some(p) = plugin_obj {
-                if let Value::Function(init) = lua.globals().get::<Value>("init")? {
-                    init.call::<()>(p)?;
-                }
+            if let Some(p) = &plugin_obj {
+                plugins::call_init(&lua, p)?;
             }
             Ok(())
         })
     };
-    let mut keep_going = !report.fatal;
+    // A script whose main chunk failed ends (what it registered is dropped); a plugin stays loaded.
+    let mut keep_going = !report.fatal && (plugin || report.ok);
     while keep_going && rt.alive() {
         rt.update_listens();
         rt.set_state("idle");
@@ -1220,14 +840,8 @@ fn worker(inner: &Arc<Inner>, shared: &Arc<Shared>, rx: Receiver<Cmd>, spec: Spe
     // Unload: `exit(plugin)`, preferences, then close what is still open.
     budget.exiting.set(true);
     if plugin {
-        if let Some(p) = plugin_obj {
-            rt.set_state("running");
-            let _ = rt.run_txn(&lua, None, || {
-                if let Value::Function(exit) = lua.globals().get::<Value>("exit")? {
-                    exit.call::<()>(p)?;
-                }
-                Ok(())
-            });
+        if let Some(p) = &plugin_obj {
+            plugins::unload(&rt, &lua, p);
         }
         rt.save_prefs();
     }
@@ -1235,9 +849,7 @@ fn worker(inner: &Arc<Inner>, shared: &Arc<Shared>, rx: Receiver<Cmd>, spec: Spe
         d.borrow_mut().open = false;
         rt.emit("dialog.close", vec![("dialog", J::Str(d.borrow().id.clone()))]);
     }
-    for c in rt.commands.borrow_mut().drain(..) {
-        rt.emit("command.remove", vec![("id", J::Str(c.id))]);
-    }
+    plugins::drop_commands(&rt);
     rt.set_state("ended");
     // Break the reference cycle Lua -> closures -> Ctx -> Rt before the state is dropped.
     *ctx.rt.borrow_mut() = None;
@@ -1257,15 +869,6 @@ fn end_with_error(rt: &Rc<Rt>, error: &str) {
         ],
     );
     *rt.ctx().rt.borrow_mut() = None;
-}
-
-fn read_prefs(path: &str) -> Option<J> {
-    let meta = std::fs::metadata(path).ok()?;
-    if meta.len() as usize > MAX_PREFS {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    json::parse(&text).ok().filter(|j| matches!(j, J::Obj(_)))
 }
 
 // MARK: C ABI

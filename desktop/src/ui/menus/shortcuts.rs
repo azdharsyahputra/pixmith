@@ -41,7 +41,7 @@ pub enum Action {
 }
 
 /// The tools in the order of `Tool.allCases` in `SpriteModel.swift`.
-const TOOLS: [Tool; 19] = [
+const TOOLS: [Tool; 21] = [
     Tool::Pencil,
     Tool::Eraser,
     Tool::Fill,
@@ -61,6 +61,8 @@ const TOOLS: [Tool; 19] = [
     Tool::Contour,
     Tool::Text,
     Tool::ShapePolygon,
+    Tool::Blur,
+    Tool::Jumble,
 ];
 
 impl Action {
@@ -136,6 +138,8 @@ impl Action {
                 Tool::Contour => vec![k("d", false)],
                 Tool::ShapePolygon => vec![k("p", true)],
                 Tool::Text => vec![k("t", false)],
+                Tool::Blur => vec![k("r", false)],
+                Tool::Jumble => vec![k("r", true)],
             },
             Action::SwapColors => vec![k("x", false)],
             Action::BrushSmaller => vec![k("[", false)],
@@ -169,6 +173,8 @@ fn tool_raw(t: Tool) -> &'static str {
         Tool::Contour => "contour",
         Tool::Text => "text",
         Tool::ShapePolygon => "shapePolygon",
+        Tool::Blur => "blur",
+        Tool::Jumble => "jumble",
     }
 }
 

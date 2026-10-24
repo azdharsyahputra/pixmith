@@ -3,11 +3,15 @@
 pub mod canvas;
 pub mod context_bar;
 pub mod dialogs;
+pub mod extensions;
 pub mod gamedev;
+pub mod image_formats;
 pub mod inspector;
+pub mod lua_dialog;
 pub mod menus;
 pub mod projects;
 pub mod selection;
+pub mod sysclip;
 pub mod tilemap;
 pub mod timeline;
 pub mod title_row;

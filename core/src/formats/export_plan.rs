@@ -155,7 +155,9 @@ fn is_hidden_by_parent(s: &Sprite, i: usize) -> bool {
 /// Which layers produce their own output, for `LayerMode::Each`: visible image layers.
 fn each_layers(s: &Sprite) -> Vec<usize> {
     (0..s.layers.len())
-        .filter(|&i| !s.layers[i].is_group() && s.layers[i].visible && !is_hidden_by_parent(s, i))
+        .filter(|&i| {
+            !s.layers[i].is_group() && !s.layers[i].is_reference() && s.layers[i].visible && !is_hidden_by_parent(s, i)
+        })
         .collect()
 }
 
@@ -165,7 +167,7 @@ pub fn specs(s: &Sprite, o: &ExportOptions) -> Result<Vec<JobSpec>, String> {
     let layer_variants: Vec<(Option<usize>, Vec<String>)> = match o.layers {
         LayerMode::Visible => vec![(None, vec![])],
         LayerMode::Selected(i) => {
-            if i >= s.layers.len() || s.layers[i].is_group() {
+            if i >= s.layers.len() || s.layers[i].is_group() || s.layers[i].is_reference() {
                 return Err("the selected layer cannot be exported".into());
             }
             vec![(Some(i), vec![])]
@@ -342,17 +344,55 @@ pub enum Format {
     Sheet,
     /// Numbered PNG files; the path is a base name without extension.
     Sequence,
+    // The formats below are implemented in `formats::raster`; their options are `EncodeOptions::image`.
+    Webp,
+    Jpeg,
+    Bmp,
+    Tga,
+    Ico,
+    Pcx,
+    Flc,
 }
 
 impl Format {
     pub fn from_u32(v: u32) -> Option<Format> {
-        [Format::Png, Format::Gif, Format::Apng, Format::Sheet, Format::Sequence].get(v as usize).copied()
+        [
+            Format::Png,
+            Format::Gif,
+            Format::Apng,
+            Format::Sheet,
+            Format::Sequence,
+            Format::Webp,
+            Format::Jpeg,
+            Format::Bmp,
+            Format::Tga,
+            Format::Ico,
+            Format::Pcx,
+            Format::Flc,
+        ]
+        .get(v as usize)
+        .copied()
+    }
+
+    /// The raster format behind the formats of `formats::raster`.
+    pub fn image(self) -> Option<crate::formats::raster::ImageFormat> {
+        use crate::formats::raster::ImageFormat as F;
+        match self {
+            Format::Webp => Some(F::Webp),
+            Format::Jpeg => Some(F::Jpeg),
+            Format::Bmp => Some(F::Bmp),
+            Format::Tga => Some(F::Tga),
+            Format::Ico => Some(F::Ico),
+            Format::Pcx => Some(F::Pcx),
+            Format::Flc => Some(F::Flc),
+            _ => None,
+        }
     }
 
     fn extension(self) -> &'static str {
         match self {
             Format::Gif => "gif",
-            _ => "png",
+            _ => self.image().map_or("png", |f| f.extension()),
         }
     }
 }
@@ -364,6 +404,8 @@ pub struct EncodeOptions {
     pub frame: usize,
     pub sheet: sheet::Options,
     pub write_json: bool,
+    /// Settings of the formats in `formats::raster` (JPEG quality, WebP lossless, ICO sizes, ...).
+    pub image: crate::formats::raster::ImageOptions,
 }
 
 fn sanitize(name: &str) -> String {
@@ -418,7 +460,8 @@ pub fn render_outputs(
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut o = o.clone();
     // Animated formats need equally sized frames.
-    if matches!(fmt, Format::Gif | Format::Apng) && o.trim == Trim::PerFrame {
+    let animated = fmt.image().is_some_and(|f| crate::formats::raster::writes_animation(f, &e.image));
+    if (matches!(fmt, Format::Gif | Format::Apng) || animated) && o.trim == Trim::PerFrame {
         o.trim = Trim::Uniform;
     }
     let jobs = plan(s, &o)?;
@@ -435,6 +478,17 @@ pub fn render_outputs(
                     format!("frame {} does not exist (the export has {})", e.frame + 1, job.frames.len())
                 })?;
                 files.push((p, frame_png(f, e.scale)?));
+            }
+            Format::Webp | Format::Jpeg | Format::Bmp | Format::Tga | Format::Ico | Format::Pcx | Format::Flc => {
+                let fmt = fmt.image().expect("raster format");
+                if animated {
+                    files.push((p, crate::formats::raster::encode_animation(fmt, job, e.scale, &e.image)?));
+                } else {
+                    let f = job.frames.get(e.frame).ok_or_else(|| {
+                        format!("frame {} does not exist (the export has {})", e.frame + 1, job.frames.len())
+                    })?;
+                    files.push((p, crate::formats::raster::encode_still(fmt, f, e.scale, &e.image)?));
+                }
             }
             Format::Gif => files.push((p, crate::formats::gif::gif_bytes_job(job, e.scale)?)),
             Format::Apng => files.push((p, crate::formats::animation::apng_bytes_job(job, e.scale)?)),
@@ -497,7 +551,7 @@ pub struct PixmithExport {
     pub write_json: bool,
 }
 
-fn from_c(c: &PixmithExport) -> Option<(Format, ExportOptions, EncodeOptions)> {
+pub(crate) fn from_c(c: &PixmithExport) -> Option<(Format, ExportOptions, EncodeOptions)> {
     let layout = match c.layout {
         0 => Layout::Horizontal,
         1 => Layout::Vertical,
@@ -530,6 +584,7 @@ fn from_c(c: &PixmithExport) -> Option<(Format, ExportOptions, EncodeOptions)> {
             extrude: c.extrude as usize,
         },
         write_json: c.write_json,
+        image: Default::default(),
     };
     Some((Format::from_u32(c.format)?, o, e))
 }
@@ -798,7 +853,13 @@ mod tests {
         s.tags.push(tag("a", 0, 1, 0, 0));
         s.tags.push(tag("b", 2, 3, 0, 0));
         let o = ExportOptions { split_tags: true, trim: Trim::PerFrame, ..Default::default() };
-        let e = EncodeOptions { scale: 1, frame: 0, sheet: sheet::Options::default(), write_json: true };
+        let e = EncodeOptions {
+            scale: 1,
+            frame: 0,
+            sheet: sheet::Options::default(),
+            write_json: true,
+            image: Default::default(),
+        };
         let files = render_outputs(&s, Format::Sheet, &o, &e, "d/sheet.png", None).unwrap();
         let names: Vec<_> = files.iter().map(|f| f.0.as_str()).collect();
         assert_eq!(names, vec!["d/sheet-a.json", "d/sheet-a.png", "d/sheet-b.json", "d/sheet-b.png"]);
@@ -830,7 +891,13 @@ mod tests {
         s.draw_line(0, 1, 3, 4, 3, 4, BLUE, 1);
         s.tags.push(tag("loop", 0, 1, 0, 2));
         let o = ExportOptions { tag: Some(0), trim: Trim::PerFrame, ..Default::default() };
-        let e = EncodeOptions { scale: 2, frame: 0, sheet: sheet::Options::default(), write_json: false };
+        let e = EncodeOptions {
+            scale: 2,
+            frame: 0,
+            sheet: sheet::Options::default(),
+            write_json: false,
+            image: Default::default(),
+        };
         let apng = &render_outputs(&s, Format::Apng, &o, &e, "a.png", None).unwrap()[0].1;
         let mut r = png::Decoder::new(&apng[..]).read_info().unwrap();
         let ctl = r.info().animation_control.unwrap();

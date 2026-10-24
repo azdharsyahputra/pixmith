@@ -34,6 +34,8 @@ pub struct FilesState {
     pub renaming: Option<(usize, String)>,
     /// File > Import > Sprite Sheet as Frames: the chosen PNG and the cell size being asked for.
     pub sheet_import: Option<(std::path::PathBuf, u32, u32)>,
+    /// The "which size of this icon?" question while it is open (`ui/image_formats.rs`).
+    pub icon_choice: Option<crate::ui::image_formats::IconChoice>,
 }
 
 impl Default for FilesState {
@@ -48,6 +50,7 @@ impl Default for FilesState {
             quit_approved: false,
             quit_skip: Vec::new(),
             sheet_import: None,
+            icon_choice: None,
             renaming: None,
             next_revision: 0,
         }
@@ -102,10 +105,16 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
         + space::MD;
     // Home and the project view have no zoom or export.
     let editor = app.projects.is_editor();
-    let right_w = if editor { 28.0 + 2.0 + 70.0 + 2.0 + 28.0 + space::XS + export_w } else { 0.0 };
+    let editor_w = if editor { 28.0 + 2.0 + 70.0 + 2.0 + 28.0 + space::XS + export_w } else { 0.0 };
+    // Live mode: the chip shows while an AI client is connected.
+    let ai = app.live.connected();
+    let chip_w = if ai.is_empty() { 0.0 } else { live_chip_width(ui) + if editor { space::SM } else { 0.0 } };
+    let right_w = editor_w + chip_w;
     let right = Rect::from_min_max(pos2(full.right() - right_w, full.top()), full.right_bottom());
-    let mut left =
-        Rect::from_min_max(full.left_top(), pos2(right.left() - if editor { space::SM } else { 0.0 }, full.bottom()));
+    let mut left = Rect::from_min_max(
+        full.left_top(),
+        pos2(right.left() - if right_w > 0.0 { space::SM } else { 0.0 }, full.bottom()),
+    );
     // The menus come first (Windows and Linux have no global menu bar; macOS keeps the same in-window menu).
     let menu_w = crate::ui::menus::bar::width(ui, left.width());
     let menu_rect = Rect::from_min_size(left.min, vec2(menu_w, left.height()));
@@ -138,12 +147,18 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| tab_bar(app, ui, &mut tabs, &mut renaming));
             });
     });
-    if editor {
+    if right_w > 0.0 {
         ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::left_to_right(Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = space::XXS;
-            zoom_control(app, ui);
-            ui.add_space(space::XS - space::XXS);
-            export_button(app, ui);
+            if !ai.is_empty() {
+                live_chip(app, &ai, ui);
+                ui.add_space(space::SM - space::XXS);
+            }
+            if editor {
+                zoom_control(app, ui);
+                ui.add_space(space::XS - space::XXS);
+                export_button(app, ui);
+            }
         });
     }
 
@@ -434,6 +449,13 @@ fn export_button(app: &mut PixmithApp, ui: &mut Ui) {
             }
         }
         ui.separator();
+        ui.menu_button("Other formats", |ui| {
+            if let Some(kind) = crate::ui::image_formats::export_menu(ui) {
+                chosen = Some(kind);
+                ui.close();
+            }
+        });
+        ui.separator();
         godot = crate::ui::gamedev::export_menu(ui, can_reexport_tileset);
     });
     if let Some(kind) = chosen {
@@ -441,5 +463,45 @@ fn export_button(app: &mut PixmithApp, ui: &mut Ui) {
     }
     if let Some(item) = godot {
         app.run_export_menu_item(item);
+    }
+}
+
+const AI_CHIP_TEXT: &str = "AI connected";
+
+fn live_chip_width(ui: &Ui) -> f32 {
+    let text =
+        ui.painter().layout_no_wrap(AI_CHIP_TEXT.into(), widgets::strong(ui.ctx(), font::CAPTION), Color32::WHITE);
+    space::SM + 6.0 + space::XS + text.size().x + space::SM + 2.0
+}
+
+/// "AI connected" (Live mode): a quiet chip with a dot, and a menu naming the client with Disconnect.
+fn live_chip(app: &mut PixmithApp, clients: &[crate::live::net::Client], ui: &mut Ui) {
+    let c = Colors::of(ui.ctx());
+    let width = live_chip_width(ui);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, metric::CONTROL), Sense::click());
+    let (hover, down) = (response.hovered(), response.is_pointer_button_down_on());
+    let fill = if down || hover { c.selected_hover } else { c.selected };
+    ui.painter().rect_filled(rect, radius::CONTROL, fill);
+    ui.painter().circle_filled(pos2(rect.left() + space::SM + 3.0, rect.center().y), 3.0, c.accent);
+    let galley = ui.painter().layout_no_wrap(AI_CHIP_TEXT.into(), widgets::strong(ui.ctx(), font::CAPTION), c.accent);
+    let x = rect.left() + space::SM + 6.0 + space::XS;
+    ui.painter().galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, c.accent);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, AI_CHIP_TEXT));
+    let response = response.on_hover_text("An AI agent is connected. Click for details.");
+    let mut disconnect = false;
+    egui::Popup::menu(&response).show(|ui| {
+        for client in clients {
+            let name = if client.name.is_empty() { "A client" } else { client.name.as_str() };
+            let version = if client.version.is_empty() { String::new() } else { format!(" {}", client.version) };
+            ui.label(format!("{name}{version}"));
+        }
+        ui.label(egui::RichText::new("Its edits are undo steps.").color(c.text_secondary).size(font::CAPTION));
+        ui.separator();
+        if ui.button("Disconnect").clicked() {
+            disconnect = true;
+        }
+    });
+    if disconnect && let Some(server) = &app.live.server {
+        server.disconnect_by_user();
     }
 }

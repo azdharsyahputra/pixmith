@@ -95,6 +95,7 @@ Layer handle fields:
 | --- | --- |
 | `name`, `visible`, `opacity` (0-255), `blendMode` (0-18) | read/write |
 | `isGroup`, `isTilemap`, `index`, `level` | read-only (`level` is the nesting depth, 0 at the top) |
+| `isReference` | read/write: a reference layer is shown in the editor but never exported; turning it on also locks the layer against drawing. Groups cannot be reference layers |
 | `parent` | the containing group, or `nil` |
 | `children` | direct children of a group (bottom to top); empty for other layers |
 | `isVisible` | read-only: shown on the canvas, i.e. `visible` and every parent group `visible` |
@@ -126,7 +127,7 @@ read-only.
 - `sprite:cel(layer, frame)` returns a cel handle (groups have no cels).
 - `sprite:clearCel(layer, frame)` removes the image of a cel; returns whether anything was removed.
 
-Cel handle: `opacity` (0-255, read/write, the cel must not be empty), `isEmpty` (no cel or fully
+Cel handle: `opacity` (0-255, read/write, the cel must not be empty), `zIndex` (-32768..32767, read/write, the cel must not be empty: the cel draws as if its layer sat that many places higher, or lower when negative; the order is layer index plus z-index and ties go to the lower layer; linked cels share it), `isEmpty` (no cel or fully
 transparent), `linked` (shares its image with other frames), `linkedFrames` (list of the other
 frame numbers that share it), `layer`, `frame`, and `cel:unlink()` which gives the cel its own copy.
 
@@ -228,6 +229,82 @@ own Lua state with the same instruction, time and memory limits per transaction,
 Not supported (calling them raises an error): `Dialog:canvas`, `image`, `tab`/`endtabs`, `menu`,
 `ev:stopPropagation()` and canceling `beforecommand`, `plugin:newMenuGroup`.
 
+### Events
+
+```lua
+local id = app.events:on("sitechange", function(ev) print(ev.layer, ev.frame) end)   -- returns a number
+app.events:off(id)                  -- by the id, or by the function that was registered
+sprite.events:on("change", function(ev) if ev.fromUndo then print("undo/redo") end end)
+```
+
+| Object | Event | `ev` fields |
+| --- | --- | --- |
+| `app.events` | `sitechange` | `layer`, `frame` (1-based) of the new site |
+| `app.events` | `fgcolorchange`, `bgcolorchange` | `color` (`0xRRGGBBAA`) |
+| `app.events` | `beforecommand`, `aftercommand` | `name`, the menu command (`"Undo"`, `"Flip Horizontal"`, ...) |
+| `sprite.events` | `change` | `fromUndo` (true for undo and redo) |
+| `sprite.events` | `filenamechange` | |
+
+- Listeners run in the order they were registered, on the session's own Lua state, inside a transaction:
+  what a handler does to `sprite` is one undo step, and the usual instruction, time and memory limits
+  apply to each event separately. Inside a handler `app.activeLayer` / `app.activeFrame` are the site the
+  event reports.
+- `sprite.events` listeners belong to the document that was active when they were registered and only fire
+  for it. The usual pattern works: register on `sitechange`, `off` the old sprite listener, `on` the new one.
+- A handler that raises an error is rolled back and reported (`error: ...` in the messages of the
+  transaction); the other handlers still run and the failing one stays registered. A handler that exceeds a
+  limit or is cancelled ends that event.
+- Edits made by a handler do not produce a `change` event themselves.
+- A session with listeners stays loaded until the last one is removed (`off`) or the script is stopped.
+  Registering more than 1024 listeners in one session raises an error.
+- Without the app (command line) `on` accepts the call, returns 0 and nothing ever fires.
+- `ev:stopPropagation()` and canceling `beforecommand` are not available; calling `stopPropagation` raises
+  an error.
+
+Differences from Aseprite 1.3: `beforecommand` handlers see `ev.name` only (no `ev.params`) and cannot
+cancel; there is no `beforeexit` and no `sprite.events` `remaptileset`; `sitechange` also reports
+`ev.layer` / `ev.frame`.
+
+### Plugins
+
+A plugin is loaded once (by the app at launch, or when an extension is enabled), not run from the Scripts
+menu:
+
+```lua
+function init(plugin)
+  plugin.preferences.count = (plugin.preferences.count or 0) + 1     -- saved automatically
+  plugin:newCommand{
+    id = "mark", title = "Mark Corner...", group = "file_scripts",
+    onenabled = function() return sprite ~= nil end,
+    onchecked = function() return plugin.preferences.on == true end,
+    onclick = function() sprite:setPixel(0, 0, 0xFF0000FF) end,       -- one undo step, named by the title
+  }
+  app.events:on("sitechange", function() end)
+end
+function exit(plugin) end                                            -- optional
+```
+
+- `plugin.name`, `plugin.path` (the plugin folder, `""` if none), `plugin.preferences` (table).
+- `plugin:newCommand{ id, title, group, onclick, onenabled, onchecked }`: `id` and `title` are required;
+  a command with an existing id replaces it. At most 256 commands. `plugin:deleteCommand(id)` removes one.
+  `onenabled` / `onchecked` are evaluated after every event and command, must not change the sprite (any
+  change is discarded) and count as false when they fail.
+- `onclick` runs on the active document as one transaction (undo label: the command title, or
+  `app.undoLabel`). It may open dialogs. An error rolls it back and is reported; the plugin keeps working.
+- In `init`/`exit` `sprite` is `nil`; inside commands and event handlers it is the active document.
+- `plugin.preferences` holds booleans, finite numbers, strings and tables of them (depth 16; functions,
+  userdata, NaN and deeper values are not stored; integer keys of non-array tables become strings). It is
+  loaded before `init` from a JSON file (an unreadable, non-object or over 1 MB file counts as empty),
+  written after every transaction that changed it and after `exit`; over 1 MB it is not written and one
+  warning is shown.
+- `exit(plugin)` runs when the plugin is unloaded or the app quits, even if a command was cancelled; it has
+  its own time budget. An error in `init` is reported but the commands registered so far keep working.
+- `plugin:newMenuGroup` and `plugin:newMenuSeparator` raise "not supported". Every `group` is shown in the
+  File > Scripts submenu.
+
+Rust hosts use `scripting::host::Host::{load_plugin, run_command, stop, poll, send, broadcast, apply}`; the
+C ABI is `pixmith_plugin_load` and `pixmith_script_*` ([LUA_DIALOG.md](LUA_DIALOG.md) section 4).
+
 ## `color`
 
 - `color.rgba(r, g, b [, a])` packs 0-255 channels (alpha defaults to 255).
@@ -238,7 +315,8 @@ Not supported (calling them raises an error): `Dialog:canvas`, `image`, `tab`/`e
 `scripts/lua-examples/` contains runnable examples: `outline-layer.lua`, `color-ramp.lua`,
 `flip-all-frames.lua`, `palette-swap.lua`, `tag-every-4-frames.lua` and `palette-ramp-dialog.lua`
 (a dialog with a live ramp preview). `plugin-hello.lua` is a plugin example (a command with a dialog,
-preferences and an event); it is loaded as a plugin, not run from File > Scripts.
+preferences and an event); it is loaded as a plugin, not run from File > Scripts. `plugin-events.lua`
+tracks site changes, color changes and edits and offers a command that reports them.
 
 ## Embedding notes
 

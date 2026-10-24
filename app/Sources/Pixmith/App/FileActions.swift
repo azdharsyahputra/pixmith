@@ -304,6 +304,7 @@ struct FileCommands: Commands {
             Button("Export Animated GIF…") { model.exportGIF() }
             Button("Export Animated PNG…") { model.exportAPNG() }
             Button("Export PNG Sequence…") { model.exportPNGSequence() }
+            ExportImageMenu(model: model)
             Divider()
             Menu("Import") {
                 Button("PNG as New Sprite…") { model.importPNGAsSprite() }
@@ -311,6 +312,7 @@ struct FileCommands: Commands {
                 Button("Sprite Sheet with JSON…") { model.importSheetWithJSON() }
                 Button("Animated GIF as New Sprite…") { model.importGIFAsSprite() }
                 Button("PNG as New Layer…") { model.importPNGAsLayer() }
+                Button("Image (WebP, JPEG, BMP, TGA, ICO, PCX, FLC) as New Sprite…") { model.importImageAsSprite() }
             }
         }
     }

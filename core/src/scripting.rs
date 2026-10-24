@@ -22,7 +22,7 @@
 //!
 //! -- Layers
 //! sprite.layers[i] -> { name, visible, opacity (0..255), blendMode (0..18), isGroup, isTilemap,
-//!                       index, level, parent, children }
+//!                       isReference, index, level, parent, children }
 //! (also: isVisible (effective, with parents), tileset, userData, getTile / setTile on tilemap layers)
 //! sprite:newLayer(name), sprite:newGroup(name), sprite:deleteLayer(i), sprite:moveLayer(i, to) -> index
 //! sprite:moveLayerIntoGroup(i, group) -> index, sprite:moveLayerOutOfGroup(i) -> index
@@ -47,7 +47,7 @@
 //! -- User data: { text, color } on sprite.userData, layer.userData, cel.userData, tag.userData, slice.userData
 //!
 //! -- Cels
-//! sprite:cel(layer, frame) -> { opacity, isEmpty, linked, linkedFrames, unlink(), userData }
+//! sprite:cel(layer, frame) -> { opacity, zIndex, isEmpty, linked, linkedFrames, unlink(), userData }
 //! sprite:clearCel(layer, frame)
 //!
 //! -- Selection (scripts only look at it through these calls)
@@ -74,7 +74,9 @@ use crate::document::color_mode;
 use crate::document::{Editor, Sprite};
 use crate::paint::selection::Selection;
 mod dialog;
+mod events;
 pub mod host;
+mod plugins;
 #[cfg(test)]
 mod session_tests;
 
@@ -407,7 +409,7 @@ impl UserData for SpriteH {
             lua.create_sequence_from((0..n).map(|i| TagH::new(&t.0, i)))
         });
         f.add_field_method_get("selection", |_, t| Ok(SelectionH(t.0.clone())));
-        f.add_field_method_get("events", |_, t| Ok(host::EventsH { ctx: t.0.clone(), scope: "sprite" }));
+        f.add_field_method_get("events", |_, t| Ok(events::EventsH { ctx: t.0.clone(), scope: "sprite" }));
         f.add_field_method_get("tilesets", |lua, t| {
             let n = t.0.sprite().tilesets.len();
             lua.create_sequence_from((0..n).map(|i| TilesetH(t.0.clone(), i)))
@@ -734,6 +736,15 @@ impl UserData for LayerH {
         });
         f.add_field_method_get("isGroup", |_, t| Ok(t.get()?.is_group()));
         f.add_field_method_get("isTilemap", |_, t| Ok(t.get()?.kind == crate::document::tilemap::KIND_TILEMAP));
+        f.add_field_method_get("isReference", |_, t| Ok(t.get()?.is_reference()));
+        f.add_field_method_set("isReference", |_, t, v: bool| {
+            t.get()?;
+            if t.0.sprite().set_layer_reference(t.1, v) {
+                Ok(())
+            } else {
+                Err(Error::runtime("a group cannot be a reference layer"))
+            }
+        });
         f.add_field_method_get("index", |_, t| {
             t.get()?;
             Ok(t.1 + 1)
@@ -935,6 +946,19 @@ impl UserData for CelH {
         f.add_field_method_set("opacity", |_, t, v: i64| {
             t.check()?;
             if t.0.sprite().set_cel_opacity(t.1, t.2, v.clamp(0, 255) as u8) {
+                Ok(())
+            } else {
+                Err(Error::runtime("the cel is empty; draw something first"))
+            }
+        });
+        f.add_field_method_get("zIndex", |_, t| {
+            t.check()?;
+            Ok(t.0.sprite().cel_z_index(t.1, t.2).unwrap_or(0))
+        });
+        f.add_field_method_set("zIndex", |_, t, v: i64| {
+            t.check()?;
+            let z = v.clamp(i16::MIN as i64, i16::MAX as i64) as i32;
+            if t.0.sprite().set_cel_z_index(t.1, t.2, z) {
                 Ok(())
             } else {
                 Err(Error::runtime("the cel is empty; draw something first"))

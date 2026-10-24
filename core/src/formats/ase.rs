@@ -2,6 +2,7 @@
 //! Spec: https://github.com/aseprite/aseprite/blob/main/docs/ase-file-specs.md
 
 use crate::document::color_mode::{ColorMode, Encoder};
+use crate::document::spritedata::ColorProfile;
 use crate::document::tilemap;
 use crate::document::{default_palette, Cel, Layer, Sprite, Tag, MAX_CANVAS_PIXELS};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
@@ -17,6 +18,7 @@ const CHUNK_OLD_PALETTE: u16 = 0x0004;
 const CHUNK_OLD_PALETTE_6BIT: u16 = 0x0011;
 const CHUNK_LAYER: u16 = 0x2004;
 const CHUNK_CEL: u16 = 0x2005;
+const CHUNK_COLOR_PROFILE: u16 = 0x2007;
 const CHUNK_TAGS: u16 = 0x2018;
 const CHUNK_PALETTE: u16 = 0x2019;
 
@@ -92,6 +94,7 @@ struct PendingCel {
     frame: usize,
     layer: usize,
     opacity: u8,
+    z_index: i16,
     data: CelData,
 }
 
@@ -137,6 +140,7 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
     let mut has_new_palette = false;
     let mut pending = Vec::new();
     let mut raw_tilesets = Vec::new();
+    let mut color_profile = None;
     let mut pending_bytes = 0usize;
     let mut cel_bytes = 0usize;
     let mut tileset_bytes = 0usize;
@@ -211,6 +215,9 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
                     }
                     raw_tilesets.push(t);
                 }
+                CHUNK_COLOR_PROFILE => {
+                    color_profile.get_or_insert_with(|| ColorProfile::from_chunk(c.rest()));
+                }
                 CHUNK_TAGS => tags = read_tags(&mut c)?,
                 CHUNK_PALETTE => {
                     if !has_new_palette {
@@ -277,11 +284,17 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
                 let indices = (depth == 8).then(|| {
                     Arc::new(crate::document::color_mode::index_canvas(&data, x, y, cw, ch, w, h, transparent))
                 });
-                cels[p.frame][p.layer] =
-                    Some(Arc::new(Cel { opacity: p.opacity, pixels, indices, ..Default::default() }));
+                cels[p.frame][p.layer] = Some(Arc::new(Cel {
+                    opacity: p.opacity,
+                    pixels,
+                    indices,
+                    z_index: p.z_index,
+                    ..Default::default()
+                }));
             }
             CelData::Tilemap(grid) => {
-                if let Some(cel) = tilemap::cel_from_grid(&tilesets, &layers[p.layer], p.opacity, grid, w, h) {
+                if let Some(mut cel) = tilemap::cel_from_grid(&tilesets, &layers[p.layer], p.opacity, grid, w, h) {
+                    cel.z_index = p.z_index;
                     cels[p.frame][p.layer] = Some(Arc::new(cel));
                 }
             }
@@ -306,6 +319,7 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
         color_mode: ColorMode::from_depth(depth),
         transparent_index: transparent,
         extra: Default::default(),
+        color_profile: color_profile.unwrap_or_default(),
     };
     crate::document::slices::attach(bytes, &mut sprite);
     // The defaults (1:1 pixels, 16x16 grid at the origin) are stored as zeros so new sprites compare equal.
@@ -322,7 +336,8 @@ fn read_cel(c: &mut Reader, frame: usize, bpp: usize, budget: usize) -> Result<O
     let y = c.i16()? as i32;
     let opacity = c.u8()?;
     let kind = c.u16()?;
-    c.skip(2 + 5)?; // z-index, reserved
+    let z_index = c.i16()?;
+    c.skip(5)?; // reserved
     let data = match kind {
         0 | 2 => {
             let w = c.u16()? as usize;
@@ -350,7 +365,7 @@ fn read_cel(c: &mut Reader, frame: usize, bpp: usize, budget: usize) -> Result<O
         3 => CelData::Tilemap(tilemap::parse_tilemap_cel(c.rest(), x, y)?),
         _ => return Ok(None),
     };
-    Ok(Some(PendingCel { frame, layer, opacity, data }))
+    Ok(Some(PendingCel { frame, layer, opacity, z_index, data }))
 }
 
 fn read_tags(c: &mut Reader) -> Result<Vec<Tag>> {
@@ -595,7 +610,7 @@ fn cel_body(layer: usize, cel: &Cel, w: usize, h: usize, enc: &mut Encoder, back
     put_u16(&mut b, y0 as u16);
     b.push(cel.opacity);
     put_u16(&mut b, 2); // compressed image
-    put_u16(&mut b, 0); // z-index
+    put_u16(&mut b, cel.z_index as u16);
     b.extend([0; 5]);
     put_u16(&mut b, cw as u16);
     put_u16(&mut b, (y1 - y0) as u16);
@@ -610,7 +625,7 @@ fn linked_cel_body(layer: usize, cel: &Cel, source: usize) -> Vec<u8> {
     b.extend([0; 4]); // x, y
     b.push(cel.opacity);
     put_u16(&mut b, 1); // linked cel
-    put_u16(&mut b, 0); // z-index
+    put_u16(&mut b, cel.z_index as u16);
     b.extend([0; 5]);
     put_u16(&mut b, source as u16);
     b
@@ -639,6 +654,9 @@ pub fn write(s: &Sprite) -> Vec<u8> {
     for f in 0..s.frame_count() {
         let mut chunks = Vec::new();
         if f == 0 {
+            if let Some(body) = s.color_profile.chunk_body() {
+                chunks.push(chunk(CHUNK_COLOR_PROFILE, body));
+            }
             if !s.palette.is_empty() {
                 chunks.push(chunk(CHUNK_PALETTE, palette_body(&s.palette)));
             }
@@ -652,7 +670,9 @@ pub fn write(s: &Sprite) -> Vec<u8> {
             let Some(cel) = cel else { continue };
             let background = s.layers[li].flags & 8 != 0;
             if s.layers[li].kind == tilemap::KIND_TILEMAP {
-                if let Some(body) = tilemap::cel_body(li, cel) {
+                if let Some(mut body) = tilemap::cel_body(li, cel) {
+                    // Offset 9 of a cel chunk: layer, x, y, opacity, type, then the z-index.
+                    body[9..11].copy_from_slice(&cel.z_index.to_le_bytes());
                     chunks.push(chunk(CHUNK_CEL, body));
                 }
             } else if let Some(&source) = written.get(&(li, Arc::as_ptr(cel))) {
@@ -893,6 +913,7 @@ mod tests {
             tiles: None,
             user_data: Default::default(),
             indices: None,
+            z_index: 0,
         }));
         let back = read(&write(&s)).unwrap();
         assert_eq!(back.cels[0][0].as_ref().map(|c| (c.opacity, c.pixels.iter().all(|&p| p == 0))), Some((200, true)));

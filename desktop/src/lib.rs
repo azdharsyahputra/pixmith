@@ -6,9 +6,11 @@
 pub mod app;
 mod calls;
 pub mod doc;
+pub mod live;
 pub mod startup;
 pub mod theme;
 pub mod ui;
 
 pub use app::PixmithApp;
 pub use calls::projects;
+pub use calls::script_ui;

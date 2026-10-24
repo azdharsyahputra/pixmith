@@ -1,5 +1,5 @@
 //! File formats: `.aseprite`, PNG, GIF, APNG, sprite sheets with JSON metadata, and the export planner,
-//! plus crash-safe file writes shared by every exporter.
+//! plus WebP, JPEG, BMP, TGA, ICO, PCX and FLI/FLC (`raster`), and crash-safe file writes shared by every exporter.
 
 pub mod animation;
 pub mod ase;
@@ -10,5 +10,6 @@ pub mod gif;
 pub mod import;
 pub mod json;
 pub mod pxmt;
+pub mod raster;
 pub mod sheet;
 pub mod sheet_import;

@@ -69,6 +69,8 @@ enum ShortcutAction: Hashable, Identifiable {
             case .contour: return [k("d", false)]
             case .shapePolygon: return [k("p", true)]
             case .text: return [k("t", false)]
+            case .blur: return [k("r", false)]
+            case .jumble: return [k("r", true)]
             }
         case .swapColors: return [k("x", false)]
         case .brushSmaller: return [k("[", false)]

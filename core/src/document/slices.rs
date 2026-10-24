@@ -236,7 +236,7 @@ fn target_mut(s: &mut Sprite, kind: u32, a: u32, b: u32) -> Option<&mut UserData
         1 => s.layers.get_mut(a as usize).map(|l| &mut l.user_data),
         2 => {
             s.begin_cel_edit(b as usize, a as usize);
-            s.cel_mut(b as usize, a as usize).map(|c| &mut c.user_data)
+            s.cel_mut_any(b as usize, a as usize).map(|c| &mut c.user_data)
         }
         3 => s.tags.get_mut(a as usize).map(|t| &mut t.user_data),
         4 => s.extra.slices.get_mut(a as usize).map(|sl| &mut sl.user),

@@ -99,16 +99,32 @@ pub fn preset(index: usize) -> Option<Vec<[u8; 4]>> {
     Some(out)
 }
 
+/// Names of every preset a user can pick: the built-in ones, then the palettes of enabled extensions
+/// ("Name (Extension)"), in the same order as [`colors`].
+pub fn names() -> Vec<String> {
+    let mut out: Vec<String> = NAMES.iter().map(|n| n.to_string()).collect();
+    out.extend(crate::extensions::palettes().into_iter().map(|(ext, p)| format!("{} ({ext})", p.name)));
+    out
+}
+
+/// Colors of preset `index` of [`names`]: a built-in one or a palette contributed by an extension.
+pub fn colors(index: usize) -> Option<Vec<[u8; 4]>> {
+    if index < NAMES.len() {
+        return preset(index);
+    }
+    crate::extensions::palettes().into_iter().nth(index - NAMES.len()).map(|(_, p)| p.colors)
+}
+
 #[no_mangle]
 pub extern "C" fn pixmith_pe_preset_count() -> u32 {
-    crate::ffi::guarded("pixmith_pe_preset_count", std::ptr::null_mut(), || NAMES.len() as u32)
+    crate::ffi::guarded("pixmith_pe_preset_count", std::ptr::null_mut(), || names().len() as u32)
 }
 
 /// Name of a preset; release with `pixmith_string_free`. Null if out of range.
 #[no_mangle]
 pub extern "C" fn pixmith_pe_preset_name(index: u32) -> *mut c_char {
     crate::ffi::guarded("pixmith_pe_preset_name", std::ptr::null_mut(), || {
-        NAMES.get(index as usize).and_then(|n| CString::new(*n).ok()).map_or(null_mut(), CString::into_raw)
+        names().into_iter().nth(index as usize).and_then(|n| CString::new(n).ok()).map_or(null_mut(), CString::into_raw)
     })
 }
 
@@ -118,12 +134,12 @@ pub extern "C" fn pixmith_pe_preset_name(index: u32) -> *mut c_char {
 pub unsafe extern "C" fn pixmith_pe_preset_load(doc: *mut Editor, index: u32) -> bool {
     crate::ffi::guarded("pixmith_pe_preset_load", doc, || {
         let Some(e) = editor(doc) else { return false };
-        let Some(colors) = preset(index as usize) else {
+        let (Some(colors), Some(name)) = (colors(index as usize), names().into_iter().nth(index as usize)) else {
             set_error("unknown palette preset");
             return false;
         };
         e.checkpoint();
-        e.label_last(&format!("Load Palette Preset: {}", NAMES[index as usize]));
+        e.label_last(&format!("Load Palette Preset: {name}"));
         replace_palette(&mut e.sprite, colors);
         true
     })
@@ -175,7 +191,7 @@ mod tests {
         let mut e = Editor::new(s);
         let before = e.sprite.clone();
         unsafe {
-            assert!(!pixmith_pe_preset_load(&mut e, 99));
+            assert!(!pixmith_pe_preset_load(&mut e, 100_000));
             assert!(pixmith_pe_preset_load(&mut e, 7));
         }
         assert_eq!(e.sprite.palette.len(), 4, "RGB sprites just get the palette");
@@ -197,10 +213,10 @@ mod tests {
 
     #[test]
     fn names_through_the_c_abi() {
-        assert_eq!(pixmith_pe_preset_count() as usize, NAMES.len());
+        assert!(pixmith_pe_preset_count() as usize >= NAMES.len());
         let p = pixmith_pe_preset_name(2);
         assert_eq!(unsafe { std::ffi::CStr::from_ptr(p) }.to_str().unwrap(), "DB32");
         unsafe { drop(CString::from_raw(p)) };
-        assert!(pixmith_pe_preset_name(99).is_null());
+        assert!(pixmith_pe_preset_name(100_000).is_null());
     }
 }

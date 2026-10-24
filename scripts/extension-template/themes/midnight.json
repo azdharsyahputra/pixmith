@@ -1,0 +1,35 @@
+{
+  "name": "Midnight",
+  "dark": {
+    "workspace": "#0E0E18",
+    "panel": "#171724",
+    "panel2": "#202033",
+    "recessed": "#00000040",
+    "elevated": "#202033",
+    "separator": "#34344E",
+    "separatorSoft": "#272740",
+    "field": "#282840",
+    "hover": "#323250",
+    "pressed": "#3E3E60",
+    "accent": "#FF6AC1",
+    "destructive": "#FF5C6C",
+    "text": "#EDEDF7",
+    "textSecondary": "#A6A6C4",
+    "textTertiary": "#6F6F92"
+  },
+  "light": {
+    "workspace": "#E6E1F2",
+    "panel": "#F4F1FA",
+    "panel2": "#FFFFFF",
+    "elevated": "#FFFFFF",
+    "separator": "#CFC8E2",
+    "separatorSoft": "#E0DBEE",
+    "field": "#E7E2F3",
+    "hover": "#DBD4EC",
+    "pressed": "#CEC5E3",
+    "accent": "#C2278D",
+    "text": "#1E1A2E",
+    "textSecondary": "#5E5878",
+    "textTertiary": "#968FB0"
+  }
+}

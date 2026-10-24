@@ -41,6 +41,9 @@ pub struct LayerSheet {
     pub blend: u16,
     pub visible: bool,
     pub group: bool,
+    /// Reference layer flag and its lock (only reference layers refuse drawing).
+    pub reference: bool,
+    pub locked: bool,
 }
 
 impl LayerSheet {
@@ -53,6 +56,8 @@ impl LayerSheet {
             blend: d.layer_blend_mode(layer),
             visible: d.layer_visible(layer),
             group: d.layer_is_group(layer),
+            reference: d.layer_is_reference(layer),
+            locked: d.layer_is_locked(layer),
         }
     }
 }
@@ -117,6 +122,7 @@ fn button(ui: &mut egui::Ui, c: &Colors, label: &str, primary: bool, destructive
         c.text
     };
     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, ui_font(font::BODY), fg);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     resp
 }
 
@@ -228,6 +234,26 @@ pub fn show_tag(ctx: &egui::Context, sheet: &mut TagSheet, tab: &mut DocTab) -> 
     }
 }
 
+/// Applies the layer properties sheet to the document as one undo step.
+pub fn apply_layer(sheet: &LayerSheet, tab: &mut DocTab) {
+    // One undo step for everything the sheet changed.
+    let changed = tab.doc.in_transaction(|d| {
+        let mut changed = d.set_layer_props(sheet.layer, &sheet.name, sheet.opacity, sheet.blend, sheet.visible);
+        if !sheet.group {
+            if sheet.reference != d.layer_is_reference(sheet.layer) {
+                changed |= d.set_layer_reference(sheet.layer, sheet.reference);
+            }
+            if sheet.reference && sheet.locked != d.layer_is_locked(sheet.layer) {
+                changed |= d.set_layer_locked(sheet.layer, sheet.locked);
+            }
+        }
+        changed
+    });
+    if changed {
+        tab.changed();
+    }
+}
+
 /// Draws the layer properties sheet; returns true once it should be closed.
 pub fn show_layer(ctx: &egui::Context, sheet: &mut LayerSheet, tab: &mut DocTab) -> bool {
     let c = Colors::of(ctx);
@@ -256,13 +282,27 @@ pub fn show_layer(ctx: &egui::Context, sheet: &mut LayerSheet, tab: &mut DocTab)
                     });
             });
         });
+        if !group {
+            row(ui, &c, "Reference", |ui| {
+                if ui.checkbox(&mut sheet.reference, "").changed() && sheet.reference {
+                    sheet.locked = true;
+                }
+            });
+            if sheet.reference {
+                row(ui, &c, "Locked", |ui| {
+                    ui.checkbox(&mut sheet.locked, "");
+                });
+                crate::ui::widgets::note(
+                    ui,
+                    "Shown in the editor but never exported. While locked, drawing on it is refused.",
+                );
+            }
+        }
         outcome = footer(ui, &c, "OK", None);
     });
     match outcome {
         Outcome::Primary => {
-            if tab.doc.set_layer_props(sheet.layer, &sheet.name, sheet.opacity, sheet.blend, sheet.visible) {
-                tab.changed();
-            }
+            apply_layer(sheet, tab);
             true
         }
         Outcome::Cancel | Outcome::Destructive => true,

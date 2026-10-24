@@ -3,6 +3,7 @@
 pub mod color_mode;
 pub mod layers;
 pub mod slices;
+pub mod spritedata;
 pub mod tilemap;
 
 use crate::document::color_mode::ColorMode;
@@ -67,7 +68,22 @@ impl Layer {
     pub fn is_group(&self) -> bool {
         self.kind == 1
     }
+
+    /// A reference layer (layer flag 0x40): shown in the editor, never part of exports.
+    pub fn is_reference(&self) -> bool {
+        self.flags & LAYER_REFERENCE != 0
+    }
+
+    /// Whether the layer's "editable" flag (0x2) is clear. Only reference layers enforce it.
+    pub fn is_locked(&self) -> bool {
+        self.flags & LAYER_EDITABLE == 0
+    }
 }
+
+/// `.aseprite` layer flag: the layer can be edited.
+pub const LAYER_EDITABLE: u16 = 2;
+/// `.aseprite` layer flag: reference layer.
+pub const LAYER_REFERENCE: u16 = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tag {
@@ -94,6 +110,9 @@ pub struct Cel {
     /// Palette indices loaded from an indexed file (full canvas); used on save wherever they still
     /// match the pixels, so duplicate palette colors keep their original index.
     pub indices: Option<Arc<Vec<u8>>>,
+    /// Z-index of the cel chunk: the cel draws as if its layer sat `z_index` places higher (or lower
+    /// when negative) in the stack; see `layers::composite_range_in`.
+    pub z_index: i16,
 }
 
 /// Copy-on-write of a cel shared with undo history goes through here: large pixel buffers reuse
@@ -106,6 +125,7 @@ impl Clone for Cel {
             tiles: self.tiles.clone(),
             user_data: self.user_data.clone(),
             indices: self.indices.clone(),
+            z_index: self.z_index,
         }
     }
 }
@@ -113,7 +133,7 @@ impl Clone for Cel {
 /// An empty, fully opaque cel (`derive(Default)` would make the opacity 0).
 impl Default for Cel {
     fn default() -> Self {
-        Cel { opacity: 255, pixels: Vec::new(), tiles: None, user_data: Default::default(), indices: None }
+        Cel { opacity: 255, pixels: Vec::new(), tiles: None, user_data: Default::default(), indices: None, z_index: 0 }
     }
 }
 
@@ -144,6 +164,8 @@ pub struct Sprite {
     pub transparent_index: u8,
     /// Slices and user data.
     pub extra: crate::document::slices::Extra,
+    /// The file's color profile; kept and written back, pixels are never converted.
+    pub color_profile: crate::document::spritedata::ColorProfile,
 }
 
 impl Sprite {
@@ -166,6 +188,7 @@ impl Sprite {
             color_mode: ColorMode::Rgba,
             transparent_index: 0,
             extra: Default::default(),
+            color_profile: Default::default(),
         }
     }
 
@@ -302,7 +325,17 @@ impl Sprite {
         crate::document::layers::render_frame(self, frame)
     }
 
+    /// The cel to draw on, created empty when the layer has none. A locked reference layer cannot be drawn on.
     pub(crate) fn cel_mut(&mut self, layer: usize, frame: usize) -> Option<&mut Cel> {
+        let l = self.layers.get(layer)?;
+        if l.is_reference() && l.is_locked() {
+            return None;
+        }
+        self.cel_mut_any(layer, frame)
+    }
+
+    /// `cel_mut` for property edits (opacity, z-index), which a layer lock does not forbid.
+    pub(crate) fn cel_mut_any(&mut self, layer: usize, frame: usize) -> Option<&mut Cel> {
         if frame >= self.frame_count() || self.layers.get(layer)?.is_group() {
             return None;
         }
@@ -554,6 +587,9 @@ pub struct Editor {
     /// The drawing preview in progress, if any (see `begin_preview`).
     preview: Option<Preview>,
     next_preview: u64,
+    /// How opaque the editor draws reference layers, in percent (0 hides them). A view setting: it is not
+    /// saved and exports never show reference layers whatever it says.
+    pub reference_display: u8,
 }
 
 /// A preview session: the document as it was when the gesture began, kept apart from the undo
@@ -586,7 +622,13 @@ impl Editor {
             checkpoints_taken: 0,
             preview: None,
             next_preview: 0,
+            reference_display: 100,
         }
+    }
+
+    /// Unique per editor for the life of the process (unlike its address, which can be reused).
+    pub fn uid(&self) -> u64 {
+        self.uid
     }
 
     /// How often history was discarded because of an edit that bypassed `checkpoint` (a bug

@@ -136,9 +136,9 @@ private struct LayerReorder: ViewModifier {
             .overlay(alignment: zone == .below ? .bottom : .top) {
                 switch zone {
                 case .into:
-                    RoundedRectangle(cornerRadius: 5).stroke(Color.accentColor, lineWidth: 2)
+                    RoundedRectangle(cornerRadius: 5).stroke(DSColor.accent, lineWidth: 2)
                 case .above, .below:
-                    Rectangle().fill(Color.accentColor).frame(height: 2)
+                    Rectangle().fill(DSColor.accent).frame(height: 2)
                 case nil:
                     EmptyView()
                 }

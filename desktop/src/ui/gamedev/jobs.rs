@@ -39,7 +39,7 @@ impl PixmithApp {
     /// Whether a job is running (`Background.busy`); menus disable commands that would change the document
     /// under it.
     pub fn job_running(&self) -> bool {
-        self.gamedev.job.is_some()
+        self.gamedev.job.is_some() || self.lua_busy()
     }
 
     /// Starts `work` on a background thread. Returns false, doing nothing, if another job is running.

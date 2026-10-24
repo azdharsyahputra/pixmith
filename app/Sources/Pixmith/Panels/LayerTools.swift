@@ -6,12 +6,14 @@ enum ToolSheet: Identifiable {
     case layer(Int)
     case tag(Int?)
     case cel
+    case sprite
 
     var id: String {
         switch self {
         case .layer(let i): "layer\(i)"
         case .tag(let i): "tag\(i.map(String.init) ?? "new")"
         case .cel: "cel"
+        case .sprite: "sprite"
         }
     }
 }
@@ -188,10 +190,18 @@ struct LayerPropertiesSheet: View {
     @State private var opacity = 255.0
     @State private var blend = 0
     @State private var visible = true
+    @State private var reference = false
+    @State private var locked = false
 
     var body: some View {
         DSDialog(title: model.isGroup(layer) ? "Group Properties" : "Layer Properties", primary: "OK", width: 340, onPrimary: {
-            model.setLayerProps(layer, name: name, opacity: Int(opacity.rounded()), blend: blend, visible: visible)
+            model.inTransaction {
+                model.setLayerProps(layer, name: name, opacity: Int(opacity.rounded()), blend: blend, visible: visible)
+                if !model.isGroup(layer) {
+                    if reference != model.isReference(layer) { model.setReference(layer, reference) }
+                    if reference, locked != model.isLocked(layer) { model.setLocked(layer, locked) }
+                }
+            }
             dismiss()
         }, onCancel: { dismiss() }) {
             DSFormRow(label: "Name") { TextField("Name", text: $name).dsTextField() }
@@ -205,13 +215,27 @@ struct LayerPropertiesSheet: View {
                 DSPopup(selection: $blend, options: BlendMode.allCases.map { ($0.rawValue, $0.title) }, fill: true)
             }
             .disabled(model.isGroup(layer))
+            if !model.isGroup(layer) {
+                DSFormRow(label: "Reference") {
+                    Toggle("Reference layer", isOn: $reference).labelsHidden().toggleStyle(.switch).controlSize(.small)
+                }
+                if reference {
+                    DSFormRow(label: "Locked") {
+                        Toggle("Locked", isOn: $locked).labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    }
+                    DSNote("A reference layer is shown in the editor but never exported. While it is locked, drawing on it is refused.")
+                }
+            }
         }
         .onAppear {
             name = model.layerName(layer)
             opacity = Double(model.rawOpacity(layer))
             blend = model.blendMode(layer)
             visible = model.isVisible(layer)
+            reference = model.isReference(layer)
+            locked = model.isLocked(layer)
         }
+        .onChange(of: reference) { on in if on, !model.isReference(layer) { locked = true } }
     }
 }
 
@@ -220,6 +244,7 @@ struct CelSheet: View {
     @ObservedObject var model: SpriteModel
     @Environment(\.dismiss) private var dismiss
     @State private var opacity = 255.0
+    @State private var zIndex = 0
     @State private var from = 1
     @State private var to = 2
 
@@ -232,8 +257,16 @@ struct CelSheet: View {
                 Button("Apply") { model.setCelOpacity(Int(opacity.rounded())) }.buttonStyle(DSSecondaryButtonStyle())
             }
             .disabled(!hasCel)
+            HStack(spacing: DS.Space.sm) {
+                DSNumberField("Z-index", value: $zIndex, range: -32768...32767, unit: "", width: 140,
+                              help: "Draws this cel as if its layer were that many places higher (or lower)")
+                Button("Apply") { model.setCelZIndex(zIndex) }.buttonStyle(DSSecondaryButtonStyle())
+                Spacer(minLength: 0)
+            }
+            .disabled(!hasCel)
+            DSNote("Cels draw in order of layer position plus z-index; equal positions keep the lower layer first.")
             DSDivider()
-            DSNote("Linked cels share their image: editing one edits all.")
+            DSNote("Linked cels share their image, opacity and z-index: editing one edits all.")
             HStack(spacing: DS.Space.sm) {
                 DSNumberField("From", value: $from, range: 1...max(1, model.frameCount), unit: "", width: 110)
                 DSNumberField("To", value: $to, range: 1...max(1, model.frameCount), unit: "", width: 110)
@@ -251,6 +284,7 @@ struct CelSheet: View {
         }
         .onAppear {
             opacity = Double(model.celOpacity ?? 255)
+            zIndex = model.celZIndex ?? 0
             from = model.frame + 1
             to = min(model.frame + 2, model.frameCount)
         }
@@ -266,6 +300,7 @@ struct ToolSheetView: View {
         case .layer(let i): LayerPropertiesSheet(model: model, layer: i)
         case .tag(let i): TagSheet(model: model, index: i)
         case .cel: CelSheet(model: model)
+        case .sprite: SpritePropertiesSheet(model: model)
         }
     }
 }
@@ -284,6 +319,7 @@ struct LayerCommands: Commands {
             Button("Duplicate Layer") { model.duplicateLayer(model.layer) }
             Button("Merge Layer Down") { model.mergeLayerDown(model.layer) }
             Button("New Group") { model.addGroup() }
+            ReferenceLayerMenuItems(model: model)
             Divider()
             Button("Move Frame Left") { model.moveFrame(by: -1) }
             Button("Move Frame Right") { model.moveFrame(by: 1) }

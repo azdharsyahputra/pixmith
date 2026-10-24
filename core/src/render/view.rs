@@ -32,10 +32,11 @@ pub unsafe extern "C" fn pixmith_render_rect(
         {
             return false;
         }
-        let px = crate::document::layers::render_frame_rect(
+        let px = crate::document::layers::render_frame_rect_with(
             s,
             frame as usize,
             (x as usize, y as usize, w as usize, h as usize),
+            e.reference_display,
         );
         std::ptr::copy_nonoverlapping(px.as_ptr(), out, px.len());
         true

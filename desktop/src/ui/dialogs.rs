@@ -38,6 +38,14 @@ pub enum ExportKind {
     Gif,
     Apng,
     Sequence,
+    // WebP, JPEG, BMP, TGA, ICO, PCX and FLI/FLC (`ui/image_formats.rs`).
+    Webp,
+    Jpeg,
+    Bmp,
+    Tga,
+    Ico,
+    Pcx,
+    Flc,
 }
 
 impl ExportKind {
@@ -48,6 +56,7 @@ impl ExportKind {
             ExportKind::Gif => "Export Animated GIF",
             ExportKind::Apng => "Export Animated PNG",
             ExportKind::Sequence => "Export PNG Sequence",
+            other => crate::ui::image_formats::title(other),
         }
     }
 }
@@ -67,11 +76,21 @@ pub struct ExportSheet {
     pub columns: u32,
     pub padding: u32,
     pub json: bool,
+    /// Settings of the formats in `ui/image_formats.rs`.
+    pub image: crate::ui::image_formats::ImageSettings,
 }
 
 impl ExportSheet {
     pub fn new(kind: ExportKind, frames: u32) -> ExportSheet {
-        ExportSheet { kind, scale: 0, layout: 0, columns: frames.clamp(1, 4), padding: 0, json: true }
+        ExportSheet {
+            kind,
+            scale: 0,
+            layout: 0,
+            columns: frames.clamp(1, 4),
+            padding: 0,
+            json: true,
+            image: Default::default(),
+        }
     }
 }
 
@@ -83,6 +102,8 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
         unsaved_sheet(app, ctx);
     } else if app.files.new_sheet.is_some() {
         new_sheet(app, ctx);
+    } else if app.files.icon_choice.is_some() {
+        crate::ui::image_formats::icon_sheet(app, ctx);
     } else if app.files.export.is_some() {
         export_sheet(app, ctx);
     } else if app.projects.has_sheet() {
@@ -193,6 +214,9 @@ fn export_sheet(app: &mut PixmithApp, ctx: &egui::Context) {
             }
             ExportKind::Sequence => widgets::note(ui, "Frames are saved as name-001.png, name-002.png, \u{2026}"),
             ExportKind::Apng => widgets::note(ui, "Saves an animated PNG."),
+            kind if crate::ui::image_formats::is_image_kind(kind) => {
+                crate::ui::image_formats::options_ui(ui, kind, &mut sheet.image)
+            }
             _ => {}
         }
         widgets::dialog_buttons(ui, None, Some("Cancel"), "Export\u{2026}", true)

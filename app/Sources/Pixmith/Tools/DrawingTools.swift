@@ -17,6 +17,7 @@ final class DrawingOptions: ObservableObject {
     @Published var mirrorY = false { didSet { refreshCanvas() } }
     @Published var contiguous = true
     @Published var sprayDensity = 40.0
+    @Published var retouchStrength = 50.0
     @Published var ink = InkMode.simple
     @Published var circleBrush = false { didSet { pixmith_brush_circle(circleBrush) } }
     @Published var customBrush: (w: Int, h: Int)?
@@ -89,6 +90,12 @@ extension SpriteModel {
             let pen = pressureStyle(e, color: tool == .eraser ? 0 : c)
             pixmith_stroke_begin(doc, UInt32(layer), UInt32(frame), Int32(p.0), Int32(p.1),
                               pen?.color ?? (tool == .eraser ? 0 : c), pen?.size ?? UInt32(brushSize), flags)
+        case .blur, .jumble:
+            beginStroke(tool == .blur ? "Blur" : "Jumble")
+            let pen = pressureStyle(e, color: c)
+            pixmith_retouch_begin(doc, UInt32(layer), UInt32(frame), Int32(p.0), Int32(p.1), tool == .blur ? 0 : 1,
+                               pen?.size ?? UInt32(brushSize), tool == .blur ? UInt32(opts.retouchStrength) : 100,
+                               .random(in: 0...UInt32.max), symFlags)
         case .line, .rectangle, .ellipse:
             beginStroke(tool.rawValue.capitalized)
             applyInk(reverse: right)
@@ -130,6 +137,9 @@ extension SpriteModel {
                 pixmith_stroke_style(doc, pen.color, pen.size)
             }
             pixmith_stroke_to(doc, Int32(p.0), Int32(p.1))
+        case .blur, .jumble:
+            if let pen = pressureStyle(e, color: d.color) { pixmith_retouch_size(doc, pen.size) }
+            pixmith_retouch_to(doc, Int32(p.0), Int32(p.1))
         case .line, .rectangle, .ellipse:
             shape(d.tool, from: d.start, to: p, color: d.color, constrain: constrain, restore: true)
         case .spray:
@@ -302,6 +312,14 @@ struct ToolOptionsBar: View {
                 DSSlider("Density", value: $opts.sprayDensity, range: 5...100, unit: "%").frame(width: 150)
             }
             group { InkOptionsView(model: model, brush: false) }
+        case .blur:
+            group { BrushOptionsView(model: model) }
+            group { DSSlider("Strength", value: $opts.retouchStrength, range: 5...100, unit: "%").frame(width: 150) }
+            group { DSChip(symbol: "arrow.up.left.and.arrow.down.right", help: "Scale the brush size by pen pressure (tablet only)", isOn: $opts.pressureSize) }
+        case .jumble:
+            group { BrushOptionsView(model: model) }
+            group { HintLabel(text: "swaps nearby pixels") }
+            group { DSChip(symbol: "arrow.up.left.and.arrow.down.right", help: "Scale the brush size by pen pressure (tablet only)", isOn: $opts.pressureSize) }
         case .fill:
             group {
                 DSChip("Contiguous", help: "Off: replace every matching pixel in the cel", isOn: $opts.contiguous)

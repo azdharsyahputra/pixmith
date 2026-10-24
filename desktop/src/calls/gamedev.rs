@@ -61,11 +61,6 @@ impl Drop for Snapshot {
     }
 }
 
-/// Asks the running script to stop (`true`) or clears the request before a new run (`false`).
-pub fn script_cancel(cancel: bool) {
-    scripting::pixmith_script_cancel(cancel);
-}
-
 /// The example scripts that ship inside the core: `(file name, source)`.
 pub fn example_scripts() -> Vec<(String, String)> {
     let mut out = Vec::new();

@@ -250,7 +250,11 @@ fn layer_row(ui: &mut egui::Ui, tab: &mut DocTab, st: &mut TimelineState, c: &Co
     let resp = ui.interact(row, ui.id().with(("layer_row", index)), Sense::click_and_drag());
     let eye_rect = Rect::from_min_size(pos2(row.right() - 4.0 - 24.0, row.top()), vec2(24.0, 24.0));
     let eye = ui.interact(eye_rect, ui.id().with(("layer_eye", index)), Sense::click());
-    let hover = resp.hovered() || eye.hovered();
+    // Reference layers show a lock toggle left of the eye.
+    let reference = !group && tab.doc.layer_is_reference(index);
+    let lock_rect = eye_rect.translate(vec2(-24.0, 0.0));
+    let lock = reference.then(|| ui.interact(lock_rect, ui.id().with(("layer_lock", index)), Sense::click()));
+    let hover = resp.hovered() || eye.hovered() || lock.as_ref().is_some_and(|l| l.hovered());
 
     let bg = if selected {
         c.selected
@@ -293,11 +297,17 @@ fn layer_row(ui: &mut egui::Ui, tab: &mut DocTab, st: &mut TimelineState, c: &Co
             tab.doc.layer_is_tilemap(index),
             c,
         );
+        if reference {
+            // A distinct icon: reference layers are shown in the editor but never exported.
+            let center = pos2(x + 8.0, cy);
+            ui.painter().text(center, Align2::CENTER_CENTER, icon::IMAGE, ui_font(12.0), c.accent);
+        }
         x += 16.0 + 8.0;
     }
 
     // The name, or the field while renaming.
-    let name_rect = Rect::from_min_max(pos2(x, row.top()), pos2(eye_rect.left(), row.bottom()));
+    let name_right = if reference { lock_rect.left() } else { eye_rect.left() };
+    let name_rect = Rect::from_min_max(pos2(x, row.top()), pos2(name_right, row.bottom()));
     let renaming_here = st.renaming.as_ref().is_some_and(|r| r.layer == index);
     if renaming_here {
         let mut commit = None;
@@ -352,6 +362,22 @@ fn layer_row(ui: &mut egui::Ui, tab: &mut DocTab, st: &mut TimelineState, c: &Co
         );
     }
 
+    // The lock of a reference layer: drawing on it is refused while it is locked.
+    if let Some(lock) = lock {
+        let locked = tab.doc.layer_is_locked(index);
+        let glyph = if locked { icon::LOCK_SIMPLE } else { icon::LOCK_SIMPLE_OPEN };
+        ui.painter().text(lock_rect.center(), Align2::CENTER_CENTER, glyph, ui_font(13.0), c.text_tertiary);
+        if lock.clicked() {
+            tab.doc.set_layer_locked(index, !locked);
+            tab.changed();
+        }
+        lock.on_hover_text(if locked {
+            "Reference layer is locked: click to allow drawing"
+        } else {
+            "Lock the reference layer"
+        });
+    }
+
     // The eye.
     {
         let color = if visible { c.text_tertiary } else { c.text_secondary };
@@ -364,7 +390,8 @@ fn layer_row(ui: &mut egui::Ui, tab: &mut DocTab, st: &mut TimelineState, c: &Co
         eye.on_hover_text(if visible { "Hide layer" } else { "Show layer" });
     }
 
-    if resp.double_clicked() && !eye_rect.contains(resp.interact_pointer_pos().unwrap_or_default()) {
+    let on_buttons = |p: egui::Pos2| eye_rect.contains(p) || (reference && lock_rect.contains(p));
+    if resp.double_clicked() && !on_buttons(resp.interact_pointer_pos().unwrap_or_default()) {
         st.renaming = Some(Renaming { layer: index, text: tab.doc.layer_name(index), focused: false });
     } else if resp.clicked() {
         st.focused = false;

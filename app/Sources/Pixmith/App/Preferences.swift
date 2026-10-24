@@ -19,6 +19,8 @@ enum Prefs {
         static let projectSort = "projectSort"
         static let canvasSort = "canvasSort"
         static let homeTab = "homeTab"
+        /// Allow AI agents to control Pixmith (Live mode, docs/LIVE_PROTOCOL.md); on by default.
+        static let liveEnabled = "liveEnabled"
     }
 
     enum Default {
@@ -37,6 +39,8 @@ enum Prefs {
     private static func int(_ key: String, _ fallback: Int) -> Int {
         UserDefaults.standard.object(forKey: key) as? Int ?? fallback
     }
+
+    static var liveEnabled: Bool { UserDefaults.standard.object(forKey: Key.liveEnabled) as? Bool ?? true }
 
     static var newWidth: Int { int(Key.newWidth, Default.size).clamped(1, 4096) }
     static var newHeight: Int { int(Key.newHeight, Default.size).clamped(1, 4096) }
@@ -89,13 +93,18 @@ private extension Int {
 }
 
 struct PreferencesView: View {
+    @ObservedObject private var selection = ExtensionPrefs.shared
+    @ObservedObject private var themes = ThemeStore.shared
+
     var body: some View {
-        TabView {
-            GeneralPrefsView().tabItem { Label("General", systemImage: "gearshape") }
-            AppearancePrefsView().tabItem { Label("Appearance", systemImage: "paintbrush") }
-            KeyboardPrefsView().tabItem { Label("Keyboard", systemImage: "keyboard") }
+        TabView(selection: $selection.tab) {
+            GeneralPrefsView().tabItem { Label("General", systemImage: "gearshape") }.tag(PrefsTabID.general)
+            AppearancePrefsView().tabItem { Label("Appearance", systemImage: "paintbrush") }.tag(PrefsTabID.appearance)
+            KeyboardPrefsView().tabItem { Label("Keyboard", systemImage: "keyboard") }.tag(PrefsTabID.keyboard)
+            ExtensionsPrefsView().tabItem { Label("Extensions", systemImage: "puzzlepiece.extension") }.tag(PrefsTabID.extensions)
         }
-        .frame(width: 520, height: 500)
+        .frame(width: 520, height: 560)
+        .tint(themes.selected == nil ? nil : DSColor.accent)
     }
 }
 
@@ -103,6 +112,8 @@ struct AppearancePrefsView: View {
     @AppStorage(Prefs.Key.appearance) private var appearance = 0
     @AppStorage(Prefs.Key.canvasBgOn) private var customBackground = false
     @AppStorage(Prefs.Key.canvasBg) private var canvasBg = Prefs.Default.canvasBg
+    @ObservedObject private var themes = ThemeStore.shared
+    @AppStorage(ThemeStore.defaultsKey) private var colorTheme = ""
 
     var body: some View {
         Form {
@@ -114,6 +125,13 @@ struct AppearancePrefsView: View {
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: appearance) { _ in Prefs.applyAppearance() }
+                Picker("Color theme", selection: Binding(get: { themes.selected?.id ?? "" },
+                                                        set: { colorTheme = $0; themes.select($0) })) {
+                    Text("Default").tag("")
+                    ForEach(themes.themes) { Text($0.name).tag($0.id) }
+                }
+                Text(themes.themes.isEmpty ? "Themes come from extensions (Extensions tab)." : "Themes come from extensions.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Canvas") {
                 Toggle("Custom canvas background", isOn: $customBackground)
@@ -136,6 +154,7 @@ struct GeneralPrefsView: View {
     @AppStorage(Prefs.Key.checkerDark) private var checkerDark = Prefs.Default.checkerDark
     @AppStorage(Prefs.Key.gridColor) private var gridColor = Prefs.Default.gridColor
     @AppStorage(Prefs.Key.defaultZoom) private var defaultZoom = Prefs.Default.zoom
+    @AppStorage(Prefs.Key.liveEnabled) private var liveEnabled = true
 
     private static let zooms = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
 
@@ -158,6 +177,12 @@ struct GeneralPrefsView: View {
                     ForEach(Self.zooms + (Self.zooms.contains(defaultZoom) ? [] : [defaultZoom]), id: \.self) { Text("\($0)x").tag($0) }
                 }
                 Text("Large sprites open at a smaller zoom so they fit the window.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Live mode") {
+                Toggle("Allow AI agents to control Pixmith (Live mode)", isOn: $liveEnabled)
+                    .onChange(of: liveEnabled) { _ in LiveServer.shared.applyPreference() }
+                Text("Lets tools on this computer, such as the Pixmith MCP server, edit the open documents. Each edit is an undo step.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {

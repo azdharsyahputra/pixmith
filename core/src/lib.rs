@@ -10,11 +10,13 @@
 //! - [`history`]: document state ids ("modified" tracking), the on-disk undo store and its buffer pool.
 //! - [`render`]: compositing views and dirty-rectangle tracking for the canvas.
 //! - [`paint`]: drawing and editing tools: shapes, ink, curves, text, filters, transforms, selections.
+//! - [`colorpick`]: color-picker math (HSV/HSL, color wheel, normal-map encoding) behind the inspector's selectors.
 //! - [`palette`]: palette editing, built-in presets and palette file formats.
 //! - [`formats`]: `.pxmt` (Pixmith's own format), `.aseprite`, PNG, GIF, APNG, sprite sheets and JSON, plus
 //!   crash-safe file writes.
 //! - [`project`]: project folders of canvases (`.pxmt` files plus a `.pixmith` folder) and their C ABI.
 //! - [`gamedev`]: autotiling, tweening and the Godot 4 exporter.
+//! - [`extensions`]: `.pixmith-extension` packages (scripts, palettes, themes): safe install, list, enable, uninstall.
 //! - [`scripting`]: the Lua scripting host.
 //! - [`jobs`]: document snapshots for background work.
 //! - [`ffi`]: the C ABI plumbing (errors, panic guard) and the document-level entry points.
@@ -35,7 +37,9 @@
 // Tests spell out `(row * width + column)` even when row is 0 or 1, to keep the geometry readable.
 #![cfg_attr(test, allow(clippy::identity_op, clippy::erasing_op))]
 
+pub mod colorpick;
 pub mod document;
+pub mod extensions;
 pub mod ffi;
 pub mod formats;
 pub mod gamedev;

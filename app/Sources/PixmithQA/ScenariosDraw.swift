@@ -16,6 +16,13 @@ func registerScenarios() {
     registerFiles()
     registerTabs()
     registerProjects()
+    registerExtensions()
+    registerLuaDialog()
+    registerLive()
+    registerColor()
+    registerRetouch()
+    registerSpriteData()
+    registerImageFormats()
 }
 
 /// Snapshot of the whole composite plus undo counts; used to check that an operation is one undo step.

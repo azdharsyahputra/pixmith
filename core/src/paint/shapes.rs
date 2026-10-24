@@ -566,6 +566,7 @@ pub(crate) fn forget_stroke(doc: *mut Editor) {
     STROKE.with(|s| {
         s.borrow_mut().remove(&(doc as usize));
     });
+    crate::paint::retouch::forget(doc);
 }
 
 fn rgba(c: u32) -> [u8; 4] {
@@ -678,6 +679,7 @@ pub unsafe extern "C" fn pixmith_stroke_style(doc: *mut Editor, color: u32, size
 pub extern "C" fn pixmith_stroke_end() {
     crate::ffi::guarded("pixmith_stroke_end", std::ptr::null_mut(), || {
         STROKE.with(|s| s.borrow_mut().clear());
+        crate::paint::retouch::forget_all();
     })
 }
 

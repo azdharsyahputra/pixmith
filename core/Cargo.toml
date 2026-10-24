@@ -19,6 +19,13 @@ flate2 = "1"
 gif = "0.14"
 mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
 png = "0.17"
+# Image formats beyond PNG and GIF (see src/formats/raster). BMP, TGA, ICO, PCX and FLI/FLC are implemented
+# there; JPEG is decoded by zune-jpeg and encoded by jpeg-encoder (4:4:4, so pixel art keeps its colors);
+# WebP (lossy, lossless, animated) comes from libwebp through webp-animation, built from its bundled sources.
+zune-core = "0.5"
+zune-jpeg = "0.5"
+jpeg-encoder = { version = "0.7", default-features = false, features = ["std"] }
+webp-animation = { version = "0.10", features = ["static"] }
 
 [profile.release]
 lto = true

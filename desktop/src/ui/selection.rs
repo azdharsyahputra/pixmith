@@ -93,6 +93,8 @@ pub struct SelectionState {
     marker: String,
     pending_text: Option<String>,
     clipboard: Option<arboard::Clipboard>,
+    /// Recognises Ctrl/Cmd+V even when egui-winit swallows it (image-only clipboard).
+    paste_watch: super::sysclip::PasteWatch,
     seen_doc: usize,
     seen_tool: Option<Tool>,
 }
@@ -114,6 +116,7 @@ impl Default for SelectionState {
             marker: String::new(),
             pending_text: None,
             clipboard: None,
+            paste_watch: Default::default(),
             seen_doc: 0,
             seen_tool: None,
         }
@@ -254,8 +257,13 @@ pub fn copy(app: &mut PixmithApp, cut: bool) {
     let sel = &mut app.selection;
     sel.marker = format!("Pixmith selection {} x {}", pixels.w, pixels.h);
     if sel.system_clipboard {
-        // Ctrl+V reaches the app only as a paste event, which exists only for text on the clipboard.
-        sel.pending_text = Some(sel.marker.clone());
+        // Other apps get the pixels as an image. Only if that fails does a text marker go there instead, so
+        // that Ctrl+V still reaches the app as a paste event (which exists only for text).
+        let on_clipboard =
+            clipboard(sel).is_some_and(|c| super::sysclip::put_image(c, pixels.w, pixels.h, &pixels.rgba));
+        if !on_clipboard {
+            sel.pending_text = Some(sel.marker.clone());
+        }
     }
     sel.clip = Some(pixels);
     if cut {
@@ -274,8 +282,16 @@ pub fn can_paste(app: &mut PixmithApp) -> bool {
 pub fn paste(app: &mut PixmithApp) {
     let (cw, ch) = (app.tab().doc.width() as i32, app.tab().doc.height() as i32);
     let sel = &mut app.selection;
+    sel.paste_watch.note_pasted();
     let (text, image) = if sel.system_clipboard { (system_text(sel), system_image(sel)) } else { (None, None) };
-    let internal_fresh = sel.clip.is_some() && (!sel.system_clipboard || text.as_deref() == Some(&sel.marker));
+    // The clipboard still holds our own copy: either the text marker or the very image we put there.
+    let own_image =
+        |c: &CopiedPixels, i: &(u32, u32, Vec<u8>)| super::sysclip::same_picture((c.w, c.h, &c.rgba), (i.0, i.1, &i.2));
+    let internal_fresh = sel.clip.as_ref().is_some_and(|c| {
+        !sel.system_clipboard
+            || text.as_deref() == Some(&sel.marker)
+            || (text.is_none() && image.as_ref().is_some_and(|i| own_image(c, i)))
+    });
     let (w, h, rgba, origin) = if let (false, Some((w, h, rgba))) = (internal_fresh, image) {
         (w, h, rgba, ((cw - w as i32) / 2, (ch - h as i32) / 2))
     } else if let (Some(c), true) = (&sel.clip, internal_fresh || text.is_none()) {
@@ -372,6 +388,7 @@ fn modal_open(app: &PixmithApp, ctx: &egui::Context) -> bool {
 fn shortcuts(app: &mut PixmithApp, ctx: &egui::Context) {
     const COMMAND_ALT: Modifiers = Modifiers { alt: true, command: true, ..Modifiers::NONE };
     const COMMAND_SHIFT: Modifiers = Modifiers { shift: true, command: true, ..Modifiers::NONE };
+    let paste_watch = &mut app.selection.paste_watch;
     let (by_color, invert, all, deselect_, transform_, copy_, cut_, paste_) = ctx.input_mut(|i| {
         let by_color = i.consume_key(COMMAND_ALT, Key::B);
         let invert = i.consume_key(COMMAND_SHIFT, Key::I);
@@ -380,6 +397,8 @@ fn shortcuts(app: &mut PixmithApp, ctx: &egui::Context) {
         let transform_ = i.consume_key(Modifiers::COMMAND, Key::T);
         let copy_ = i.consume_key(Modifiers::COMMAND, Key::C);
         let cut_ = i.consume_key(Modifiers::COMMAND, Key::X);
+        // Before the key is consumed: also sees the release of a swallowed Ctrl+V.
+        let watched = paste_watch.paste_requested(&i.events);
         let paste_ = i.consume_key(Modifiers::COMMAND, Key::V);
         let (mut ec, mut ex, mut ep) = (false, false, false);
         for e in &i.events {
@@ -390,7 +409,7 @@ fn shortcuts(app: &mut PixmithApp, ctx: &egui::Context) {
                 _ => {}
             }
         }
-        (by_color, invert, all, deselect_, transform_, copy_ || ec, cut_ || ex, paste_ || ep)
+        (by_color, invert, all, deselect_, transform_, copy_ || ec, cut_ || ex, paste_ || ep || watched)
     });
     if by_color {
         select_by_color(app);

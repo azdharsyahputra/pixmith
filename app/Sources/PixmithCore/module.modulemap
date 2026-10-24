@@ -5,6 +5,7 @@ module PixmithCore [system] {
     header "pixmith_ink.h"
     header "pixmith_curves.h"
     header "pixmith_io.h"
+    header "pixmith_formats.h"
     header "pixmith_filters.h"
     header "pixmith_layers.h"
     header "pixmith_tilemap.h"
@@ -23,7 +24,10 @@ module PixmithCore [system] {
     header "pixmith_jobs.h"
     header "pixmith_project.h"
     header "pixmith_live.h"
+    header "pixmith_ext.h"
     header "pixmith_script_ui.h"
+    header "pixmith_colorpick.h"
+    header "pixmith_spritedata.h"
     link "pixmith_core"
     export *
 }

@@ -72,13 +72,25 @@ enum DS {
 
 /// Semantic colors, adaptive to the effective appearance.
 enum DSColor {
-    private static func dynamic(light: UInt32, dark: UInt32) -> NSColor {
-        func ns(_ v: UInt32) -> NSColor {
-            NSColor(srgbRed: CGFloat(v >> 24 & 0xFF) / 255, green: CGFloat(v >> 16 & 0xFF) / 255,
-                    blue: CGFloat(v >> 8 & 0xFF) / 255, alpha: CGFloat(v & 0xFF) / 255)
+    private static func ns(_ v: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat(v >> 24 & 0xFF) / 255, green: CGFloat(v >> 16 & 0xFF) / 255,
+                blue: CGFloat(v >> 8 & 0xFF) / 255, alpha: CGFloat(v & 0xFF) / 255)
+    }
+
+    /// An adaptive color. A color theme (`ThemeStore`, from an extension) can override `token` per appearance.
+    private static func dynamic(_ token: String, light: UInt32, dark: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            if let v = ThemeStore.override(token, dark: isDark) { return ns(v) }
+            return isDark ? ns(dark) : ns(light)
         }
-        return NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? ns(dark) : ns(light)
+    }
+
+    /// A system color that a theme token can replace.
+    private static func themed(_ token: String, fallback: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return ThemeStore.override(token, dark: isDark).map(ns) ?? fallback
         }
     }
 
@@ -86,20 +98,20 @@ enum DSColor {
     // Dark values follow docs/design/mockup.html exactly; light values are the same hierarchy on a light ground.
 
     /// The area around the sprite.
-    static let workspaceNS = dynamic(light: 0xE9E9EBFF, dark: 0x1B1B1DFF)
-    static let panelNS = dynamic(light: 0xF6F6F7FF, dark: 0x262628FF)
+    static let workspaceNS = dynamic("workspace", light: 0xE9E9EBFF, dark: 0x1B1B1DFF)
+    static let panelNS = dynamic("panel", light: 0xF6F6F7FF, dark: 0x262628FF)
     /// A step lighter than the panel: the active document tab.
-    static let panel2NS = dynamic(light: 0xFFFFFFFF, dark: 0x2E2E31FF)
-    static let fieldNS = dynamic(light: 0xE8E8EBFF, dark: 0x333336FF)
-    static let hoverNS = dynamic(light: 0xDEDEE2FF, dark: 0x38383CFF)
-    static let pressedNS = dynamic(light: 0xD3D3D8FF, dark: 0x424247FF)
-    static let separatorNS = dynamic(light: 0xCFCFD4FF, dark: 0x3A3A3EFF)
-    static let separatorSoftNS = dynamic(light: 0xE0E0E4FF, dark: 0x303033FF)
-    static let elevatedNS = dynamic(light: 0xFFFFFFFF, dark: 0x2E2E31FF)
-    static let canvasShadowNS = dynamic(light: 0x00000040, dark: 0x00000059)
-    static let textNS = dynamic(light: 0x1D1D1FFF, dark: 0xECECEEFF)
-    static let text2NS = dynamic(light: 0x65656BFF, dark: 0xA3A3A8FF)
-    static let text3NS = dynamic(light: 0x9A9AA0FF, dark: 0x75757BFF)
+    static let panel2NS = dynamic("panel2", light: 0xFFFFFFFF, dark: 0x2E2E31FF)
+    static let fieldNS = dynamic("field", light: 0xE8E8EBFF, dark: 0x333336FF)
+    static let hoverNS = dynamic("hover", light: 0xDEDEE2FF, dark: 0x38383CFF)
+    static let pressedNS = dynamic("pressed", light: 0xD3D3D8FF, dark: 0x424247FF)
+    static let separatorNS = dynamic("separator", light: 0xCFCFD4FF, dark: 0x3A3A3EFF)
+    static let separatorSoftNS = dynamic("separatorSoft", light: 0xE0E0E4FF, dark: 0x303033FF)
+    static let elevatedNS = dynamic("elevated", light: 0xFFFFFFFF, dark: 0x2E2E31FF)
+    static let canvasShadowNS = dynamic("canvasShadow", light: 0x00000040, dark: 0x00000059)
+    static let textNS = dynamic("text", light: 0x1D1D1FFF, dark: 0xECECEEFF)
+    static let text2NS = dynamic("textSecondary", light: 0x65656BFF, dark: 0xA3A3A8FF)
+    static let text3NS = dynamic("textTertiary", light: 0x9A9AA0FF, dark: 0x75757BFF)
 
     // SwiftUI colors ----------------------------------------------------------------------------------------------
 
@@ -108,7 +120,7 @@ enum DSColor {
     static let panel = Color(nsColor: panelNS)
     static let panel2 = Color(nsColor: panel2NS)
     /// Slightly recessed areas inside a panel.
-    static let recessed = Color(nsColor: dynamic(light: 0x0000000A, dark: 0x00000033))
+    static let recessed = Color(nsColor: dynamic("recessed", light: 0x0000000A, dark: 0x00000033))
     /// Popovers and menus.
     static let elevated = Color(nsColor: elevatedNS)
     /// Lines between regions (title bar, timeline top).
@@ -120,17 +132,18 @@ enum DSColor {
     static let fieldBorder = Color(nsColor: separatorNS)
     static let hover = Color(nsColor: hoverNS)
     static let pressed = Color(nsColor: pressedNS)
-    static let accent = Color.accentColor
+    static let accentNS = themed("accent", fallback: .controlAccentColor)
+    static let accent = Color(nsColor: accentNS)
     /// Selected fills: the accent at 18%.
-    static let selected = Color.accentColor.opacity(0.18)
-    static let selectedHover = Color.accentColor.opacity(0.26)
+    static let selected = accent.opacity(0.18)
+    static let selectedHover = accent.opacity(0.26)
     /// Outlines of selected things: the accent at 55%.
-    static let accentLine = Color.accentColor.opacity(0.55)
-    static let destructive = Color(nsColor: .systemRed)
+    static let accentLine = accent.opacity(0.55)
+    static let destructive = Color(nsColor: themed("destructive", fallback: .systemRed))
     /// Faint frame-column guides in the timeline.
-    static let guide = Color(nsColor: dynamic(light: 0x00000009, dark: 0xFFFFFF09))
+    static let guide = Color(nsColor: dynamic("guide", light: 0x00000009, dark: 0xFFFFFF09))
     /// Status chips floating over the canvas.
-    static let overlay = Color(nsColor: dynamic(light: 0xF6F6F7E6, dark: 0x262628E6))
+    static let overlay = Color(nsColor: dynamic("overlay", light: 0xF6F6F7E6, dark: 0x262628E6))
 
     static let text = Color(nsColor: textNS)
     static let textSecondary = Color(nsColor: text2NS)

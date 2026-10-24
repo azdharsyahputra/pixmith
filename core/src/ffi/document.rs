@@ -277,12 +277,16 @@ pub unsafe extern "C" fn pixmith_set_frame_duration(doc: *mut Editor, frame: u32
     })
 }
 
-/// Composites a frame into `out` (width * height * 4 bytes, straight-alpha RGBA).
+/// Composites a frame into `out` (width * height * 4 bytes, straight-alpha RGBA), as the editor shows it:
+/// reference layers are drawn at `pixmith_reference_display` percent.
 #[no_mangle]
 pub unsafe extern "C" fn pixmith_render(doc: *const Editor, frame: u32, out: *mut u8, len: usize) -> bool {
     crate::ffi::guarded("pixmith_render", std::ptr::null_mut(), || {
-        let Some(s) = sprite(doc) else { return false };
-        let px = s.render(frame as usize);
+        let Some(e) = crate::ffi::synced(doc) else { return false };
+        // The editor's view: reference layers show at the document's reference opacity (exports never do).
+        let s = &e.sprite;
+        let rect = (0, 0, s.width as usize, s.height as usize);
+        let px = crate::document::layers::render_frame_rect_with(s, frame as usize, rect, e.reference_display);
         if out.is_null() || len < px.len() {
             return false;
         }
