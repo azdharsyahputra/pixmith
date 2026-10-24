@@ -193,10 +193,16 @@ undo step.
 
 ## `app`
 
-- `app.alert(message)` shows `message` when the script ends.
+- `app.alert(message)` shows `message` when the script ends. `app.alert{ title=, text=, buttons={...} }`
+  shows a modal message at once and returns the number of the pressed button (see Dialogs).
+- `app.sprite` is the same as the global `sprite` (`nil` in plugin `init`/`exit`).
+- `app.isUIAvailable` is `false` for headless runs (command line), `true` inside the app.
+- `app.fgColor`, `app.bgColor` (`0xRRGGBBAA`): the drawing colors, read and write.
+- `app.events:on(name, fn)` / `app.events:off(listener)` and `sprite.events:on("change", fn)`:
+  see Events.
 - `app.undoLabel(text)` names the undo step (default "Script").
 - `app.version` is Pixmith's version string; `app.apiVersion` is a number that grows with the API
-  (this reference describes version 2), for scripts that need a feature check.
+  (this reference describes version 3), for scripts that need a feature check.
 - `app.activeLayer` and `app.activeFrame` (1-based) read the current defaults of the pixel calls.
   Assigning one changes those defaults immediately and selects that layer or frame in the editor
   when the script ends (a successful run only). A group cannot be assigned as the active layer.
@@ -206,6 +212,22 @@ undo step.
 - `app.direction`: `Forward` 0, `Reverse` 1, `PingPong` 2, `PingPongReverse` 3.
 - `print(...)` works like Lua's, but goes to the dialog shown when the script ends.
 
+## Dialogs, events and plugins
+
+`Dialog` builds windows the app renders (labels, buttons, checks, radios, entries, numbers, sliders,
+colors, comboboxes, files, shades, separators), modal with `dlg:show{wait=true}` or non-modal with
+`wait=false`; `dlg.data`, `dlg:modify{}` and `onclick` / `onchange` / `onrelease` / `onclose` callbacks
+work as in Aseprite. `app.events` (`sitechange`, `fgcolorchange`, `bgcolorchange`, `beforecommand`,
+`aftercommand`) and `sprite.events` (`change`, `filenamechange`) call your functions when the editor
+reports them. A plugin script defines `init(plugin)` and optionally `exit(plugin)`; `plugin:newCommand{}`
+adds a command to File > Scripts and `plugin.preferences` is saved between sessions. The complete
+reference, the message format between the core and the app, and the threading rules are in
+[LUA_DIALOG.md](LUA_DIALOG.md). Everything stays inside the sandbox above: callbacks run on the script's
+own Lua state with the same instruction, time and memory limits per transaction, and can be cancelled.
+
+Not supported (calling them raises an error): `Dialog:canvas`, `image`, `tab`/`endtabs`, `menu`,
+`ev:stopPropagation()` and canceling `beforecommand`, `plugin:newMenuGroup`.
+
 ## `color`
 
 - `color.rgba(r, g, b [, a])` packs 0-255 channels (alpha defaults to 255).
@@ -214,7 +236,9 @@ undo step.
 ## Examples
 
 `scripts/lua-examples/` contains runnable examples: `outline-layer.lua`, `color-ramp.lua`,
-`flip-all-frames.lua`, `palette-swap.lua` and `tag-every-4-frames.lua`.
+`flip-all-frames.lua`, `palette-swap.lua`, `tag-every-4-frames.lua` and `palette-ramp-dialog.lua`
+(a dialog with a live ramp preview). `plugin-hello.lua` is a plugin example (a command with a dialog,
+preferences and an event); it is loaded as a plugin, not run from File > Scripts.
 
 ## Embedding notes
 

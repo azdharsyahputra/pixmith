@@ -125,6 +125,26 @@ jobs:
           $w = Run-Fresh 'where pixmith'
           Check ($w.Out -match [regex]::Escape((Join-Path $binDir 'pixmith.exe'))) "pixmith resolves to the installed bin folder: $($w.Out.Trim())"
 
+          Write-Host '--- the app starts (renderer probe, log, no silent exit)'
+          $support = Join-Path $env:RUNNER_TEMP 'pixmith-support'
+          $applog = Join-Path $support 'Pixmith\pixmith.log'
+          $env:PIXMITH_SUPPORT_DIR = $support
+          $env:PIXMITH_NO_DIALOGS = '1'
+          $env:PIXMITH_DIAGNOSE_QUIET = '1'
+          $d = Start-Process -FilePath (Join-Path $appDir 'Pixmith.exe') -ArgumentList '--diagnose' -Wait -PassThru
+          Check ($d.ExitCode -eq 0) "Pixmith.exe --diagnose exits 0 (was $($d.ExitCode))"
+          Check ((Test-Path $applog) -and ((Get-Content $applog -Raw) -match 'renderer:')) 'diagnose wrote the renderer choice to the log'
+          # The GUI itself: the runner has no GPU, so whether a window can be drawn varies; what must hold is that
+          # the app logs its renderer choice and does not crash or hang before deciding.
+          $g = Start-Process -FilePath (Join-Path $appDir 'Pixmith.exe') -PassThru
+          Start-Sleep -Seconds 12
+          if (-not $g.HasExited) { Stop-Process -Id $g.Id -Force; Write-Host 'app was still running after 12 s (ok)' }
+          else { Write-Host "app exited with code $($g.ExitCode)" }
+          Write-Host '--- pixmith.log'
+          Get-Content $applog | ForEach-Object { Write-Host "  $_" }
+          Check ((Get-Content $applog -Raw) -match 'start .* renderer=') 'the app logged its renderer at startup'
+          Remove-Item Env:PIXMITH_SUPPORT_DIR, Env:PIXMITH_NO_DIALOGS, Env:PIXMITH_DIAGNOSE_QUIET
+
           Check ((RegDefault 'HKCU:\Software\Classes\.pxmt') -eq 'Pixmith.Document') 'HKCU\Software\Classes\.pxmt -> Pixmith.Document'
           $cmd = RegDefault 'HKCU:\Software\Classes\Pixmith.Document\shell\open\command'
           Check ($cmd -eq "`"$appDir\Pixmith.exe`" `"%1`"") "open command: $cmd"

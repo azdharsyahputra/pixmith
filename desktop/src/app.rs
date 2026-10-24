@@ -296,7 +296,7 @@ impl eframe::App for PixmithApp {
     }
 
     /// A clean exit leaves no recovery copies behind.
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.discard_recovery_copies();
     }
 

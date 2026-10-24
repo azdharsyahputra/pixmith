@@ -23,6 +23,7 @@ module PixmithCore [system] {
     header "pixmith_jobs.h"
     header "pixmith_project.h"
     header "pixmith_live.h"
+    header "pixmith_script_ui.h"
     link "pixmith_core"
     export *
 }

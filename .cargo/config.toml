@@ -1,0 +1,4 @@
+# Windows: link the C runtime statically, so Pixmith.exe and pixmith.exe start on PCs without the
+# "Microsoft Visual C++ Redistributable" installed (a missing VCRUNTIME140.dll otherwise stops them at launch).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

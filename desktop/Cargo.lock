@@ -864,6 +864,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_glow",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -2597,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "pixmith-desktop"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "ab_glyph",
  "arboard",
@@ -2606,6 +2607,7 @@ dependencies = [
  "egui_kittest",
  "image",
  "pixmith-core",
+ "pollster 1.0.1",
  "rfd",
  "winresource",
 ]

@@ -73,6 +73,11 @@
 use crate::document::color_mode;
 use crate::document::{Editor, Sprite};
 use crate::paint::selection::Selection;
+mod dialog;
+pub mod host;
+#[cfg(test)]
+mod session_tests;
+
 use mlua::chunk::ChunkMode;
 use mlua::{
     Error, Function, Lua, LuaOptions, MultiValue, Result as LuaResult, StdLib, Table, UserData, UserDataFields,
@@ -149,9 +154,35 @@ struct Ctx {
     epoch: Cell<u64>,
     /// The script's working selection, written back (undoably) when the run succeeds.
     mask: RefCell<Option<Arc<Selection>>>,
+    /// The session runtime (dialogs, events, plugin) when the script runs inside a front end.
+    rt: RefCell<Option<Rc<host::Rt>>>,
+    /// False in a session transaction that has no document (plugin `init`/`exit`).
+    has_doc: Cell<bool>,
 }
 
 impl Ctx {
+    /// A context for a session worker; the editor is replaced by a snapshot at the start of each transaction.
+    fn new(ed: &mut Editor) -> Ctx {
+        Ctx {
+            ed: ed as *mut Editor,
+            messages: RefCell::new(Vec::new()),
+            label: RefCell::new(None),
+            layer: Cell::new(0),
+            frame: Cell::new(0),
+            selected: Cell::new(false),
+            epoch: Cell::new(0),
+            mask: RefCell::new(None),
+            rt: RefCell::new(None),
+            has_doc: Cell::new(true),
+        }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn editor(&self) -> &mut Editor {
+        // SAFETY: as for `sprite`: the pointer is valid while the context lives.
+        unsafe { &mut *self.ed }
+    }
+
     #[allow(clippy::mut_from_ref)]
     fn sprite(&self) -> &mut Sprite {
         // The pointer is valid for the whole run: `run` owns the Lua state and drops it before
@@ -193,6 +224,11 @@ impl Ctx {
             return Err(Error::runtime("groups have no pixels"));
         }
         Ok(l)
+    }
+
+    /// The drawing colors (`app.fgColor`, `app.bgColor`) as the front end last reported them.
+    fn colors(&self) -> (u32, u32) {
+        self.rt.borrow().as_ref().map_or((0x0000_00FF, 0xFFFF_FFFF), |r| r.colors())
     }
 
     fn invalidate_handles(&self) {
@@ -371,6 +407,7 @@ impl UserData for SpriteH {
             lua.create_sequence_from((0..n).map(|i| TagH::new(&t.0, i)))
         });
         f.add_field_method_get("selection", |_, t| Ok(SelectionH(t.0.clone())));
+        f.add_field_method_get("events", |_, t| Ok(host::EventsH { ctx: t.0.clone(), scope: "sprite" }));
         f.add_field_method_get("tilesets", |lua, t| {
             let n = t.0.sprite().tilesets.len();
             lua.create_sequence_from((0..n).map(|i| TilesetH(t.0.clone(), i)))
@@ -1420,6 +1457,8 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
             Ok(match name.as_str() {
                 "activeLayer" => Some(c.layer.get() + 1),
                 "activeFrame" => Some(c.frame.get() + 1),
+                "fgColor" => Some(c.colors().0 as usize),
+                "bgColor" => Some(c.colors().1 as usize),
                 _ => None,
             })
         })?,
@@ -1447,6 +1486,17 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
                     c.frame.set(c.frame_index(Some(index(&value)?))?);
                     c.selected.set(true);
                 }
+                "fgColor" | "bgColor" => {
+                    let col = color_arg(index(&value)?)?;
+                    let col = u32::from_be_bytes(col);
+                    if let Some(rt) = c.rt.borrow().as_ref() {
+                        if name == "fgColor" {
+                            rt.emit_app_set(Some(col), None);
+                        } else {
+                            rt.emit_app_set(None, Some(col));
+                        }
+                    }
+                }
                 _ => t.raw_set(key, value)?,
             }
             Ok(())
@@ -1473,6 +1523,8 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
     g.set("color", color)?;
 
     g.set("sprite", SpriteH(ctx.clone()))?;
+    g.get::<Table>("app")?.raw_set("sprite", g.get::<Value>("sprite")?)?;
+    host::install(lua, ctx)?;
     Ok(())
 }
 
@@ -1502,6 +1554,8 @@ pub fn run_with(
         selected: Cell::new(false),
         epoch: Cell::new(0),
         mask: RefCell::new(old_mask.clone()),
+        rt: RefCell::new(None),
+        has_doc: Cell::new(true),
     });
     let result = exec(&ctx, source, limits, cancel);
     let messages = ctx.messages.borrow().clone();
@@ -1558,11 +1612,17 @@ fn clean_error(e: &Error) -> String {
     s.trim().to_string()
 }
 
-fn exec(ctx: &Rc<Ctx>, source: &str, limits: Limits, cancel: &'static AtomicBool) -> LuaResult<()> {
+/// A Lua state with the sandboxed standard libraries and the Pixmith API installed.
+fn new_sandbox(ctx: &Rc<Ctx>, memory: usize) -> LuaResult<Lua> {
     let libs = StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH | StdLib::COROUTINE;
     let lua = Lua::new_with(libs, LuaOptions::default())?;
-    lua.set_memory_limit(limits.memory)?;
+    lua.set_memory_limit(memory)?;
     setup(&lua, ctx)?;
+    Ok(lua)
+}
+
+fn exec(ctx: &Rc<Ctx>, source: &str, limits: Limits, cancel: &'static AtomicBool) -> LuaResult<()> {
+    let lua = new_sandbox(ctx, limits.memory)?;
 
     const STEP: u32 = 1000;
     let started = Instant::now();
@@ -1584,12 +1644,13 @@ fn exec(ctx: &Rc<Ctx>, source: &str, limits: Limits, cancel: &'static AtomicBool
 }
 
 /// Example scripts shipped with the app (copied from `scripts/lua-examples/`).
-pub const EXAMPLES: [(&str, &str); 5] = [
+pub const EXAMPLES: [(&str, &str); 6] = [
     ("outline-layer.lua", include_str!("../../scripts/lua-examples/outline-layer.lua")),
     ("color-ramp.lua", include_str!("../../scripts/lua-examples/color-ramp.lua")),
     ("flip-all-frames.lua", include_str!("../../scripts/lua-examples/flip-all-frames.lua")),
     ("palette-swap.lua", include_str!("../../scripts/lua-examples/palette-swap.lua")),
     ("tag-every-4-frames.lua", include_str!("../../scripts/lua-examples/tag-every-4-frames.lua")),
+    ("palette-ramp-dialog.lua", include_str!("../../scripts/lua-examples/palette-ramp-dialog.lua")),
 ];
 
 // MARK: C ABI

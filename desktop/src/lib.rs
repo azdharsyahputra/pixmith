@@ -6,6 +6,7 @@
 pub mod app;
 mod calls;
 pub mod doc;
+pub mod startup;
 pub mod theme;
 pub mod ui;
 
