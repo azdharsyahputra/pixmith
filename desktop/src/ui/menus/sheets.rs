@@ -158,13 +158,13 @@ pub fn about(ctx: &egui::Context) -> bool {
     action != DialogAction::None
 }
 
-/// The command line tool shipped next to the app (`pixmith-cli` / `pixmith-cli.exe`; not `pixmith.exe`, which
-/// Windows would treat as the same name as `Pixmith.exe`), if it is there.
+/// The command line tool shipped with the app: `bin/pixmith` (`bin\pixmith.exe` on Windows; a subfolder because
+/// Windows would treat `pixmith.exe` as the same name as `Pixmith.exe`), or the older `pixmith-cli(.exe)` next to the
+/// executable, if either is there.
 pub fn bundled_cli() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let name = if cfg!(windows) { "pixmith-cli.exe" } else { "pixmith-cli" };
-    let cli = exe.parent()?.join(name);
-    cli.is_file().then_some(cli)
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let (new, old) = if cfg!(windows) { ("pixmith.exe", "pixmith-cli.exe") } else { ("pixmith", "pixmith-cli") };
+    [dir.join("bin").join(new), dir.join(old)].into_iter().find(|p| p.is_file())
 }
 
 /// Help > Command Line Tool…: where the bundled `pixmith` command is and how to put it on the PATH. Returns
@@ -179,7 +179,7 @@ pub fn command_line_tool(ctx: &egui::Context) -> bool {
         };
         match &folder {
             Some(folder) => {
-                body(ui, "Pixmith ships with the \u{201c}pixmith-cli\u{201d} command, in the same folder as the app:");
+                body(ui, "Pixmith ships with the \u{201c}pixmith\u{201d} command, in this folder:");
                 ui.label(egui::RichText::new(folder.as_str()).monospace().color(c.text));
                 if ui.button("Copy Folder Path").clicked() {
                     ui.ctx().copy_text(folder.clone());
@@ -187,14 +187,17 @@ pub fn command_line_tool(ctx: &egui::Context) -> bool {
                 if cfg!(windows) {
                     widgets::note(
                         ui,
-                        "To run it from any terminal, add this folder to your PATH: Start \u{2192} \u{201c}Edit the \
-                         system environment variables\u{201d} \u{2192} Environment Variables \u{2192} Path \u{2192} New.",
+                        "The installer already added this folder to your PATH: open a new terminal and run pixmith. \
+                         From the zip, add it yourself: Start \u{2192} \u{201c}Edit environment variables for your \
+                         account\u{201d} \u{2192} Path \u{2192} New.",
                     );
                 } else {
+                    let target = cli.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
                     widgets::note(
                         ui,
-                        "To run it from any terminal, link it onto your PATH, for example:\n\
-                         ln -s \"<folder>/pixmith-cli\" ~/.local/bin/pixmith",
+                        &format!(
+                            "To run it from any terminal, link it onto your PATH, for example:\nln -s \"{target}\" ~/.local/bin/pixmith"
+                        ),
                     );
                 }
                 widgets::note(

@@ -8,8 +8,9 @@ Pixmith is a lightweight pixel-art editor. Its own document format is `.pxmt`; `
 
 Prebuilt builds are on the [Releases](https://github.com/azdharsyahputra/pixmith/releases) page:
 
-- Windows 10 or newer (x64): `Pixmith-<version>-windows-x64.zip`. Unzip, run `Pixmith.exe`. If SmartScreen warns about an unknown publisher, choose More info, then Run anyway (the build is not code-signed yet).
-- Linux (x64): `Pixmith-<version>-linux-x64.tar.gz`. Unpack, run `./Pixmith`. It is built on a current Ubuntu, so it needs a similarly recent glibc, and a GPU driver with Vulkan or OpenGL.
+- Windows 10 or newer (x64), recommended: `Pixmith-Setup-<version>-x64.exe`. Installs for the current user without administrator rights (or for all users if you choose that on the first page), adds a Start Menu entry and an optional desktop shortcut, makes `.pxmt` open with Pixmith (an optional checkbox does the same for `.aseprite` and `.ase`; Pixmith is also listed under "Open with"), and puts the `pixmith` command on the PATH. Running a newer installer upgrades in place; uninstall from Settings > Apps removes everything it added.
+- Windows, portable: `Pixmith-<version>-windows-x64.zip`. Unzip, run `Pixmith.exe`; the command line tool is `bin\pixmith.exe`. If SmartScreen warns about an unknown publisher, choose More info, then Run anyway (the build is not code-signed yet).
+- Linux (x64): `Pixmith-<version>-linux-x64.tar.gz`. Unpack, run `./Pixmith`; the command line tool is `bin/pixmith`. It is built on a current Ubuntu, so it needs a similarly recent glibc, and a GPU driver with Vulkan or OpenGL.
 - macOS: use the native app (`Pixmith-<version>.dmg`), or build this one yourself.
 
 ## Build and run
@@ -24,6 +25,8 @@ cargo run --release
 ### Windows
 
 Install the "Desktop development with C++" workload of the Visual Studio Build Tools, then run the commands above in PowerShell or `cmd`. The release build embeds the icon (`assets/pixmith.ico`) and product name into `pixmith-desktop.exe`; rename the file to `Pixmith.exe` if you like (the release workflow does).
+
+The installer is an [Inno Setup 6](https://jrsoftware.org/isinfo.php) script, `../packaging/windows/pixmith.iss`. After building the app and `pixmith-cli` (`cargo build --release --manifest-path ../core/Cargo.toml --bin pixmith-cli`), compile it with `ISCC.exe /DAppVersion=0.4.0 /DNumericVersion=0.4.0.0 ..\packaging\windows\pixmith.iss` (the defaults point at the `target\release` folders; the result is `dist\Pixmith-Setup-<version>-x64.exe`). CI builds, installs and uninstalls it on every release and on the `ci/windows-installer` branch (`.github/workflows/windows-installer.yml`).
 
 ### Linux
 

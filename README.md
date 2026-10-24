@@ -36,8 +36,9 @@ Every build is on [Releases](https://github.com/azdharsyahputra/pixmith/releases
 | Platform | File | Notes |
 | --- | --- | --- |
 | macOS 13 or newer, Apple silicon | `Pixmith-<version>.dmg` | The native SwiftUI app. Open the disk image and drag Pixmith to Applications. |
-| Windows 10 or newer, x64 | `Pixmith-<version>-windows-x64.zip` | The egui app. Unzip anywhere and run `Pixmith.exe`; there is no installer. |
-| Linux, x64 | `Pixmith-<version>-linux-x64.tar.gz` | The egui app. Needs a desktop with OpenGL or Vulkan and X11 or Wayland. Unpack and run `./Pixmith`. |
+| Windows 10 or newer, x64 | `Pixmith-Setup-<version>-x64.exe` | **Recommended.** The installer for the egui app: per-user by default (no administrator rights), or for all users. Adds a Start Menu entry, makes `.pxmt` open with Pixmith (and `.aseprite` if you tick it), and puts the `pixmith` command on your PATH. Upgrades in place; remove it in Settings → Apps. |
+| Windows 10 or newer, x64 | `Pixmith-<version>-windows-x64.zip` | Portable: unzip anywhere and run `Pixmith.exe`; the `pixmith` command is `bin\pixmith.exe` (not on the PATH until you add that folder). |
+| Linux, x64 | `Pixmith-<version>-linux-x64.tar.gz` | The egui app. Needs a desktop with OpenGL or Vulkan and X11 or Wayland. Unpack and run `./Pixmith`; the `pixmith` command is `bin/pixmith`. |
 
 The Windows and Linux builds are the first phase of the egui front end (see [desktop/README.md](desktop/README.md) for what works); the macOS app is the complete one.
 
@@ -47,7 +48,7 @@ The apps are not signed or notarized yet. On macOS, Gatekeeper blocks the first 
 xattr -dr com.apple.quarantine /Applications/Pixmith.app
 ```
 
-On Windows, SmartScreen may warn about an unknown publisher: choose More info, then Run anyway.
+On Windows, SmartScreen may warn about an unknown publisher (for the installer and for `Pixmith.exe`): choose More info, then Run anyway.
 
 ## Build and run
 
@@ -218,10 +219,11 @@ Other commands (export GIF, APNG, PNG sequence and sprite sheet, import, layer a
 `pixmith-cli` inspects, converts and exports Pixmith (`.pxmt`) and `.aseprite` files without the app; every command accepts either format (detected from the file's content). It ships with the app:
 
 - **macOS:** inside `Pixmith.app`. Choose **Pixmith → Install Command Line Tool…** to add the `pixmith` command to Terminal (in `/usr/local/bin`, or `~/.local/bin` without a password); **Uninstall Command Line Tool…** removes it.
-- **Windows / Linux:** `pixmith-cli(.exe)` sits next to `Pixmith(.exe)` in the download; **Help → Command Line Tool…** shows the folder and how to put it on your PATH.
+- **Windows:** the installer adds the `pixmith` command to your PATH (open a new terminal afterwards) and removes it again on uninstall. In the portable zip it is `bin\pixmith.exe`; add that folder to your PATH yourself.
+- **Linux:** `bin/pixmith` inside the download; link it onto your PATH. **Help → Command Line Tool…** in the app shows the folder and how.
 - **From source:** `./build.sh` also writes `build/pixmith-cli`.
 
-The examples below use `pixmith-cli`; after installing on macOS the same commands work as `pixmith`.
+The examples below use `pixmith-cli`; once installed (macOS, Windows installer) the same commands work as `pixmith`.
 
 ```sh
 pixmith-cli info hero.aseprite              # size, frames, layers, tags

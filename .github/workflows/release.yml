@@ -1,7 +1,8 @@
 name: Release desktop builds
 
-# Builds the egui app (desktop/) for Windows and Linux and attaches the archives to the GitHub release. The macOS
-# disk image is built and uploaded separately with scripts/package.sh.
+# Builds the egui app (desktop/) for Windows and Linux and attaches the archives to the GitHub release. Windows gets
+# the Inno Setup installer plus a portable zip (see windows-installer.yml, which also smoke-tests the installer).
+# The macOS disk image is built and uploaded separately with scripts/package.sh.
 on:
   release:
     types: [published]
@@ -19,18 +20,34 @@ env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
-  desktop:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+  windows:
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      tag: ${{ github.event.release.tag_name || inputs.tag }}
+      ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+  windows-upload:
+    needs: windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: dist
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -l dist
+          gh release upload "$TAG" dist/*.zip dist/*.exe --clobber --repo "$GITHUB_REPOSITORY"
+
+  linux:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
       - name: Install Linux packages for eframe
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -48,32 +65,17 @@ jobs:
       - name: Build the command line tool
         run: cargo build --release --manifest-path core/Cargo.toml --bin pixmith-cli
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $name = "Pixmith-$env:TAG-windows-x64"
-          New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
-          Copy-Item desktop/target/release/pixmith-desktop.exe "dist/$name/Pixmith.exe"
-          Copy-Item core/target/release/pixmith-cli.exe "dist/$name/pixmith-cli.exe"
-          Copy-Item desktop/README.md "dist/$name/README.md"
-          Copy-Item LICENSE "dist/$name/LICENSE"
-          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
-          "ASSET=dist/$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Package (Linux)
-        if: runner.os == 'Linux'
+      - name: Package
         run: |
           name="Pixmith-${TAG}-linux-x64"
-          mkdir -p "dist/$name"
+          mkdir -p "dist/$name/bin"
           cp desktop/target/release/pixmith-desktop "dist/$name/Pixmith"
-          cp core/target/release/pixmith-cli "dist/$name/pixmith-cli"
+          cp core/target/release/pixmith-cli "dist/$name/bin/pixmith"
           cp desktop/README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           echo "ASSET=dist/$name.tar.gz" >> "$GITHUB_ENV"
 
       - name: Upload to the release
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$TAG" "$ASSET" --clobber --repo "$GITHUB_REPOSITORY"

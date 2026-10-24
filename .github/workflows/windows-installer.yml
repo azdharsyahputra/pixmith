@@ -1,0 +1,180 @@
+name: Windows installer
+
+# Reusable: builds the egui app and the CLI, packs the portable zip, compiles the Inno Setup installer, smoke-tests
+# the installer (install, run `pixmith` from a fresh process, file association, upgrade, uninstall) and uploads
+# both files as the "windows-release" artifact. Called by release.yml and by windows-installer-ci.yml.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag (v0.4.0) or a dummy version for CI runs (0.0.0-ci)
+        required: true
+        type: string
+      ref:
+        description: Git ref to build (default is the caller's ref)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            desktop
+            core
+      - name: Build the app
+        working-directory: desktop
+        run: cargo build --release
+      - name: Build the command line tool
+        run: cargo build --release --manifest-path core/Cargo.toml --bin pixmith-cli
+
+      - name: Package the portable zip
+        shell: pwsh
+        run: |
+          $name = "Pixmith-$env:TAG-windows-x64"
+          New-Item -ItemType Directory -Path "dist/$name/bin" -Force | Out-Null
+          Copy-Item desktop/target/release/pixmith-desktop.exe "dist/$name/Pixmith.exe"
+          Copy-Item core/target/release/pixmith-cli.exe "dist/$name/bin/pixmith.exe"
+          Copy-Item desktop/README.md "dist/$name/README.md"
+          Copy-Item LICENSE "dist/$name/LICENSE"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+
+      - name: Compile the installer
+        shell: pwsh
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          $numeric = if ($version -match '^(\d+)\.(\d+)\.(\d+)') { "$($Matches[1]).$($Matches[2]).$($Matches[3]).0" } else { '0.0.0.0' }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          }
+          $root = (Get-Location).Path
+          & $iscc "/DAppVersion=$version" "/DNumericVersion=$numeric" `
+            "/DRepoRoot=$root" `
+            "/DSourceExe=$root\desktop\target\release\pixmith-desktop.exe" `
+            "/DSourceCli=$root\core\target\release\pixmith-cli.exe" `
+            "/DOutputDir=$root\dist" `
+            packaging\windows\pixmith.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Get-ChildItem dist | Format-Table Name, Length
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Smoke test the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path (Get-Location).Path "dist\Pixmith-Setup-$env:VERSION-x64.exe"
+          $appDir = Join-Path $env:LOCALAPPDATA 'Programs\Pixmith'
+          $binDir = Join-Path $appDir 'bin'
+          $log = Join-Path $env:RUNNER_TEMP 'pixmith-install.log'
+          $unlog = Join-Path $env:RUNNER_TEMP 'pixmith-uninstall.log'
+
+          function Fail($msg) { Write-Host "::error::$msg"; throw $msg }
+          function Check($ok, $msg) { if ($ok) { Write-Host "ok   $msg" } else { Fail "FAILED: $msg" } }
+          function UserPath { [Environment]::GetEnvironmentVariable('Path', 'User') }
+          function Entries($p) { @(($p -split ';') | Where-Object { $_ -ne '' }) }
+          function Count-BinEntries { @(Entries (UserPath) | Where-Object { $_.TrimEnd('\') -ieq $binDir }).Count }
+          function RegDefault($path) { (Get-ItemProperty -Path $path -ErrorAction SilentlyContinue).'(default)' }
+          # A brand new process that sees the machine + refreshed user PATH, like a terminal opened after install.
+          function Run-Fresh($cmd) {
+            $fresh = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + (UserPath)
+            $p = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/d', '/c', $cmd `
+              -Environment @{ Path = $fresh } -NoNewWindow -Wait -PassThru `
+              -RedirectStandardOutput "$env:RUNNER_TEMP\fresh.out" -RedirectStandardError "$env:RUNNER_TEMP\fresh.err"
+            [pscustomobject]@{ Code = $p.ExitCode; Out = (Get-Content "$env:RUNNER_TEMP\fresh.out" -Raw) + (Get-Content "$env:RUNNER_TEMP\fresh.err" -Raw) }
+          }
+          function Install($extra) {
+            $a = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/CURRENTUSER', '/NORESTART', "/LOG=$log") + $extra
+            $p = Start-Process -FilePath $setup -ArgumentList $a -Wait -PassThru
+            Get-Content $log | Select-Object -Last 15
+            Check ($p.ExitCode -eq 0) "installer exit code 0 (was $($p.ExitCode))"
+          }
+
+          Write-Host '--- before install'
+          Check ((Count-BinEntries) -eq 0) 'bin folder not on the user PATH yet'
+          Check (-not (Test-Path 'HKCU:\Software\Classes\.pxmt')) '.pxmt not registered yet'
+          $before = Entries (UserPath)
+
+          Write-Host '--- install (defaults)'
+          Install @()
+          Check (Test-Path (Join-Path $appDir 'Pixmith.exe')) 'Pixmith.exe installed'
+          Check (Test-Path (Join-Path $binDir 'pixmith.exe')) 'bin\pixmith.exe installed'
+          Check ((Count-BinEntries) -eq 1) 'bin folder is on the user PATH exactly once'
+          Check (-not (Entries (UserPath) | Where-Object { $_.TrimEnd('\') -ieq $appDir })) 'app folder itself is not on the PATH'
+          Check ((Entries (UserPath)).Count -eq $before.Count + 1) 'only one PATH entry was added'
+          Check (Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Pixmith.lnk')) 'Start Menu shortcut'
+          Check (-not (Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Pixmith.lnk'))) 'no desktop shortcut by default'
+          Check (Test-Path (Join-Path $appDir 'unins000.exe')) 'uninstaller present'
+
+          $r = Run-Fresh 'pixmith --help'
+          Write-Host ($r.Out -split "`n" | Select-Object -First 4)
+          Check ($r.Code -eq 0) "pixmith --help works from a new process (exit $($r.Code))"
+          $w = Run-Fresh 'where pixmith'
+          Check ($w.Out -match [regex]::Escape((Join-Path $binDir 'pixmith.exe'))) "pixmith resolves to the installed bin folder: $($w.Out.Trim())"
+
+          Check ((RegDefault 'HKCU:\Software\Classes\.pxmt') -eq 'Pixmith.Document') 'HKCU\Software\Classes\.pxmt -> Pixmith.Document'
+          $cmd = RegDefault 'HKCU:\Software\Classes\Pixmith.Document\shell\open\command'
+          Check ($cmd -eq "`"$appDir\Pixmith.exe`" `"%1`"") "open command: $cmd"
+          Check (Test-Path 'HKCU:\Software\Classes\Applications\Pixmith.exe\shell\open\command') 'Applications\Pixmith.exe registered (Open with)'
+          Check (Test-Path 'HKCU:\Software\Classes\Applications\Pixmith.exe\SupportedTypes') 'SupportedTypes registered'
+          Check ((RegDefault 'HKCU:\Software\Classes\.aseprite') -ne 'Pixmith.AsepriteDocument') '.aseprite not taken over by default'
+          $uninst = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{FC7C9AB6-A745-47D8-9E84-E920FF36ECC1}_is1'
+          Check ($uninst.Publisher -eq 'Azdhar Syahputra') "uninstall entry publisher: $($uninst.Publisher)"
+          Check ($uninst.DisplayVersion -eq $env:VERSION) "uninstall entry version: $($uninst.DisplayVersion)"
+          Check ($uninst.DisplayIcon -like '*Pixmith.exe*') "uninstall entry icon: $($uninst.DisplayIcon)"
+
+          Write-Host '--- upgrade in place, with the optional tasks'
+          Install @('/TASKS=addtopath,desktopicon,associateaseprite')
+          Check ((Count-BinEntries) -eq 1) 'PATH entry not duplicated by the upgrade'
+          Check ((RegDefault 'HKCU:\Software\Classes\.aseprite') -eq 'Pixmith.AsepriteDocument') '.aseprite -> Pixmith.AsepriteDocument'
+          Check ((RegDefault 'HKCU:\Software\Classes\.ase') -eq 'Pixmith.AsepriteDocument') '.ase -> Pixmith.AsepriteDocument'
+          Check (Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Pixmith.lnk')) 'desktop shortcut'
+          Check ((Run-Fresh 'pixmith --help').Code -eq 0) 'pixmith still works after the upgrade'
+
+          Write-Host '--- uninstall'
+          $p = Start-Process -FilePath (Join-Path $appDir 'unins000.exe') `
+            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$unlog" -Wait -PassThru
+          Get-Content $unlog | Select-Object -Last 10
+          Check ($p.ExitCode -eq 0) "uninstaller exit code 0 (was $($p.ExitCode))"
+          # The uninstaller removes itself a moment after it exits.
+          for ($i = 0; $i -lt 20 -and (Test-Path $appDir); $i++) { Start-Sleep -Milliseconds 500 }
+          Check ((Count-BinEntries) -eq 0) 'bin folder removed from the user PATH'
+          Check ((Entries (UserPath)).Count -eq $before.Count) 'user PATH is back to what it was'
+          foreach ($k in '.pxmt', '.aseprite', '.ase', 'Pixmith.Document', 'Pixmith.AsepriteDocument', 'Applications\Pixmith.exe') {
+            Check (-not (Test-Path "HKCU:\Software\Classes\$k")) "HKCU\Software\Classes\$k removed"
+          }
+          Check (-not (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{FC7C9AB6-A745-47D8-9E84-E920FF36ECC1}_is1')) 'uninstall entry removed'
+          Check (-not (Test-Path (Join-Path $appDir 'Pixmith.exe'))) 'Pixmith.exe removed'
+          Check (-not (Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Pixmith.lnk'))) 'Start Menu shortcut removed'
+          Check ((Run-Fresh 'pixmith --help').Code -ne 0) 'pixmith no longer resolves'
+          Write-Host 'Installer smoke test passed'
+
+      - name: Upload installer logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-logs
+          path: ${{ runner.temp }}/pixmith-*.log
+          if-no-files-found: ignore
+
+      - name: Upload the Windows files
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            dist/Pixmith-*-windows-x64.zip
+            dist/Pixmith-Setup-*-x64.exe
+          if-no-files-found: error

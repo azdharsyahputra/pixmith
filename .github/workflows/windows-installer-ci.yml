@@ -1,0 +1,16 @@
+name: Windows installer (CI)
+
+# Builds and smoke-tests the Windows installer without a release. Runs on the iteration branch and on demand.
+on:
+  push:
+    branches: [ci/windows-installer]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      tag: 0.0.0-ci
