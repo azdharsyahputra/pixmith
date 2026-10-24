@@ -131,9 +131,49 @@ impl PixmithApp {
         if let Some(name) = tab.doc.path.as_ref().and_then(|p| p.file_name()) {
             return name.to_string_lossy().into_owned();
         }
+        if let Some(name) = &tab.doc.name {
+            return name.clone();
+        }
         let key = tab.doc.raw() as usize;
         let n = self.files.untitled.iter().find(|(k, _)| *k == key).map_or(1, |(_, n)| *n);
         if self.tabs.len() == 1 && n == 1 { "Untitled".into() } else { format!("Untitled {n}") }
+    }
+
+    /// Renames a document from its tab. A saved document's file is renamed on disk (keeping its extension);
+    /// one without a file keeps the name for its tab and as the Save As suggestion (`renameDocument`).
+    pub fn rename_document(&mut self, i: usize, new_name: &str) {
+        let mut base = new_name.trim().to_string();
+        for ext in [".aseprite", ".ase"] {
+            if base.to_lowercase().ends_with(ext) {
+                base.truncate(base.len() - ext.len());
+            }
+        }
+        if base.is_empty() || base.contains(['/', '\\', ':']) {
+            return;
+        }
+        let Some(tab) = self.tabs.get_mut(i) else { return };
+        let Some(path) = tab.doc.path.clone() else {
+            tab.doc.name = Some(base);
+            return;
+        };
+        let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "aseprite".into());
+        let target = path.with_file_name(format!("{base}.{ext}"));
+        if target == path {
+            return;
+        }
+        let same_file_new_case = target.to_string_lossy().to_lowercase() == path.to_string_lossy().to_lowercase();
+        if target.exists() && !same_file_new_case {
+            let name = target.file_name().unwrap_or_default().to_string_lossy();
+            self.error = Some(format!("\u{201c}{name}\u{201d} already exists in that folder."));
+            return;
+        }
+        match std::fs::rename(&path, &target) {
+            Ok(()) => tab.doc.path = Some(target),
+            Err(e) => {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                self.error = Some(format!("Could not rename \u{201c}{name}\u{201d}: {e}"));
+            }
+        }
     }
 
     // --- Opening -------------------------------------------------------------------------------
@@ -229,12 +269,10 @@ impl PixmithApp {
 
     fn save_as_tab(&mut self, i: usize) -> bool {
         let Some(tab) = self.tabs.get(i) else { return false };
-        let name = tab
-            .doc
-            .path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map_or_else(|| "Untitled.aseprite".to_string(), |n| n.to_string_lossy().into_owned());
+        let name = tab.doc.path.as_ref().and_then(|p| p.file_name()).map_or_else(
+            || format!("{}.aseprite", tab.doc.name.as_deref().unwrap_or("Untitled")),
+            |n| n.to_string_lossy().into_owned(),
+        );
         let mut dialog = rfd::FileDialog::new().add_filter("Aseprite", &["aseprite", "ase"]).set_file_name(name);
         if let Some(dir) = tab.doc.path.as_ref().and_then(|p| p.parent()) {
             dialog = dialog.set_directory(dir);
@@ -378,12 +416,10 @@ impl PixmithApp {
     /// Opens the save panel for `opts` and runs the export.
     pub fn run_export(&mut self, opts: ExportSheet) {
         let tab = &self.tabs[self.active];
-        let base = tab
-            .doc
-            .path
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .map_or("Untitled".into(), |s| s.to_string_lossy().into_owned());
+        let base = tab.doc.path.as_ref().and_then(|p| p.file_stem()).map_or_else(
+            || tab.doc.name.clone().unwrap_or_else(|| "Untitled".into()),
+            |s| s.to_string_lossy().into_owned(),
+        );
         let (name, filter) = match opts.kind {
             ExportKind::Png | ExportKind::Apng | ExportKind::Sequence => (format!("{base}.png"), ("PNG", "png")),
             ExportKind::Sheet => (format!("{base}-sheet.png"), ("PNG", "png")),

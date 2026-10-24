@@ -304,7 +304,7 @@ final class SpriteModel: ObservableObject {
         guard !MainWindow.hasSheet else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = Self.aseTypes
-        panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "Untitled.aseprite"
+        panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "\(activeSlotObject?.customName ?? "Untitled").aseprite"
         if panel.runModal() == .OK, let url = panel.url { write(to: url) }
     }
 
@@ -329,7 +329,7 @@ final class SpriteModel: ObservableObject {
         guard !MainWindow.hasSheet else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
-        let base = fileURL?.deletingPathExtension().lastPathComponent ?? "Untitled"
+        let base = fileURL?.deletingPathExtension().lastPathComponent ?? activeSlotObject?.customName ?? "Untitled"
         panel.nameFieldStringValue = sheet ? "\(base)-sheet.png" : "\(base).png"
         let scales = [1, 2, 4, 8, 16]
         let popup = NSPopUpButton()

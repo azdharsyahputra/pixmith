@@ -12,4 +12,14 @@ enum MainWindow {
     static var assumeKey = false
 
     static var hasSheet: Bool { window?.attachedSheet != nil }
+
+    private static var didFillScreen = false
+
+    /// Opens the document window filling the screen (not full-screen mode): a smaller default window cut off
+    /// the inspector and timeline. Once per launch, so a size the user picks afterwards is kept.
+    static func fillScreenOnce(_ window: NSWindow) {
+        guard !didFillScreen, !assumeKey, let screen = window.screen ?? NSScreen.main else { return }
+        didFillScreen = true
+        window.setFrame(screen.visibleFrame, display: true)
+    }
 }

@@ -14,6 +14,8 @@ pub struct Doc {
     ptr: *mut Editor,
     /// Where it was opened from or last saved to.
     pub path: Option<PathBuf>,
+    /// A name given to a document that has no file yet (double-click its tab); Save As starts with it.
+    pub name: Option<String>,
 }
 
 /// The message of the last failing core call on this thread.
@@ -41,7 +43,7 @@ pub(crate) unsafe fn take_string(s: *mut std::ffi::c_char) -> String {
 
 impl Doc {
     pub fn new(width: u32, height: u32) -> Doc {
-        Doc { ptr: core::pixmith_new(width, height), path: None }
+        Doc { ptr: core::pixmith_new(width, height), path: None, name: None }
     }
 
     pub fn open(path: &Path) -> Result<Doc, String> {
@@ -51,7 +53,7 @@ impl Doc {
         if ptr.is_null() {
             return Err(last_error());
         }
-        Ok(Doc { ptr, path: Some(path.to_path_buf()) })
+        Ok(Doc { ptr, path: Some(path.to_path_buf()), name: None })
     }
 
     /// Takes ownership of a document the core allocated (an import, say).
@@ -59,7 +61,7 @@ impl Doc {
     /// # Safety
     /// `ptr` must be a live, non-null document that nothing else frees.
     pub(crate) unsafe fn from_raw(ptr: *mut Editor, path: Option<PathBuf>) -> Doc {
-        Doc { ptr, path }
+        Doc { ptr, path, name: None }
     }
 
     pub fn save(&mut self, path: &Path) -> Result<(), String> {

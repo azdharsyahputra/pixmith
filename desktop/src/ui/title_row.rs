@@ -30,6 +30,8 @@ pub struct FilesState {
     pub quit_skip: Vec<usize>,
     /// Hands out distinct starting revisions to new tabs, so the canvas never mistakes one document for another.
     pub next_revision: u64,
+    /// The tab being renamed and the text typed so far.
+    pub renaming: Option<(usize, String)>,
     /// File > Import > Sprite Sheet as Frames: the chosen PNG and the cell size being asked for.
     pub sheet_import: Option<(std::path::PathBuf, u32, u32)>,
 }
@@ -46,6 +48,7 @@ impl Default for FilesState {
             quit_approved: false,
             quit_skip: Vec::new(),
             sheet_import: None,
+            renaming: None,
             next_revision: 0,
         }
     }
@@ -107,12 +110,13 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
     left.min.x = menu_rect.right() + space::SM;
 
     let mut tabs = TabEvents::default();
+    let mut renaming = app.files.renaming.take();
     ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| {
         egui::ScrollArea::horizontal()
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| tab_bar(app, ui, &mut tabs));
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| tab_bar(app, ui, &mut tabs, &mut renaming));
             });
     });
     ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::left_to_right(Align::Center)), |ui| {
@@ -122,6 +126,10 @@ pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
         export_button(app, ui);
     });
 
+    app.files.renaming = renaming;
+    if let Some((i, name)) = tabs.rename {
+        app.rename_document(i, &name);
+    }
     if let Some(i) = tabs.activate {
         app.active = i;
     }
@@ -138,24 +146,26 @@ struct TabEvents {
     activate: Option<usize>,
     close: Option<usize>,
     new_tab: bool,
+    /// A finished rename: tab and new name.
+    rename: Option<(usize, String)>,
 }
 
 /// One tab (`DSTab` / `TabItem`): name, then a dirty dot or, on hover, a close button.
-fn tab_bar(app: &PixmithApp, ui: &mut Ui, events: &mut TabEvents) {
+/// Double-click a tab (or Rename… in its menu) to rename the document; Return keeps it, Esc cancels.
+fn tab_bar(app: &PixmithApp, ui: &mut Ui, events: &mut TabEvents, renaming: &mut Option<(usize, String)>) {
     ui.spacing_mut().item_spacing.x = space::XXS;
     let c = Colors::of(ui.ctx());
-    let single = app.tabs.len() == 1;
     for i in 0..app.tabs.len() {
         let active = i == app.active;
         let dirty = app.tabs[i].doc.is_dirty();
         let name = app.tab_name(i);
         let name_color = if active { c.text } else { c.text_secondary };
         let font = ui_font(font::BODY_LARGE);
-        let (min_w, max_w) = if single { (0.0, 260.0) } else { (90.0, 200.0) };
-        // padding: 12 leading, 8 trailing (10 on the single chip), 8 between name and the 16 pt slot.
-        let trailing = if single { 10.0 } else { space::SM };
-        let slot_w = if single { if dirty { 6.0 } else { 0.0 } } else { 16.0 };
-        let gap = if slot_w > 0.0 { space::SM } else { 0.0 };
+        let (min_w, max_w) = (90.0, 200.0);
+        // padding: 12 leading, 8 trailing, 8 between name and the 16 pt slot.
+        let trailing = space::SM;
+        let slot_w = 16.0;
+        let gap = space::SM;
         let chrome = 12.0 + gap + slot_w + trailing;
         let natural = ui.painter().layout_no_wrap(name.clone(), font.clone(), name_color).size().x;
         let width = (natural + chrome).clamp(min_w, max_w);
@@ -166,23 +176,43 @@ fn tab_bar(app: &PixmithApp, ui: &mut Ui, events: &mut TabEvents) {
         let fill = if active {
             c.panel2
         } else if hovering {
-            c.hover.gamma_multiply(if single { 0.5 } else { 0.6 })
+            c.hover.gamma_multiply(0.6)
         } else {
             Color32::TRANSPARENT
         };
         ui.painter().rect_filled(rect, radius::CONTROL, fill);
-        ui.painter().galley(
-            pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
-            galley.clone(),
-            name_color,
-        );
-
-        let slot_center = pos2(rect.right() - trailing - slot_w / 2.0, rect.center().y);
-        if single {
-            if dirty {
-                ui.painter().circle_filled(slot_center, 3.0, c.text_secondary);
+        let editing = renaming.as_ref().is_some_and(|(r, _)| *r == i);
+        if editing {
+            let text_rect = Rect::from_min_max(
+                pos2(rect.left() + 8.0, rect.top() + 3.0),
+                pos2(rect.right() - trailing - slot_w - gap, rect.bottom() - 3.0),
+            );
+            let (_, draft) = renaming.as_mut().expect("editing");
+            let edit = ui.put(
+                text_rect,
+                egui::TextEdit::singleline(draft).font(ui_font(font::BODY_LARGE)).margin(vec2(4.0, 2.0)),
+            );
+            if !edit.has_focus() && !edit.lost_focus() {
+                edit.request_focus();
+            }
+            let (enter, escape) =
+                ui.input(|inp| (inp.key_pressed(egui::Key::Enter), inp.key_pressed(egui::Key::Escape)));
+            if escape {
+                *renaming = None;
+            } else if edit.lost_focus() || enter {
+                let (_, name) = renaming.take().expect("editing");
+                events.rename = Some((i, name));
             }
         } else {
+            ui.painter().galley(
+                pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
+                galley.clone(),
+                name_color,
+            );
+        }
+
+        let slot_center = pos2(rect.right() - trailing - slot_w / 2.0, rect.center().y);
+        {
             let slot = Rect::from_center_size(slot_center, vec2(16.0, 16.0));
             if hovering {
                 let close = ui.interact(slot, response.id.with("close"), Sense::click());
@@ -206,25 +236,41 @@ fn tab_bar(app: &PixmithApp, ui: &mut Ui, events: &mut TabEvents) {
         if response.clicked() {
             events.activate = Some(i);
         }
+        if response.double_clicked() {
+            *renaming = Some((i, rename_draft(app, i)));
+        }
         if response.middle_clicked() {
             events.close = Some(i);
         }
         response.context_menu(|ui| {
+            if ui.button("Rename\u{2026}").clicked() {
+                *renaming = Some((i, rename_draft(app, i)));
+                ui.close();
+            }
             if ui.button("Close Tab").clicked() {
                 events.close = Some(i);
                 ui.close();
             }
         });
         let tip = app.tabs[i].doc.path.as_ref().map_or_else(|| name.clone(), |p| p.display().to_string());
-        response.on_hover_text(tip);
+        response.on_hover_text(format!("{tip} \u{2014} double-click to rename"));
     }
-    if !single
-        && widgets::icon_button_sized(ui, icon::PLUS, metric::CONTROL, 13.0)
-            .on_hover_text(format!("New sprite ({}N)", command()))
-            .clicked()
+    if widgets::icon_button_sized(ui, icon::PLUS, metric::CONTROL, 13.0)
+        .on_hover_text(format!("New sprite ({}N)", command()))
+        .clicked()
     {
         events.new_tab = true;
     }
+}
+
+/// The text a rename starts with: the file name without its extension, else the tab's name.
+fn rename_draft(app: &PixmithApp, i: usize) -> String {
+    app.tabs[i]
+        .doc
+        .path
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map_or_else(|| app.tab_name(i), |s| s.to_string_lossy().into_owned())
 }
 
 /// Zoom out, a menu with the current zoom and presets, zoom in (`ZoomControl`).

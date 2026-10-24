@@ -41,7 +41,7 @@ Every build is on [Releases](https://github.com/azdharsyahputra/pixmith/releases
 
 The Windows and Linux builds are the first phase of the egui front end (see [desktop/README.md](desktop/README.md) for what works); the macOS app is the complete one.
 
-The apps are not signed or notarized yet. On macOS, Gatekeeper blocks the first launch: right-click Pixmith in Applications and choose Open, then Open again, or run:
+The apps are not signed or notarized yet. On macOS, Gatekeeper blocks the first launch ("Apple could not verify Pixmith…"): click **Done**, open **System Settings → Privacy & Security**, click **Open Anyway** next to the Pixmith message and confirm. You only do this once. Or run:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Pixmith.app

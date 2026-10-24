@@ -28,6 +28,8 @@ final class DocumentSlot: Identifiable {
     var lastAutosavedRevision: Int?
     /// "Untitled N" for documents that have no file.
     var untitledNumber = 1
+    /// A name given to a document that has no file yet (double-click its tab); the Save panel starts with it.
+    var customName: String?
     /// Set when the tab is closed, just before its document is freed; a closed slot never touches `doc`.
     var closed = false
     /// The reference image and its placement belong to the document.
@@ -72,11 +74,39 @@ extension SpriteModel {
 
     func name(of slot: DocumentSlot) -> String {
         if let url = slot.fileURL { return url.lastPathComponent }
+        if let custom = slot.customName { return custom }
         return slots.count == 1 && slot.untitledNumber == 1 ? "Untitled" : "Untitled \(slot.untitledNumber)"
     }
 
     /// Name of the active document, for the window title and dialogs.
     var documentName: String { activeSlotObject.map(name(of:)) ?? "Untitled" }
+
+    /// Renames a document from its tab. A saved document's file is renamed on disk (keeping its extension);
+    /// one without a file keeps the name for its tab and as the Save panel's suggestion.
+    func renameDocument(_ slot: DocumentSlot, to newName: String) {
+        var base = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        for ext in [".aseprite", ".ase"] where base.lowercased().hasSuffix(ext) { base.removeLast(ext.count) }
+        guard !base.isEmpty, !base.contains("/"), !base.contains(":") else { return }
+        guard let url = slot.fileURL else {
+            slot.customName = base
+            objectWillChange.send()
+            return
+        }
+        let target = url.deletingLastPathComponent().appendingPathComponent(base).appendingPathExtension(url.pathExtension)
+        guard target != url else { return }
+        if FileManager.default.fileExists(atPath: target.path), target.path.lowercased() != url.path.lowercased() {
+            errorMessage = "“\(target.lastPathComponent)” already exists in that folder."
+            return
+        }
+        do {
+            try FileManager.default.moveItem(at: url, to: target)
+        } catch {
+            errorMessage = "Could not rename “\(url.lastPathComponent)”: \(error.localizedDescription)"
+            return
+        }
+        if slot === activeSlotObject { fileURL = target } else { slot.fileURL = target }
+        objectWillChange.send()
+    }
 
     func nextUntitledNumber(excluding slot: DocumentSlot? = nil) -> Int {
         let used = Set(slots.filter { $0 !== slot && $0.fileURL == nil }.map(\.untitledNumber))
@@ -366,19 +396,15 @@ struct TabBar: View {
     @ObservedObject var model: SpriteModel
 
     var body: some View {
-        if model.slots.count > 1 {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: DS.Space.xxs) {
-                    ForEach(model.slots) { slot in
-                        TabItem(model: model, slot: slot)
-                    }
-                    IconButton("plus", help: "New sprite", shortcut: "⌘N", compact: true) { model.requestNewSprite() }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: DS.Space.xxs) {
+                ForEach(model.slots) { slot in
+                    TabItem(model: model, slot: slot)
                 }
+                IconButton("plus", help: "New sprite", shortcut: "⌘N", compact: true) { model.requestNewSprite() }
             }
-            .frame(maxWidth: .infinity)
-        } else {
-            DocumentTitle(model: model)
         }
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -386,16 +412,42 @@ private struct TabItem: View {
     @ObservedObject var model: SpriteModel
     let slot: DocumentSlot
     @State private var hovering = false
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    private func beginRename() {
+        draft = slot.fileURL?.deletingPathExtension().lastPathComponent ?? model.name(of: slot)
+        editing = true
+        focused = true
+    }
+
+    private func commitRename() {
+        guard editing else { return }
+        editing = false
+        model.renameDocument(slot, to: draft)
+    }
 
     var body: some View {
         let active = model.activeSlotID == slot.id
         let dirty = model.isDirty(slot)
         HStack(spacing: DS.Space.sm) {
-            Text(model.name(of: slot))
-                .font(DS.Font.bodyLarge)
-                .foregroundStyle(active ? DSColor.text : DSColor.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if editing {
+                TextField("Name", text: $draft)
+                    .textFieldStyle(.plain)
+                    .font(DS.Font.bodyLarge)
+                    .foregroundStyle(DSColor.text)
+                    .focused($focused)
+                    .onSubmit(commitRename)
+                    .onExitCommand { editing = false }
+                    .onChange(of: focused) { if !$0 { commitRename() } }
+            } else {
+                Text(model.name(of: slot))
+                    .font(DS.Font.bodyLarge)
+                    .foregroundStyle(active ? DSColor.text : DSColor.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             ZStack {
                 if hovering {
                     Button { model.closeTab(slot) } label: {
@@ -420,9 +472,13 @@ private struct TabItem: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { if let i = model.slots.firstIndex(where: { $0 === slot }) { model.activate(i) } }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename() })
         .overlay(MiddleClickCatcher { model.closeTab(slot) })
-        .contextMenu { Button("Close Tab") { model.closeTab(slot) } }
-        .help(slot.fileURL?.path ?? model.name(of: slot))
+        .contextMenu {
+            Button("Rename…") { beginRename() }
+            Button("Close Tab") { model.closeTab(slot) }
+        }
+        .help((slot.fileURL?.path ?? model.name(of: slot)) + " — double-click to rename")
         .accessibilityAddTraits(active ? .isSelected : [])
         .onDrag { NSItemProvider(object: Self.payload(slot) as NSString) }
         .onDrop(of: [.text], delegate: TabDropDelegate(model: model, target: slot))

@@ -335,6 +335,7 @@ final class WindowCloseGuard: NSObject, NSWindowDelegate {
 
     func install(on window: NSWindow) {
         MainWindow.window = window
+        MainWindow.fillScreenOnce(window)
         guard window.delegate !== self else { return }
         original = window.delegate
         window.delegate = self

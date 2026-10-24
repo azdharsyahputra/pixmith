@@ -29,16 +29,6 @@ struct TitleRow: View {
 }
 
 /// The current document as one tab-like chip with an unsaved-changes dot.
-struct DocumentTitle: View {
-    @ObservedObject var model: SpriteModel
-
-    var body: some View {
-        DSTab(title: model.fileURL?.lastPathComponent ?? "Untitled", active: true, dirty: model.isDirty)
-            .frame(maxWidth: 260, alignment: .leading)
-            .help(model.windowTitle)
-    }
-}
-
 /// Zoom out, a menu with the current zoom and presets, zoom in.
 struct ZoomControl: View {
     @ObservedObject var model: SpriteModel

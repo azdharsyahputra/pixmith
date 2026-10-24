@@ -13,6 +13,8 @@ fn main() -> eframe::Result {
         .with_app_id("pixmith")
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([1000.0, 640.0])
+        // Open filling the screen: the smaller default window cut off the inspector and timeline.
+        .with_maximized(true)
         .with_drag_and_drop(true);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(LOGO) {
         viewport = viewport.with_icon(icon);

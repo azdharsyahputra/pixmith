@@ -469,6 +469,35 @@ func registerTabs() {
         expectEq(leftovers.count, 0, "and the replacement has none")
     }
 
+    scenario("tabs/rename-document") {
+        let m = resetTabs(), d = CanvasDriver()
+        defer { resetTabs() }
+        // An unsaved document keeps the name for its tab (and the Save panel).
+        let first = m.activeSlotObject!
+        m.renameDocument(first, to: "  hero  ")
+        expectEq(m.name(of: first), "hero")
+        m.renameDocument(first, to: "   ")
+        expectEq(m.name(of: first), "hero", "an empty name is ignored")
+        // A saved document is renamed on disk, keeping its extension; the old file is gone.
+        let url = tmp("rename-me.aseprite")
+        mark(d, 1, 1, RED)
+        m.fileURL = url
+        m.save()
+        m.renameDocument(first, to: "walk-cycle.aseprite")
+        let renamed = url.deletingLastPathComponent().appendingPathComponent("walk-cycle.aseprite")
+        expectEq(m.fileURL, renamed)
+        expectEq(m.name(of: first), "walk-cycle.aseprite")
+        expect(FileManager.default.fileExists(atPath: renamed.path), "renamed file exists")
+        expect(!FileManager.default.fileExists(atPath: url.path), "old file is gone")
+        // Renaming onto an existing file is refused.
+        let taken = tmp("taken.aseprite")
+        FileManager.default.createFile(atPath: taken.path, contents: Data())
+        m.renameDocument(first, to: "taken")
+        expectEq(m.fileURL, renamed, "an existing file is not overwritten")
+        expect(m.errorMessage != nil, "the user is told why")
+        m.errorMessage = nil
+    }
+
     scenario("tabs/open-already-open-file") {
         let m = resetTabs(), d = CanvasDriver()
         defer { resetTabs() }
