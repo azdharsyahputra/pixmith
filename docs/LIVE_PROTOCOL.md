@@ -72,6 +72,10 @@ changed it.
 | `documents.save` | `{"id", "path"?}` | `{"document": Doc}`, saved to `path` (absolute) or to its own file; `.pxmt` or `.aseprite` / `.ase` by extension, anything else is `-32602` |
 | `documents.activate` | `{"id"}` | `{"document": Doc}` |
 | `documents.close` | `{"id", "discard": false}` | `{}`; refused with `-32011` when the document has unsaved changes and `discard` is false |
+| `godot.atlas` | `{"id"}` | `{"document": Doc, "linked", "scale", "warnings", "resources": [Resource…]}`, see Godot Live Link below |
+| `game.poll` | `{}` | `{"capture": "<request id>" or null}`; for the Godot addon, see Game view below |
+| `game.frame` | `{"request", "png": "<base64>", "w", "h"}` | `{}`; the addon's answer to a capture |
+| `game.capture` | `{"timeout_ms"?: 3000}` | `{"png": "<base64>", "w", "h", "client"}`, a screenshot of the running game |
 | `view.get` | `{}` | `{"document": id or null, "layer", "frame", "zoom", "tool"}` for the active document |
 | `view.set` | `{"id"?, "layer"?, "frame"?}` | the same shape as `view.get`, for the document `id` (default: the active one); `layer` and `frame` are clamped to the document |
 
@@ -110,8 +114,64 @@ The revision goes up when `steps` is more than 0. They follow the rules for busy
 
 Applies run on the app's UI thread between frames. A stroke the user is drawing in the middle of an apply is
 finished first. If a modal sheet is open (for example a save prompt) or a shape is half drawn, the app refuses every request
-that changes something (everything except `documents.list`, `documents.get` and `view.get`) with `-32010` (busy),
+that changes something (everything except `documents.list`, `documents.get`, `godot.atlas`, `view.get` and the `game.*` methods) with `-32010` (busy),
 and the client retries a little later. An unknown id is reported (`-32004`) before busy.
+
+## Godot Live Link
+
+The Godot addon in `godot/addons/pixmith_live_link/` is a client of this protocol. Added to a game, it swaps the
+sprites of the running game for what is drawn in Pixmith, with no save, export or restart. It only runs in debug
+builds (`OS.is_debug_build()`), so it never reaches a released game.
+
+The addon says `hello` with `"client": "pixmith-godot"`, then asks `documents.list` about every 150 ms. When a
+document's `revision` differs from the one it last fetched, it calls `godot.atlas` for it. A dropped connection
+leaves the game running with the last sprites; the addon reconnects quietly (reading the discovery files again).
+
+`godot.atlas` lays the document out exactly like **Export > Godot SpriteFrames** does with the export settings
+saved in the document (scale, trim, padding, packing, layers, tags), so the regions are the ones the exported
+`.tres` holds. The result:
+
+```json
+{"document": Doc, "linked": true, "scale": 1, "warnings": ["..."],
+ "resources": [{"resource": "res://chars/hero.tres",
+                "pages": [{"w": 128, "h": 64, "png": "<base64 PNG>"}],
+                "animations": [{"name": "walk", "loop": true, "speed": 10,
+                                "frames": [{"page": 0, "region": [0, 0, 32, 48], "margin": null, "duration": 1}]}]}]}
+```
+
+- `linked` is false when the document was never exported to Godot (no saved settings, or the saved project is
+  gone). Then `resource` is null and the default options are used; the addon matches such a document to a
+  SpriteFrames whose file name (without `.tres`) equals the document name without its extension.
+- `resources` has one entry per exported `.tres` (several with the "each layer" option). `resource` is its
+  `res://` path.
+- `page` indexes `pages` (the atlas PNGs, in the order of the `.tres` ext_resources). `region` and `margin` are
+  the AtlasTexture `region` and `margin` as `[x, y, w, h]`; `margin` is null when the frame is not trimmed.
+  `duration` and `speed` are the SpriteFrames values.
+
+The addon applies a resource to the SpriteFrames the game already loaded from that path (`ResourceLoader`
+cache), in place: each page becomes an `ImageTexture`, each frame's `AtlasTexture` gets the new atlas, region and
+margin, and frames or animations are added or removed to match. Every AnimatedSprite2D using it updates at once;
+the one that is playing keeps its animation when it still exists.
+
+The revision changes when an edit is committed (a stroke when the mouse button is released), so the game updates
+after each stroke.
+
+### Game view
+
+A client such as the MCP server can look at the running game, to check an edit where it matters. Clients do not
+talk to each other, so the app relays: `game.capture` asks for a screenshot and waits for the game to send one.
+
+- The addon calls `game.poll` about every 150 ms (with `documents.list`). The app counts a client as a running game
+  while it has polled within the last second. The result's `capture` is null, or a request id when a client asked
+  for a screenshot.
+- On a request id the addon grabs the game's viewport (`get_viewport().get_texture().get_image()`), encodes it as
+  PNG (scaled down to at most 1280 px on the long side) and sends `game.frame` with that `request`. A `game.frame`
+  whose request is unknown or already answered gets `{}` and is dropped.
+- `game.capture` waits up to `timeout_ms` (default 3000, at most 10000) for that frame and returns it with the
+  `client` name of the game that sent it. With no game polling, or no frame in time, it fails with `-32012`.
+  With several games polling, the one that polled last is asked.
+- The `game.*` methods are handled by the app's network layer, not between frames of the UI, so they work while the
+  app is busy and never stall drawing. They change nothing in any document.
 
 ## Errors
 
@@ -123,6 +183,7 @@ and the client retries a little later. An unknown id is reported (`-32004`) befo
 | `-32009` | Stale revision. Fetch again with `documents.get` and retry. |
 | `-32010` | Busy: a modal sheet is open or a stroke is in progress |
 | `-32011` | Unsaved changes: `documents.close` without `discard` |
+| `-32012` | No game: `game.capture` found no running game, or the game did not send a frame in time |
 | `-32000` | Anything else. `message` carries the core's error text, for example a file that cannot be read. |
 
 ## Core support

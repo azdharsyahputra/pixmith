@@ -41,12 +41,21 @@ impl Rig {
 
     /// A connection that already said hello.
     fn client(&mut self) -> Client {
+        self.client_named("pixmith-mcp")
+    }
+
+    fn client_named(&mut self, name: &str) -> Client {
         let mut c = self.connect();
         let token = self.discovery().get("token").unwrap().as_str().unwrap().to_string();
         let r = c.call(
             &mut self.app,
             "hello",
-            &format!(r#"{{"token":"{token}","client":"pixmith-mcp","client_version":"9.9","protocol":1}}"#),
+            &json::to_string(&obj(&[
+                ("token", Value::Str(token)),
+                ("client", Value::Str(name.into())),
+                ("client_version", Value::Str("9.9".into())),
+                ("protocol", Value::Num(1.0)),
+            ])),
         );
         assert!(r.get("result").is_some(), "{r:?}");
         c
@@ -103,6 +112,32 @@ impl Client {
         }
     }
 
+    /// Like `call`, for methods the network layer answers itself: nothing pumps the app, so this can run on
+    /// another thread (and block, as `game.capture` does).
+    fn call_net(&mut self, method: &str, params: &Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        let params = json::to_string(params);
+        self.send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=end).collect();
+                let r = json::parse(std::str::from_utf8(&line).unwrap()).unwrap();
+                assert_eq!(r.get("id").unwrap().as_f64(), Some(id as f64), "{r:?}");
+                return r;
+            }
+            assert!(Instant::now() < deadline, "no response");
+            let mut buf = vec![0u8; 1 << 16];
+            match self.stream.read(&mut buf) {
+                Ok(0) => panic!("connection closed"),
+                Ok(n) => self.pending.extend_from_slice(&buf[..n]),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
     fn call(&mut self, app: &mut PixmithApp, method: &str, params: &str) -> Value {
         let id = self.next;
         self.next += 1;
@@ -111,6 +146,10 @@ impl Client {
         assert_eq!(r.get("id").unwrap().as_f64(), Some(id as f64), "{r:?}");
         r
     }
+}
+
+fn obj(members: &[(&str, Value)]) -> Value {
+    Value::Obj(members.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -561,6 +600,44 @@ fn busy_while_a_sheet_is_open_but_reads_work() {
     rig.ok(&mut c, "documents.apply", &params);
 }
 
+/// `{"id": id}` for a request, with the id escaped like any JSON string.
+fn id_params(id: &str) -> String {
+    json::to_string(&Value::Obj(vec![("id".to_string(), Value::Str(id.to_string()))]))
+}
+
+#[test]
+fn godot_atlas_lays_out_the_frames_and_works_while_busy() {
+    let mut rig = Rig::new("live-godot-atlas");
+    let mut c = rig.client();
+    rig.app.tabs[0].doc.add_frame(0, false);
+    rig.app.tabs[0].changed();
+    let params = id_params("doc-1");
+    let r = rig.ok(&mut c, "godot.atlas", &params);
+    assert_eq!(s(r.get("document").unwrap(), "id"), "doc-1");
+    // Never exported to Godot: unlinked, laid out with the default options.
+    assert_eq!(r.get("linked"), Some(&Value::Bool(false)));
+    let res = &r.get("resources").unwrap().as_array().unwrap()[0];
+    assert_eq!(res.get("resource"), Some(&Value::Null));
+    let page = &res.get("pages").unwrap().as_array().unwrap()[0];
+    assert!(n(page, "w") > 0 && n(page, "h") > 0);
+    assert_eq!(&decode(s(page, "png"))[1..4], b"PNG");
+    let anims = res.get("animations").unwrap().as_array().unwrap();
+    let frames = anims[0].get("frames").unwrap().as_array().unwrap();
+    assert_eq!(frames.len(), 2);
+    for f in frames {
+        let region = f.get("region").unwrap().as_array().unwrap();
+        assert_eq!(region.len(), 4);
+        assert!(region.iter().all(|v| v.as_f64().is_some()));
+    }
+
+    // A read: answered while a sheet is open; an unknown document is reported either way.
+    rig.app.request_new_sprite();
+    assert!(rig.app.files.new_sheet.is_some());
+    rig.ok(&mut c, "godot.atlas", &params);
+    assert_eq!(rig.fail(&mut c, "godot.atlas", &id_params("nope")), -32004);
+    assert_eq!(rig.fail(&mut c, "godot.atlas", "{}"), -32602);
+}
+
 #[test]
 fn disconnect_closes_connections_and_the_port_stays_open() {
     let mut rig = Rig::new("live-disconnect");
@@ -824,4 +901,109 @@ mod ui_loop {
         let encoded = pixmith_desktop::ui::menus::Prefs { live_enabled: false, ..Default::default() }.encode();
         assert!(!pixmith_desktop::ui::menus::Prefs::decode(&encoded).live_enabled);
     }
+}
+
+// MARK: Game view
+
+/// A 1x1 PNG.
+const TINY_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+fn error_code(r: &Value) -> i64 {
+    r.get("error").unwrap_or_else(|| panic!("should have failed: {r:?}")).get("code").unwrap().as_f64().unwrap() as i64
+}
+
+fn frame_params(request: &str) -> Value {
+    obj(&[
+        ("request", Value::Str(request.into())),
+        ("png", Value::Str(TINY_PNG.into())),
+        ("w", Value::Num(1.0)),
+        ("h", Value::Num(1.0)),
+    ])
+}
+
+#[test]
+fn game_capture_relays_the_frame_from_the_polling_game() {
+    let mut rig = Rig::new("live-game-capture");
+    let mut game = rig.client_named("pixmith-godot");
+    let mut mcp = rig.client();
+    // Nothing asked yet.
+    assert_eq!(game.call_net("game.poll", &obj(&[])).get("result").unwrap().get("capture"), Some(&Value::Null));
+    let asker = std::thread::spawn(move || mcp.call_net("game.capture", &obj(&[("timeout_ms", Value::Num(8000.0))])));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        let r = game.call_net("game.poll", &obj(&[]));
+        if let Some(id) = r.get("result").unwrap().get("capture").and_then(Value::as_str) {
+            break id.to_string();
+        }
+        assert!(Instant::now() < deadline, "the capture was never offered to the game");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // Offered once.
+    assert_eq!(game.call_net("game.poll", &obj(&[])).get("result").unwrap().get("capture"), Some(&Value::Null));
+    let ok = game.call_net("game.frame", &frame_params(&request));
+    assert_eq!(ok.get("result"), Some(&Value::Obj(Vec::new())), "{ok:?}");
+    let got = asker.join().unwrap();
+    let result = got.get("result").unwrap_or_else(|| panic!("{got:?}"));
+    assert_eq!(s(result, "client"), "pixmith-godot");
+    assert_eq!(s(result, "png"), TINY_PNG);
+    assert_eq!((n(result, "w"), n(result, "h")), (1, 1));
+    // A duplicate and an unknown request are dropped with {}.
+    for request in [request.as_str(), "cap-999", ""] {
+        let r = game.call_net("game.frame", &frame_params(request));
+        assert_eq!(r.get("result"), Some(&Value::Obj(Vec::new())), "{r:?}");
+    }
+    // Bad params are still reported.
+    let r = game.call_net("game.frame", &obj(&[("request", Value::Str("cap-1".into()))]));
+    assert_eq!(error_code(&r), -32602);
+}
+
+#[test]
+fn game_capture_without_a_game_fails_fast() {
+    let mut rig = Rig::new("live-game-none");
+    let mut c = rig.client();
+    let started = Instant::now();
+    assert_eq!(error_code(&c.call_net("game.capture", &obj(&[]))), -32012);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    // A game that polled more than a second ago is gone.
+    let mut game = rig.client_named("pixmith-godot");
+    game.call_net("game.poll", &obj(&[]));
+    std::thread::sleep(Duration::from_millis(1150));
+    assert_eq!(error_code(&c.call_net("game.capture", &obj(&[]))), -32012);
+    // A bad timeout is a parameter error.
+    assert_eq!(error_code(&c.call_net("game.capture", &obj(&[("timeout_ms", Value::Str("x".into()))]))), -32602);
+    // Like every method, the game ones need hello first.
+    let mut raw = rig.connect();
+    assert_eq!(error_code(&raw.call_net("game.poll", &obj(&[]))), -32001);
+}
+
+#[test]
+fn game_capture_times_out_when_the_game_never_answers() {
+    let mut rig = Rig::new("live-game-timeout");
+    let mut game = rig.client_named("pixmith-godot");
+    let mut c = rig.client();
+    game.call_net("game.poll", &obj(&[]));
+    let started = Instant::now();
+    let r = c.call_net("game.capture", &obj(&[("timeout_ms", Value::Num(300.0))]));
+    assert_eq!(error_code(&r), -32012);
+    assert!(started.elapsed() >= Duration::from_millis(280) && started.elapsed() < Duration::from_secs(5));
+    // The late frame is stale now.
+    let request = game.call_net("game.poll", &obj(&[]));
+    assert_eq!(request.get("result").unwrap().get("capture"), Some(&Value::Null), "{request:?}");
+    let r = game.call_net("game.frame", &frame_params("cap-1"));
+    assert_eq!(r.get("result"), Some(&Value::Obj(Vec::new())), "{r:?}");
+}
+
+#[test]
+fn game_capture_fails_when_the_game_disconnects() {
+    let mut rig = Rig::new("live-game-gone");
+    let mut game = rig.client_named("pixmith-godot");
+    let mut c = rig.client();
+    game.call_net("game.poll", &obj(&[]));
+    let asker = std::thread::spawn(move || c.call_net("game.capture", &obj(&[("timeout_ms", Value::Num(8000.0))])));
+    std::thread::sleep(Duration::from_millis(200));
+    drop(game);
+    let started = Instant::now();
+    assert_eq!(error_code(&asker.join().unwrap()), -32012);
+    assert!(started.elapsed() < Duration::from_secs(5));
 }

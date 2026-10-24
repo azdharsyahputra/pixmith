@@ -21,6 +21,7 @@ struct LiveError: Error {
     static func params(_ message: String) -> LiveError { LiveError(code: -32602, message: message) }
     static func other(_ message: String) -> LiveError { LiveError(code: -32000, message: message) }
     static func busy(_ message: String) -> LiveError { LiveError(code: -32010, message: message) }
+    static func noGame(_ message: String) -> LiveError { LiveError(code: -32012, message: message) }
     static let unauthorized = LiveError(code: -32001, message: "send hello with the token first")
 }
 
@@ -62,6 +63,8 @@ final class LiveServer: ObservableObject {
         var blocked = false
         var fds = Set<Int32>()
         let acceptDone = DispatchSemaphore(value: 0)
+        /// The Game view relay (`game.*`); it lives and dies with the session.
+        let game = GameRelay()
 
         init(token: String, listenFD: Int32) {
             self.token = token
@@ -238,6 +241,7 @@ final class LiveServer: ObservableObject {
                 session.lock.lock()
                 session.fds.remove(fd)
                 session.lock.unlock()
+                session.game.forget(fd)
                 close(fd)
                 DispatchQueue.main.async { self?.clients.removeAll { $0.id == fd } }
             }
@@ -307,6 +311,7 @@ final class LiveServer: ObservableObject {
         var buffer: [UInt8] = []
         var scanned = 0
         var authed = false
+        var clientName = ""
         while !session.isStopped {
             let bytes: [UInt8]
             switch readLine(fd, &buffer, &scanned) {
@@ -344,9 +349,17 @@ final class LiveServer: ObservableObject {
                     authed = true
                     setReceiveTimeout(fd, seconds: 0)
                     let client = Client(id: fd, name: Self.clip(params["client"]), version: Self.clip(params["client_version"]))
+                    clientName = client.name
                     DispatchQueue.main.async { [weak self] in self?.clients.append(client) }
                 }
                 if !send(fd, id: id, reply: .success(Self.helloResult())) { return }
+                continue
+            }
+            // The Game view relay is answered here, on the connection's own thread: never on the main thread, so it
+            // works while the app is busy and does not stall drawing.
+            if method.hasPrefix("game.") {
+                let reply = session.game.handle(method, params, fd: fd, client: clientName, stopped: { session.isStopped })
+                if !send(fd, id: id, reply: reply) { return }
                 continue
             }
             let box = ReplyBox()
@@ -393,6 +406,136 @@ final class LiveServer: ObservableObject {
     }
 }
 
+// MARK: - Game view
+
+/// Relays screenshots of a running game to the client that asked (`game.poll`, `game.frame`, `game.capture`). All of
+/// its state sits behind one lock; `capture` waits on the calling connection's thread, never on the main thread.
+final class GameRelay {
+    static let pollWindow = 1.0
+    static let defaultTimeout = 3000
+    static let maxTimeout = 10000
+
+    private final class Request {
+        let id: String
+        let fd: Int32
+        let client: String
+        var handedOut = false
+        var answered = false
+        var frame: [String: Any]?
+        let done = DispatchSemaphore(value: 0)
+
+        init(id: String, fd: Int32, client: String) {
+            self.id = id
+            self.fd = fd
+            self.client = client
+        }
+    }
+
+    private let lock = NSLock()
+    private var lastFD: Int32?
+    private var lastName = ""
+    private var lastPoll = 0.0
+    private var requests: [String: Request] = [:]
+    private var serial = 0
+
+    private static var now: Double { ProcessInfo.processInfo.systemUptime }
+
+    func handle(_ method: String, _ params: [String: Any], fd: Int32, client: String, stopped: () -> Bool) -> LiveReply {
+        switch method {
+        case "game.poll":
+            if let id = poll(fd: fd, client: client) { return .success(["capture": id]) }
+            return .success(["capture": NSNull()])
+        case "game.frame": return frame(params, fd: fd)
+        case "game.capture": return capture(params, stopped: stopped)
+        default: return .failure(LiveError(code: -32601, message: "unknown method \"\(method)\""))
+        }
+    }
+
+    /// A connection ended: it is no longer a running game, and a capture waiting on it fails now.
+    func forget(_ fd: Int32) {
+        lock.lock()
+        if lastFD == fd { lastFD = nil }
+        let mine = requests.values.filter { $0.fd == fd }
+        lock.unlock()
+        for r in mine { r.done.signal() }
+    }
+
+    private func poll(fd: Int32, client: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        lastFD = fd
+        lastName = client
+        lastPoll = Self.now
+        guard let r = requests.values.filter({ $0.fd == fd && !$0.handedOut }).min(by: { $0.id < $1.id }) else { return nil }
+        r.handedOut = true
+        return r.id
+    }
+
+    private func frame(_ params: [String: Any], fd: Int32) -> LiveReply {
+        guard let id = params["request"] as? String else { return .failure(.params("request must be a string")) }
+        lock.lock()
+        // An unknown request, one already answered, or one never handed to this connection is dropped.
+        guard let r = requests[id], r.fd == fd, r.handedOut, !r.answered else {
+            lock.unlock()
+            return .success([:])
+        }
+        guard let png = params["png"] as? String, !png.isEmpty else {
+            lock.unlock()
+            return .failure(.params("png must be a base64 string"))
+        }
+        guard let w = params["w"] as? Int, let h = params["h"] as? Int, w > 0, h > 0 else {
+            lock.unlock()
+            return .failure(.params("w and h must be positive integers"))
+        }
+        r.answered = true
+        r.frame = ["png": png, "w": w, "h": h, "client": r.client]
+        lock.unlock()
+        r.done.signal()
+        return .success([:])
+    }
+
+    private func capture(_ params: [String: Any], stopped: () -> Bool) -> LiveReply {
+        var timeout = Self.defaultTimeout
+        if let raw = params["timeout_ms"], !(raw is NSNull) {
+            guard let t = raw as? Int, t > 0 else { return .failure(.params("timeout_ms must be a positive integer")) }
+            timeout = min(t, Self.maxTimeout)
+        }
+        lock.lock()
+        guard let fd = lastFD, Self.now - lastPoll <= Self.pollWindow else {
+            lock.unlock()
+            return .failure(.noGame("no running game: nothing polled in the last second"))
+        }
+        serial += 1
+        let request = Request(id: "cap-\(serial)", fd: fd, client: lastName)
+        requests[request.id] = request
+        lock.unlock()
+
+        let deadline = Date().addingTimeInterval(Double(timeout) / 1000)
+        var reply: LiveReply?
+        while reply == nil {
+            let left = deadline.timeIntervalSinceNow
+            if request.done.wait(timeout: .now() + min(max(left, 0), 0.25)) == .success {
+                lock.lock()
+                let frame = request.frame
+                lock.unlock()
+                if let frame {
+                    reply = .success(frame)
+                } else {
+                    reply = .failure(.noGame("the game disconnected before it sent a frame"))
+                }
+            } else if stopped() {
+                reply = .failure(.noGame("Live mode was turned off"))
+            } else if left <= 0 {
+                reply = .failure(.noGame("the game did not send a frame in time"))
+            }
+        }
+        lock.lock()
+        requests[request.id] = nil
+        lock.unlock()
+        return reply!
+    }
+}
+
 // MARK: - Requests
 
 /// Answers requests on the main thread. All document access of Live mode is here.
@@ -406,6 +549,7 @@ enum LiveHandler {
             switch method {
             case "documents.list": return .success(list())
             case "documents.get": return .success(try get(params))
+            case "godot.atlas": return .success(try godotAtlas(params))
             case "view.get": return .success(view(of: model.activeSlotObject ?? model.slots[0]))
             case "documents.apply", "documents.new", "documents.open", "documents.save", "documents.activate",
                  "documents.close", "documents.undo", "documents.redo", "view.set":
@@ -577,6 +721,20 @@ enum LiveHandler {
             pixmith_bytes_free(mask, maskLen)
         }
         return ["document": json(slot), "pxmt": encoded, "selection": selection]
+    }
+
+    /// The Godot Live Link layout of a tab: the core's JSON (`pixmith_godot_link`) plus the document.
+    private static func godotAtlas(_ params: [String: Any]) throws -> [String: Any] {
+        let slot = try find(params)
+        guard let p = pixmith_godot_link(pointer(slot)) else {
+            throw LiveError.other(String(cString: pixmith_last_error()))
+        }
+        defer { pixmith_string_free(p) }
+        guard var result = (try? JSONSerialization.jsonObject(with: Data(String(cString: p).utf8))) as? [String: Any] else {
+            throw LiveError.other("the Godot layout is not valid JSON")
+        }
+        result["document"] = json(slot)
+        return result
     }
 
     /// The optional `selection` of `documents.apply`: absent keeps it, null clears it, an object sets it.

@@ -66,11 +66,16 @@ final class LiveClient {
         return nil
     }
 
-    func call(_ method: String, _ params: [String: Any] = [:]) -> [String: Any] {
+    /// Sends a request without waiting for the answer (read it later with `readLine`).
+    func post(_ method: String, _ params: [String: Any] = [:]) {
         let id = next
         next += 1
         let data = try! JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "id": id, "method": method, "params": params] as [String: Any])
         send(String(decoding: data, as: UTF8.self))
+    }
+
+    func call(_ method: String, _ params: [String: Any] = [:]) -> [String: Any] {
+        post(method, params)
         return readLine() ?? ["error": ["code": 0, "message": "no answer"]]
     }
 
@@ -401,6 +406,35 @@ func registerLive() {
         _ = c.ok("documents.apply", params)
     }
 
+    scenario("live/godot-atlas") {
+        let m = resetTabs()
+        defer { m.showNewSheet = false; LiveServer.shared.stop(); resetTabs() }
+        guard let c = liveConnect() else { return expect(false, "no server") }
+        m.addFrame(duplicate: false)
+        expectEq(Int(pixmith_frame_count(m.doc)), 2)
+        let r = c.ok("godot.atlas", ["id": "doc-1"])
+        expectEq(doc(r)["id"] as? String, "doc-1")
+        expectEq(doc(r)["frames"] as? Int, 2)
+        expectEq(r["linked"] as? Bool, false)
+        let resources = r["resources"] as? [[String: Any]] ?? []
+        expectEq(resources.count, 1)
+        let pages = resources.first?["pages"] as? [[String: Any]] ?? []
+        expect(!pages.isEmpty, "an atlas page")
+        let png = Data(base64Encoded: pages.first?["png"] as? String ?? "") ?? Data()
+        expectEq(Array(png.prefix(8)), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        expect(NSImage(data: png) != nil, "the page decodes as a PNG")
+        let animations = resources.first?["animations"] as? [[String: Any]] ?? []
+        let frames = animations.flatMap { $0["frames"] as? [[String: Any]] ?? [] }
+        expectEq(frames.count, 2)
+        for f in frames { expectEq((f["region"] as? [Any])?.count, 4) }
+        expectEq(c.code("godot.atlas", ["id": "doc-99"]), -32004)
+        expectEq(c.code("godot.atlas"), -32602)
+        // Read-only: answered while a sheet is open, and an unknown id is still reported.
+        m.showNewSheet = true
+        expect(c.ok("godot.atlas", ["id": "doc-1"])["resources"] is [Any], "answered while busy")
+        expectEq(c.code("godot.atlas", ["id": "nope"]), -32004)
+    }
+
     scenario("live/selection-sync") {
         let m = resetTabs()
         defer { LiveServer.shared.stop(); resetTabs() }
@@ -428,6 +462,94 @@ func registerLive() {
         expect(c.ok("documents.get", ["id": "doc-1"])["selection"] is NSNull, "cleared")
         m.undo()
         expect(m.selected(1, 1), "undo brings the previous selection back")
+    }
+
+    scenario("live/game-capture") {
+        resetTabs()
+        defer { LiveServer.shared.stop(); resetTabs() }
+        let server = LiveServer.shared
+        server.stop()
+        guard server.start() else { return expect(false, "no server") }
+        func connect(_ name: String) -> LiveClient? {
+            guard let c = LiveClient(port: server.port) else { return nil }
+            let r = c.call("hello", ["token": server.token, "client": name, "client_version": "1", "protocol": 1])
+            expect(r["result"] != nil, "hello failed: \(r)")
+            return c
+        }
+        guard let game = connect("pixmith-godot"), let mcp = connect("pixmith-mcp") else { return expect(false, "no client") }
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        func errorCode(_ r: [String: Any]?) -> Int? { (r?["error"] as? [String: Any])?["code"] as? Int }
+        /// Polls as the game until it is handed a request id (the capture is posted on another connection).
+        func nextRequest() -> String? {
+            for _ in 0..<150 {
+                if let id = game.ok("game.poll")["capture"] as? String { return id }
+                pumpRunLoop(0.02)
+            }
+            return nil
+        }
+
+        // Like every method, the game methods need a hello first.
+        let early = LiveClient(port: server.port)!
+        expectEq(early.code("game.poll"), -32001)
+
+        // Nobody has polled: no running game, and the answer is quick.
+        var started = Date()
+        expectEq(mcp.code("game.capture"), -32012)
+        expect(Date().timeIntervalSince(started) < 1, "no poller fails at once")
+
+        // An idle poll returns null; a bad timeout is a parameter error.
+        expect(game.ok("game.poll")["capture"] is NSNull, "nothing asked yet")
+        expectEq(mcp.code("game.capture", ["timeout_ms": "soon"]), -32602)
+
+        // The whole relay: B asks, A's next poll gets an id, A answers, B gets the frame with A's client name.
+        mcp.post("game.capture", ["timeout_ms": 5000])
+        guard let request = nextRequest() else { return expect(false, "the game never got a request id") }
+        expect(game.ok("game.poll")["capture"] is NSNull, "a request id is handed out once")
+        expectEq(game.code("game.frame", ["request": request, "png": png, "w": "wide", "h": 1]), -32602)
+        let answer = game.ok("game.frame", ["request": request, "png": png, "w": 1, "h": 1])
+        expect(answer.isEmpty, "frame is acknowledged with {}")
+        let frame = mcp.readLine()?["result"] as? [String: Any] ?? [:]
+        expectEq(frame["png"] as? String, png)
+        expectEq(frame["w"] as? Int, 1)
+        expectEq(frame["h"] as? Int, 1)
+        expectEq(frame["client"] as? String, "pixmith-godot")
+
+        // A second frame for an answered request, and one for an unknown request, are dropped with {}.
+        expect(game.ok("game.frame", ["request": request, "png": png, "w": 1, "h": 1]).isEmpty, "duplicate frame")
+        expect(game.ok("game.frame", ["request": "cap-999", "png": png, "w": 1, "h": 1]).isEmpty, "unknown frame")
+
+        // The poller never answers: -32012 after the timeout (and not much before it).
+        started = Date()
+        mcp.post("game.capture", ["timeout_ms": 400])
+        guard let silent = nextRequest() else { return expect(false, "no request id for the silent game") }
+        let timedOut = mcp.readLine()
+        let waited = Date().timeIntervalSince(started)
+        expectEq(errorCode(timedOut), -32012)
+        expect(waited >= 0.35 && waited < 3, "timed out after \(waited) s")
+        // The late frame is stale now.
+        expect(game.ok("game.frame", ["request": silent, "png": png, "w": 1, "h": 1]).isEmpty, "late frame dropped")
+
+        // The game that polled last is the one asked.
+        guard let second = connect("pixmith-godot-2") else { return expect(false, "no second game") }
+        _ = second.ok("game.poll")
+        mcp.post("game.capture", ["timeout_ms": 5000])
+        var asked: String?
+        for _ in 0..<150 where asked == nil {
+            asked = second.ok("game.poll")["capture"] as? String
+            if asked == nil { pumpRunLoop(0.02) }
+        }
+        expect(asked != nil, "the last poller was asked")
+        expect(game.ok("game.poll")["capture"] is NSNull, "the earlier game was not asked")
+        _ = second.ok("game.frame", ["request": asked ?? "", "png": png, "w": 2, "h": 3])
+        let last = mcp.readLine()?["result"] as? [String: Any] ?? [:]
+        expectEq(last["client"] as? String, "pixmith-godot-2")
+        expectEq(last["w"] as? Int, 2)
+
+        // A game that stopped polling is no longer running: after a second, capture fails at once.
+        pumpRunLoop(1.2)
+        started = Date()
+        expectEq(mcp.code("game.capture", ["timeout_ms": 5000]), -32012)
+        expect(Date().timeIntervalSince(started) < 1, "stale poller fails at once")
     }
 
     scenario("live/disconnect-by-the-user") {

@@ -454,7 +454,9 @@ fn page_file(stem: &str, g: &Group, page: usize) -> String {
     n
 }
 
-pub fn build(s: &Sprite, target: &Target, o: &Options) -> Result<Built, String> {
+/// The atlas groups of an export: options as clamped, warnings so far, the animations, their groups and which group
+/// each animation uses. Pages are numbered across groups by `first_ext` (1-based).
+fn pack(s: &Sprite, o: &Options) -> Result<(Options, Vec<String>, Vec<Anim>, Vec<Group>, Vec<usize>), String> {
     let mut warnings = Vec::new();
     let mut o = o.clone();
     o.scale = o.scale.clamp(1, MAX_SCALE);
@@ -503,6 +505,11 @@ pub fn build(s: &Sprite, target: &Target, o: &Options) -> Result<Built, String> 
             ));
         }
     }
+    Ok((o, warnings, anims, groups, group_of))
+}
+
+pub fn build(s: &Sprite, target: &Target, o: &Options) -> Result<Built, String> {
+    let (o, mut warnings, anims, groups, group_of) = pack(s, o)?;
 
     let mut png_pages = Vec::new();
     for g in &groups {
@@ -583,3 +590,70 @@ pub fn build(s: &Sprite, target: &Target, o: &Options) -> Result<Built, String> 
 }
 
 pub const NEAREST_WARNING: &str = "Godot defaults to Linear texture filtering, which blurs pixel art. Set Project Settings > Rendering > Textures > Default Texture Filter = Nearest (or texture_filter on the node).";
+
+/// One frame of a Live Link animation: the page it is on, its region there and the AtlasTexture margin (trimmed
+/// frames), the same numbers the exported `.tres` holds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkFrame {
+    pub page: usize,
+    pub region: (usize, usize, usize, usize),
+    pub margin: Option<(usize, usize, usize, usize)>,
+    /// Relative duration, as in the `.tres` (`speed` frames per second at 1.0).
+    pub duration: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkAnimation {
+    pub name: String,
+    pub looped: bool,
+    pub speed: f64,
+    pub frames: Vec<LinkFrame>,
+}
+
+/// What a running game needs to swap in the sprite: the atlas pages (PNG) and every animation's frames, laid out
+/// exactly like `build` lays out the export (same options, so the same regions).
+#[derive(Clone, Debug)]
+pub struct Linked {
+    /// `(width, height, png)` per page, in `.tres` ext_resource order.
+    pub pages: Vec<(usize, usize, Vec<u8>)>,
+    pub animations: Vec<LinkAnimation>,
+    pub warnings: Vec<String>,
+}
+
+pub fn link(s: &Sprite, o: &Options) -> Result<Linked, String> {
+    let (o, warnings, anims, groups, group_of) = pack(s, o)?;
+    let mut pages = Vec::new();
+    for g in &groups {
+        for p in &g.pages {
+            pages.push((p.w, p.h, encode_png(&p.rgba, p.w, p.h)?));
+        }
+    }
+    let (w, h) = (s.width as usize * o.scale as usize, s.height as usize * o.scale as usize);
+    let animations = anims
+        .iter()
+        .enumerate()
+        .map(|(ai, a)| {
+            let g = &groups[group_of[ai]];
+            let ms: Vec<u32> = a.seq.iter().map(|&f| s.durations[f] as u32).collect();
+            let (speed, durs) = speed_and_durations(&ms);
+            let frames = a
+                .seq
+                .iter()
+                .zip(durs)
+                .map(|(f, duration)| {
+                    let c = &g.info[f];
+                    let (img, p) = (&g.images[c.img], &g.placed[c.img]);
+                    let margin = (o.trim && (c.ox, c.oy, img.w, img.h) != (0, 0, w, h)).then_some((
+                        c.ox,
+                        c.oy,
+                        w - img.w,
+                        h - img.h,
+                    ));
+                    LinkFrame { page: g.first_ext - 1 + p.page, region: (p.x, p.y, img.w, img.h), margin, duration }
+                })
+                .collect();
+            LinkAnimation { name: a.name.clone(), looped: a.looped, speed, frames }
+        })
+        .collect();
+    Ok(Linked { pages, animations, warnings })
+}

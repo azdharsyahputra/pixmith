@@ -1,6 +1,7 @@
 //! Godot 4 export: SpriteFrames `.tres` plus atlas PNG(s) and an optional `.tscn`.
 //! See docs/SPEC-game.md section 1A. Godot 3 (`format=2`) is not supported.
 
+pub mod live_link;
 pub mod scene;
 pub mod settings;
 pub mod sprite_frames;
@@ -127,7 +128,7 @@ fn with_ancestors(s: &Sprite, i: usize, f: impl Fn(usize) -> bool) -> bool {
 }
 
 /// `(file stem, sprite with the right layers shown)` per SpriteFrames to write.
-fn variants(s: &Sprite, name: &str, o: &Options) -> Result<Vec<(String, Sprite)>, String> {
+pub(crate) fn variants(s: &Sprite, name: &str, o: &Options) -> Result<Vec<(String, Sprite)>, String> {
     let mut out: Vec<(String, Sprite)> = Vec::new();
     match &o.layers {
         LayerMode::Visible => out.push((stem_from_template(&o.name_template, name, None, false), s.clone())),
@@ -393,6 +394,28 @@ pub unsafe extern "C" fn pixmith_godot_preview(
             Err(msg) => {
                 set_error(msg);
                 false
+            }
+        }
+    })
+}
+
+/// Live Link JSON for the document (see `live_link::json` and `godot.atlas` in docs/LIVE_PROTOCOL.md), or null
+/// with `pixmith_last_error` set. Release with `pixmith_string_free`.
+///
+/// # Safety
+/// `doc` must be null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_godot_link(doc: *const Editor) -> *mut c_char {
+    crate::ffi::guarded("pixmith_godot_link", std::ptr::null_mut(), || {
+        let Some(e) = doc.as_ref() else {
+            set_error("invalid argument");
+            return std::ptr::null_mut();
+        };
+        match live_link::json(&e.sprite) {
+            Ok(text) => to_cstring(text),
+            Err(msg) => {
+                set_error(msg);
+                std::ptr::null_mut()
             }
         }
     })

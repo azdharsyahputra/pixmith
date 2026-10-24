@@ -117,6 +117,7 @@ The script builds a universal (arm64 + x86_64) app when the Rust toolchain has b
 
 **Game development**
 - Godot 4 export: SpriteFrames `.tres` with an atlas PNG (trim, extrude, padding, one animation per tag) and an optional `AnimatedSprite2D` scene; TileSet `.tres` from tilemap layers with terrains, peering bits and flipped alternatives. Re-export keeps resource uids stable.
+- Godot Live Link: a debug build of your Godot 4 game swaps its sprites for what you draw in Pixmith, stroke by stroke, with no save, export or restart ([addon](godot/addons/pixmith_live_link/README.md)).
 - Auto-tiling: a terrain brush for tilemap layers with Sides, Corners and Blob (47-tile) sets, dual-grid tiling, several terrains with priorities, a 3x3 mask editor, templates and a report of missing masks.
 - Tweening: position, scale, rotation and opacity keys with easing presets and a Bezier curve editor, a dope sheet, on-canvas handles and motion path, and baking into frames.
 

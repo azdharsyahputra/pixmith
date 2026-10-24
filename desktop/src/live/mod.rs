@@ -14,7 +14,7 @@ use crate::ui::gamedev::paths;
 use eframe::egui;
 use net::{ERR_BUSY, ERR_OTHER, ERR_PARAMS, ERR_STALE, ERR_UNKNOWN_DOCUMENT, ERR_UNSAVED, Reply, RpcError, Server};
 use pixmith_core::ffi::live::{Region, SelectionChange};
-use pixmith_core::formats::json::Value;
+use pixmith_core::formats::json::{self, Value};
 use std::path::{Path, PathBuf};
 
 /// Live mode state of the app: the server (while the preference is on) and the ids and revisions of the tabs.
@@ -193,6 +193,7 @@ pub fn handle(app: &mut PixmithApp, method: &str, params: &Value) -> Reply {
     match method {
         "documents.list" => return Ok(list(app)),
         "documents.get" => return get(app, params),
+        "godot.atlas" => return godot_atlas(app, params),
         "view.get" => return Ok(view(app, app.active)),
         "documents.apply" | "documents.new" | "documents.open" | "documents.save" | "documents.activate"
         | "documents.close" | "documents.undo" | "documents.redo" | "view.set" => {}
@@ -306,6 +307,17 @@ fn get(app: &mut PixmithApp, params: &Value) -> Reply {
         ])
     });
     Ok(obj(vec![("document", doc_json(app, i)), ("pxmt", string(base64::encode(&bytes))), ("selection", selection)]))
+}
+
+/// `godot.atlas`: the Godot Live Link layout of the document (see `docs/LIVE_PROTOCOL.md`) with its `Doc` added.
+fn godot_atlas(app: &mut PixmithApp, params: &Value) -> Reply {
+    let i = find(app, params)?;
+    let text = app.tabs[i].doc.godot_link().map_err(|e| err(ERR_OTHER, e))?;
+    let Value::Obj(mut members) = json::parse(&text).map_err(|e| err(ERR_OTHER, e))? else {
+        return Err(err(ERR_OTHER, "the Godot layout is not an object"));
+    };
+    members.insert(0, ("document".to_string(), doc_json(app, i)));
+    Ok(Value::Obj(members))
 }
 
 /// The optional `selection` of `documents.apply`: absent keeps the selection, null clears it, an object sets it.

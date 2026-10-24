@@ -23,3 +23,8 @@ bool pixmith_godot_preview(const PixmithDoc *doc, const char *settings_json, con
 char *pixmith_godot_settings_get(const PixmithDoc *doc);
 // Stores settings in the document; they are written with the next save. Call pixmith_touch afterwards.
 bool pixmith_godot_settings_set(PixmithDoc *doc, const char *settings_json);
+
+// Live Link: the document's atlas pages (base64 PNG) and frame regions as the running Godot game needs them, laid
+// out with the saved export settings (JSON, see `godot.atlas` in docs/LIVE_PROTOCOL.md). NULL on failure (see
+// pixmith_last_error). Release with pixmith_string_free.
+char *pixmith_godot_link(const PixmithDoc *doc);

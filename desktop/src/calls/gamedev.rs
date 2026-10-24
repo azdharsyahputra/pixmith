@@ -325,6 +325,13 @@ impl Doc {
         (!s.is_null()).then(|| unsafe { take_string(s) })
     }
 
+    /// The Godot Live Link layout (`godot.atlas`): atlas pages and frame regions as JSON.
+    pub fn godot_link(&self) -> Result<String, String> {
+        // SAFETY: null or a string the core allocated.
+        let s = unsafe { godot_ffi::pixmith_godot_link(self.raw()) };
+        if s.is_null() { Err(last_error()) } else { Ok(unsafe { take_string(s) }) }
+    }
+
     /// Stores the settings in the document; marks it modified only when they changed (`GodotCore.save`).
     pub fn set_godot_settings(&mut self, json: &str) -> bool {
         let before = self.godot_settings();
