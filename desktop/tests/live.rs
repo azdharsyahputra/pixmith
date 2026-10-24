@@ -433,7 +433,10 @@ fn new_open_save_activate_close() {
         rig.fail(
             &mut c,
             "documents.save",
-            &format!(r#"{{"id":"{id1}","path":"{}"}}"#, rig.dir.join("x.png").display())
+            &format!(
+                r#"{{"id":"{id1}","path":{}}}"#,
+                json::to_string(&Value::Str(rig.dir.join("x.png").display().to_string()))
+            )
         ),
         -32602
     );

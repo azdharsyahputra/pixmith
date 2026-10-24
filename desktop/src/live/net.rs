@@ -140,11 +140,14 @@ impl Server {
         self.shared.clients.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Closes every connection (the port stays open; a client may connect again).
+    /// Closes every connection (the port stays open; a client may connect again). The clients are forgotten right
+    /// away: on Windows a shutdown does not always wake a connection thread blocked in a read.
     pub fn disconnect_all(&self) {
-        for s in self.shared.streams.lock().unwrap_or_else(|e| e.into_inner()).values() {
+        for s in self.shared.streams.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, s)| s) {
             let _ = s.shutdown(Shutdown::Both);
         }
+        self.shared.clients.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.shared.wake();
     }
 
     /// The Disconnect button: closes every connection and refuses later `hello`s (`-32001`, "disconnected by the
@@ -328,6 +331,10 @@ fn serve(conn: u64, stream: TcpStream, shared: &Shared, tx: &Sender<Request>) {
                 return;
             }
             Line::Message => {}
+        }
+        // Disconnected while this thread waited in the read.
+        if !shared.streams.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&conn) {
+            return;
         }
         if buf.iter().all(u8::is_ascii_whitespace) {
             continue;

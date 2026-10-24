@@ -88,10 +88,14 @@ func waitUntil(_ cond: () -> Bool) -> Bool {
     return cond()
 }
 
-/// Runs a Lua script and waits for its background job to finish and be applied.
+/// Runs a Lua script and waits for its session to finish and its result to be applied.
 func runScriptAndWait(_ m: SpriteModel, _ url: URL) {
     m.runScript(at: url)
-    waitUntil { !Background.busy }
+    // A script runs as a session that the app pumps on a timer (plugins stay loaded, so only scripts count).
+    let deadline = Date().addingTimeInterval(15)
+    while Background.busy || ScriptSessions.shared.sessions.values.contains(where: { !$0.isPlugin }), Date() < deadline {
+        pumpRunLoop(0.03)
+    }
     pumpRunLoop(0.05)
 }
 

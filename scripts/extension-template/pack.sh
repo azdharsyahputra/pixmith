@@ -19,7 +19,8 @@ version=$(field version)
 [ -n "$name" ] && [ -n "$version" ] || { echo "pack: package.json needs \"name\" and \"version\"" >&2; exit 1; }
 
 out=${2:-"$PWD/$name-$version.pixmith-extension"}
-case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+# A drive path (C:\... or C:/...) from Git Bash on Windows is absolute too.
+case "$out" in /* | [A-Za-z]:*) ;; *) out="$PWD/$out" ;; esac
 rm -f "$out"
 
 # Everything except packing leftovers and hidden files; the script itself stays out of the package.
