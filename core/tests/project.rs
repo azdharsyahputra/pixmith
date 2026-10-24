@@ -115,7 +115,9 @@ fn scan_lists_canvases_in_order_then_by_name() {
 #[test]
 fn scan_json_has_the_documented_shape() {
     let dir = temp_dir("json");
-    let folder = dir.join("Quote \"d\" \\ ünï");
+    // Characters JSON must escape in the path (`"` and `\` are not allowed in Windows file names, where every
+    // path already contains backslashes).
+    let folder = if cfg!(windows) { dir.join("Quote d ünï") } else { dir.join("Quote \"d\" \\ ünï") };
     project::create(&folder, "Name with \"quotes\"\nand a newline").unwrap();
     write_pxmt(&folder.join("hero.pxmt"), &sample(32, 16));
     std::fs::write(folder.join("old.aseprite"), ase::write(&sample(4, 4))).unwrap();
