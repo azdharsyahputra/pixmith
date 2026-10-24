@@ -123,11 +123,13 @@ fn a_plugin_command_opens_a_dialog_and_edits_the_active_document() {
     let source = std::fs::read_to_string(example("plugin-hello.lua")).unwrap();
     let id = h.state_mut().lua_load_plugin(&source, "plugin-hello", None, None).expect("plugin loads");
     common::settle(&mut h, |app| !app.gamedev.lua.commands().is_empty());
+    // The plugin is idle: it does not lock the app. Its `onenabled` answers once it is (slow runners see the
+    // command before that).
+    common::settle(&mut h, |app| !app.job_running());
+    common::settle(&mut h, |app| app.gamedev.lua.commands().first().is_some_and(|c| c.enabled));
     let cmd = h.state().gamedev.lua.commands()[0].clone();
     assert_eq!((cmd.session, cmd.id.as_str(), cmd.title.as_str()), (id, "mark-corner", "Mark Top-Left Corner..."));
     assert!(cmd.enabled);
-    // The plugin is idle: it does not lock the app.
-    common::settle(&mut h, |app| !app.job_running());
 
     h.state_mut().lua_run_command(0);
     common::settle(&mut h, |app| first_dialog_id(app).is_some());
