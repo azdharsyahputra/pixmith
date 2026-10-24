@@ -321,13 +321,15 @@ struct HelpCommands: Commands {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
-        CommandGroup(after: .appInfo) {
+        // Replaces the system "Pixmith Help" item, which only says that no help book exists.
+        CommandGroup(replacing: .help) {
+            Button("Pixmith Help") {
+                NSWorkspace.shared.open(URL(string: "https://github.com/azdharsyahputra/pixmith#readme")!)
+            }
+            Button("Keyboard Shortcuts") { openWindow(id: "shortcuts") }
             Divider()
             Button("Install Command Line Tool…") { CommandLineTool.install() }
             Button("Uninstall Command Line Tool…") { CommandLineTool.uninstall() }
-        }
-        CommandGroup(after: .help) {
-            Button("Keyboard Shortcuts") { openWindow(id: "shortcuts") }
         }
     }
 }

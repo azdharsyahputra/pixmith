@@ -1,7 +1,7 @@
 import AppKit
 
 /// The `pixmith` command: the bundled `pixmith-cli` (Contents/MacOS/pixmith-cli) linked onto the PATH, like
-/// VS Code's "Install 'code' command in PATH". Pixmith > Install Command Line Tool… / Uninstall….
+/// VS Code's "Install 'code' command in PATH". Help > Install Command Line Tool… / Uninstall….
 enum CommandLineTool {
     static let command = "pixmith"
     /// System-wide location; needs an administrator password once.

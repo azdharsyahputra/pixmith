@@ -235,7 +235,7 @@ Live mode is on by default and can be switched off in Preferences > General ("Al
 
 `pixmith-cli` inspects, converts and exports Pixmith (`.pxmt`) and `.aseprite` files without the app; every command accepts either format (detected from the file's content). It ships with the app:
 
-- **macOS:** inside `Pixmith.app`. Choose **Pixmith → Install Command Line Tool…** to add the `pixmith` command to Terminal (in `/usr/local/bin`, or `~/.local/bin` without a password); **Uninstall Command Line Tool…** removes it.
+- **macOS:** inside `Pixmith.app`. Choose **Help → Install Command Line Tool…** to add the `pixmith` command to Terminal (in `/usr/local/bin`, or `~/.local/bin` without a password); **Uninstall Command Line Tool…** removes it.
 - **Windows:** the installer adds the `pixmith` command to your PATH (open a new terminal afterwards) and removes it again on uninstall. In the portable zip it is `bin\pixmith.exe`; add that folder to your PATH yourself.
 - **Linux:** `bin/pixmith` inside the download; link it onto your PATH. **Help → Command Line Tool…** in the app shows the folder and how.
 - **From source:** `./build.sh` also writes `build/pixmith-cli`.
