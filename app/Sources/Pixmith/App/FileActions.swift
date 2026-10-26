@@ -91,17 +91,18 @@ extension SpriteModel {
     // MARK: Import
 
     /// Opens an imported sprite in a new tab, which counts as unsaved.
-    func adopt(_ imported: OpaquePointer?) {
+    func adopt(_ imported: OpaquePointer?, source: URL? = nil) {
         guard let imported else {
             errorMessage = lastError
             return
         }
         present(imported, url: nil)
+        activeSlotObject?.importSource = source
         changed()
     }
 
     func importPNG(_ url: URL) {
-        adopt(url.path.withCString { pixmith_import_png($0) })
+        adopt(url.path.withCString { pixmith_import_png($0) }, source: url)
         RecentFiles.shared.add(url)
     }
 
@@ -127,14 +128,14 @@ extension SpriteModel {
     func importGIFAsSprite() {
         guard !MainWindow.hasSheet else { return }
         guard let url = pickFile([.gif], message: "Choose an animated GIF to open as a new sprite.") else { return }
-        importInBackground("Importing GIF…") { url.path.withCString { pixmith_import_gif($0) } }
+        importInBackground("Importing GIF…", source: url) { url.path.withCString { pixmith_import_gif($0) } }
     }
 
     func importSheetWithJSON() {
         guard !MainWindow.hasSheet else { return }
         guard let url = pickFile([.json], message: "Choose the sprite sheet's Aseprite JSON. The PNG named in it is loaded from the same folder.")
         else { return }
-        importInBackground("Importing sprite sheet…") { url.path.withCString { pixmith_import_sheet_json($0, nil) } }
+        importInBackground("Importing sprite sheet…", source: url) { url.path.withCString { pixmith_import_sheet_json($0, nil) } }
     }
 
     func importSheetAsFrames() {
@@ -145,7 +146,7 @@ extension SpriteModel {
         guard let url = pickPNG(message: "Choose a sprite sheet PNG. It is cut into frames of the given cell size.",
                                 accessory: view) else { return }
         let (cw, ch) = (UInt32(clamping: max(w.integerValue, 0)), UInt32(clamping: max(h.integerValue, 0)))
-        importInBackground("Importing sprite sheet…") { url.path.withCString { pixmith_import_sheet($0, cw, ch) } }
+        importInBackground("Importing sprite sheet…", source: url) { url.path.withCString { pixmith_import_sheet($0, cw, ch) } }
     }
 
     func importPNGAsLayer() {

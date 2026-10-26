@@ -175,7 +175,7 @@ Tilemap layers also have `layer:getTile(x, y [, frame])` and
 - `sprite:duplicateFrame(i)` inserts a copy of frame `i` right after it and returns it.
 - `sprite:deleteFrame(frame)` (a handle or a number) deletes a frame; tags are adjusted. The last frame cannot be deleted.
 
-Frame handle fields: `duration` (milliseconds, read/write), `index` (= `frameNumber`), `sprite`. Frame and layer
+Frame handle fields: `duration` (milliseconds, a whole number of 1-65535: `0.1` is an error, Aseprite's seconds need `* 1000`; read/write), `index` (= `frameNumber`), `sprite`. Frame and layer
 handles compare with `==` by position.
 
 ### Tags
@@ -255,8 +255,12 @@ clears the cell. The layer must be a tilemap layer. The diagonal flip only appli
     `slice:setBounds(x, y, w, h [, frame])`.
   - `slice:getCenter([frame])` (the 9-patch center, `nil` without one), `slice:setCenter(rectangle | x, y, w, h [, frame])`,
     `slice:clearCenter()`.
-  - `slice:getPivot([frame])` returns `x, y` (`nil, nil` without a pivot), `slice:setPivot(point | x, y [, frame])`,
-    `slice:clearPivot()`.
+  - `slice:getPivot([frame])` returns `x, y`, or `nil, nil` without a pivot and for frames before the first pivot
+    key. `slice:setPivot(point | x, y [, frame])`: without a frame, a slice that has no pivot yet gets it on all its
+    existing keys (every frame has it; keys created later inherit it), and one that already has a pivot changes
+    only its first key. With a frame (not the active frame) the pivot starts there and earlier frames have none.
+    `slice:clearPivot()` removes it. The .aseprite file stores one pivot flag per slice, so after saving and
+    reopening a pivot applies from the slice's first frame.
 
 ### User data
 

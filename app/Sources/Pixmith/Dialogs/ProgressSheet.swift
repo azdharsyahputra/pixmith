@@ -136,14 +136,14 @@ extension SpriteModel {
     }
 
     /// Builds a document from a file off the main thread and opens it in a tab.
-    func importInBackground(_ title: String, _ load: @escaping () -> OpaquePointer?) {
+    func importInBackground(_ title: String, source: URL? = nil, _ load: @escaping () -> OpaquePointer?) {
         Background.run(title: title, work: { () -> (doc: OpaquePointer?, error: String) in
             let d = load()
             return (d, d == nil ? String(cString: pixmith_last_error()) : "")
         }, done: { [weak self] result in
             guard let self else { return }
             if let d = result.doc {
-                self.adopt(d)
+                self.adopt(d, source: source)
             } else {
                 self.errorMessage = result.error
             }

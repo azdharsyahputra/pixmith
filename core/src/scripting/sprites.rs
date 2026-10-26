@@ -449,7 +449,8 @@ pub(super) fn add_fields<F: UserDataFields<SpriteH>>(f: &mut F) {
         Ok(s.layers.iter().position(|l| l.flags & 8 != 0).map(|i| LayerH::new(&t.0, i)))
     });
     f.add_field_method_get("transparentColor", |_, t| Ok(t.0.sprite().transparent_index));
-    f.add_field_method_set("transparentColor", |_, t, v: i64| {
+    f.add_field_method_set("transparentColor", |_, t, v: Value| {
+        let v = super::whole("sprite.transparentColor", &v)?;
         t.0.sprite().transparent_index = v.clamp(0, 255) as u8;
         Ok(())
     });

@@ -18,6 +18,10 @@ void pixmith_bytes_free(uint8_t *bytes, size_t len);
 // is kept unless the canvas size changes. False (document unchanged) if the bytes can't be decoded or validated.
 bool pixmith_apply_document(PixmithDoc *doc, const uint8_t *bytes, size_t len, const char *label);
 
+// A new document from `bytes` (.pxmt or .aseprite): clean, with an empty history. NULL if the bytes can't be decoded or
+// validated (see pixmith_last_error). Free with pixmith_free.
+PixmithDoc *pixmith_decode_document(const uint8_t *bytes, size_t len);
+
 // The selection's bounding rectangle (*x, *y, *w, *h) and its mask: one byte per pixel inside the rectangle, row-major,
 // 1 selected. *len = w * h. NULL when nothing is selected. Free with pixmith_bytes_free.
 uint8_t *pixmith_live_selection(const PixmithDoc *doc, int32_t *x, int32_t *y, uint32_t *w, uint32_t *h, size_t *len);

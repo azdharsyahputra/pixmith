@@ -258,7 +258,7 @@ impl PixmithApp {
     pub fn open_file_in_tab(&mut self, path: &Path) -> Result<(), String> {
         let is_png = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"));
         if is_png {
-            let mut doc = Doc::import_png(path)?;
+            let mut doc = Doc::import_png(path)?.with_import_source(path);
             self.add_recent(path);
             doc.touch();
             self.present(doc);
@@ -294,8 +294,16 @@ impl PixmithApp {
     fn save_as_tab(&mut self, i: usize) -> bool {
         let Some(tab) = self.tabs.get(i) else { return false };
         // New documents are saved as .pxmt; a document opened from an .aseprite file stays one.
+        let imported = tab.doc.import_source.as_deref().filter(|_| tab.doc.path.is_none());
         let name = tab.doc.path.as_ref().and_then(|p| p.file_name()).map_or_else(
-            || format!("{}.pxmt", tab.doc.name.as_deref().unwrap_or("Untitled")),
+            || {
+                let stem = tab
+                    .doc
+                    .name
+                    .clone()
+                    .or_else(|| imported.and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()));
+                format!("{}.pxmt", stem.as_deref().unwrap_or("Untitled"))
+            },
             |n| n.to_string_lossy().into_owned(),
         );
         let is_aseprite = Path::new(&name)
@@ -306,7 +314,7 @@ impl PixmithApp {
         let (first, second) = if is_aseprite { (aseprite, pixmith) } else { (pixmith, aseprite) };
         let mut dialog =
             rfd::FileDialog::new().add_filter(first.0, first.1).add_filter(second.0, second.1).set_file_name(name);
-        if let Some(dir) = tab.doc.path.as_ref().and_then(|p| p.parent()) {
+        if let Some(dir) = tab.doc.path.as_deref().or(imported).and_then(|p| p.parent()) {
             dialog = dialog.set_directory(dir);
         }
         let Some(mut path) = dialog.save_file() else { return false };
@@ -326,11 +334,14 @@ impl PixmithApp {
         }
     }
 
+    /// Another tab (not `i`) whose document file is `path`.
+    pub(crate) fn tab_holding(&self, i: usize, path: &Path) -> Option<usize> {
+        (0..self.tabs.len()).find(|&j| j != i && self.tabs[j].doc.path.as_deref().is_some_and(|p| same_file(p, path)))
+    }
+
     /// Saves tab `i` to `path` (`.pxmt` unless the path says `.aseprite`); the error is returned instead of shown.
     pub fn write_checked(&mut self, i: usize, path: &Path) -> Result<(), String> {
-        if let Some(other) = (0..self.tabs.len())
-            .find(|&j| j != i && self.tabs[j].doc.path.as_deref().is_some_and(|p| same_file(p, path)))
-        {
+        if let Some(other) = self.tab_holding(i, path) {
             return Err(format!(
                 "\u{201C}{}\u{201D} is already open in another tab. Close that tab first.",
                 self.tab_name(other)

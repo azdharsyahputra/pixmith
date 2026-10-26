@@ -451,6 +451,23 @@ fn back_to_back_new_documents_all_stay_open() {
 }
 
 #[test]
+fn new_from_bytes_builds_the_whole_document_before_any_tab_exists() {
+    let mut rig = Rig::new("live-new-bytes");
+    let mut c = rig.client();
+    let tabs = rig.app.tabs.len();
+    // Bad bytes fail with no tab left behind, even though the app has room for one.
+    assert_eq!(rig.fail(&mut c, "documents.new", r#"{"pxmt":"@@@"}"#), -32602);
+    assert_eq!(rig.fail(&mut c, "documents.new", r#"{"pxmt":"aGVsbG8="}"#), -32000);
+    assert_eq!(rig.fail(&mut c, "documents.new", r#"{"pxmt":"aGVsbG8=","name":"a/b"}"#), -32602);
+    assert_eq!(rig.app.tabs.len(), tabs);
+    // Good bytes: one request, a complete document (size from the bytes, name kept).
+    let made = rig.ok(&mut c, "documents.new", &format!(r#"{{"pxmt":"{}","name":"sheet"}}"#, art_b64(2)));
+    let d = made.get("document").unwrap();
+    assert_eq!((n(d, "width"), n(d, "height"), s(d, "name")), (16, 16, "sheet"));
+    assert_eq!(rig.app.tabs.len(), 1);
+}
+
+#[test]
 fn new_open_save_activate_close() {
     let mut rig = Rig::new("live-files");
     let mut c = rig.client();
@@ -576,6 +593,40 @@ fn new_open_save_activate_close() {
     // A saved document closes without discard.
     rig.ok(&mut c, "documents.close", &format!(r#"{{"id":"{id1}"}}"#));
     assert!(!Path::new(&out).metadata().unwrap().is_dir());
+}
+
+#[test]
+fn save_over_a_file_held_by_another_tab_needs_replace_open_and_a_clean_tab() {
+    let mut rig = Rig::new("live-replace-open");
+    let mut c = rig.client();
+    let q = |p: &Path| json::to_string(&Value::Str(p.display().to_string()));
+    let target = rig.dir.join("held.pxmt");
+    common::art(5, 20, 10).save(&target).unwrap();
+    let held = rig.ok(&mut c, "documents.open", &format!(r#"{{"path":{}}}"#, q(&target)));
+    let held_id = s(held.get("document").unwrap(), "id").to_string();
+    let made = rig.ok(&mut c, "documents.new", &format!(r#"{{"pxmt":"{}","name":"mine"}}"#, art_b64(2)));
+    let mine = s(made.get("document").unwrap(), "id").to_string();
+    let save = |replace: &str| format!(r#"{{"id":"{mine}","path":{}{replace}}}"#, q(&target));
+    // Refused by default, and with replace_open while the other tab has unsaved changes.
+    assert_eq!(rig.fail(&mut c, "documents.save", &save("")), -32000);
+    let rev =
+        n(rig.ok(&mut c, "documents.get", &format!(r#"{{"id":"{held_id}"}}"#)).get("document").unwrap(), "revision");
+    rig.ok(
+        &mut c,
+        "documents.apply",
+        &format!(r#"{{"id":"{held_id}","base_revision":{rev},"pxmt":"{}","label":"x"}}"#, art_b64(3)),
+    );
+    let tabs = rig.app.tabs.len();
+    assert_eq!(rig.fail(&mut c, "documents.save", &save(r#","replace_open":true"#)), -32000);
+    assert_eq!(rig.app.tabs.len(), tabs);
+    // A clean holder is closed and the save goes through.
+    rig.ok(&mut c, "documents.save", &format!(r#"{{"id":"{held_id}","path":{}}}"#, q(&rig.dir.join("elsewhere.pxmt"))));
+    rig.ok(&mut c, "documents.save", &format!(r#"{{"id":"{held_id}","path":{}}}"#, q(&target)));
+    let saved = rig.ok(&mut c, "documents.save", &save(r#","replace_open":true"#));
+    assert_eq!(s(saved.get("document").unwrap(), "path"), target.display().to_string());
+    assert_eq!(rig.app.tabs.len(), tabs - 1);
+    assert_eq!(rig.fail(&mut c, "documents.get", &format!(r#"{{"id":"{held_id}"}}"#)), -32004);
+    assert_eq!(rig.fail(&mut c, "documents.save", &save(r#","replace_open":"yes""#)), -32602);
 }
 
 #[test]

@@ -67,9 +67,9 @@ changed it.
 | `documents.apply` | `{"id", "base_revision", "pxmt": "<base64>", "label", "layer"?, "frame"?, "selection"?}` | `{"document": Doc}` |
 | `documents.undo` | `{"id", "steps"?: 1}` | `{"document": Doc, "steps": n}`, `n` being the steps actually undone (0 when there is nothing to undo) |
 | `documents.redo` | `{"id", "steps"?: 1}` | `{"document": Doc, "steps": n}`, likewise |
-| `documents.new` | `{"width", "height", "name"?}` | `{"document": Doc}`, opened in a new tab and made active (a blank, never edited untitled tab that the app opened itself is reused, like opening a file does; tabs made by Live requests are never reused) |
+| `documents.new` | `{"width", "height", "name"?}` or `{"pxmt": "<base64>", "name"?}` | `{"document": Doc}`, opened in a new tab and made active (a blank, never edited untitled tab that the app opened itself is reused, like opening a file does; tabs made by Live requests are never reused) |
 | `documents.open` | `{"path"}` | `{"document": Doc}`, or the already open tab of that file; `path` must be absolute |
-| `documents.save` | `{"id", "path"?}` | `{"document": Doc}`, saved to `path` (absolute) or to its own file; `.pxmt` or `.aseprite` / `.ase` by extension, anything else is `-32602` |
+| `documents.save` | `{"id", "path"?, "replace_open"?: false}` | `{"document": Doc}`, saved to `path` (absolute) or to its own file; `.pxmt` or `.aseprite` / `.ase` by extension, anything else is `-32602`. When another tab holds `path`, the save is refused with `-32000`, unless `replace_open` is true and that tab has no unsaved changes: the app then closes it and saves. A tab with unsaved changes is never closed this way |
 | `documents.activate` | `{"id"}` | `{"document": Doc}` |
 | `documents.close` | `{"id", "discard": false}` | `{}`; refused with `-32011` when the document has unsaved changes and `discard` is false |
 | `godot.atlas` | `{"id"}` | `{"document": Doc, "linked", "scale", "warnings", "resources": [Resource…]}`, see Godot Live Link below |
@@ -95,6 +95,16 @@ changed it.
 `Selection` is the user's selection: `{"x", "y", "w", "h", "mask": "<base64>"}`. The rectangle is the bounding
 box of the selected pixels, in canvas pixels; `mask` is `w * h` bytes, row-major inside that rectangle, 1 for a
 selected pixel and 0 for one that is not. `documents.get` returns `"selection": null` when nothing is selected.
+
+### `documents.new` with `pxmt`
+
+A client that has a finished document (for example a 32-frame sheet it built itself) gives it as `pxmt`, `.pxmt` or
+`.aseprite` bytes in base64, instead of `width` and `height` (the size comes from the bytes; both are ignored when
+`pxmt` is present). The app decodes and validates the whole document first and only then creates the tab, so one
+request either leaves a complete document or no tab at all: a bad `pxmt` is `-32602` (not base64) or `-32000` (not
+a document), and a client that times out or disconnects does not leave a half-built tab with one frame. Prefer this
+to `documents.new` followed by `documents.apply`, which cannot be undone as a whole when the second request fails.
+The result is the same as for the size form, and the new tab starts at revision 1.
 
 ### `documents.apply`
 

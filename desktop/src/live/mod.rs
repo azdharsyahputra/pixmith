@@ -416,6 +416,13 @@ fn clamp_position(tab: &mut DocTab) {
 }
 
 fn new_document(app: &mut PixmithApp, params: &Value) -> Reply {
+    // Everything is checked and built before a tab exists, so a failing request never leaves a half-made one.
+    let bytes = match params.get("pxmt") {
+        None | Some(Value::Null) => None,
+        Some(_) => {
+            Some(base64::decode(str_param(params, "pxmt")?).map_err(|e| err(ERR_PARAMS, format!("\"pxmt\": {e}")))?)
+        }
+    };
     let dimension = |key: &str| -> Result<u32, RpcError> {
         let v = int_param(params, key)?;
         if (1..=4096).contains(&v) {
@@ -424,7 +431,6 @@ fn new_document(app: &mut PixmithApp, params: &Value) -> Reply {
             Err(err(ERR_PARAMS, format!("\"{key}\" must be 1 to 4096")))
         }
     };
-    let (width, height) = (dimension("width")?, dimension("height")?);
     let name = match params.get("name") {
         None | Some(Value::Null) => None,
         Some(Value::Str(s)) => {
@@ -436,7 +442,10 @@ fn new_document(app: &mut PixmithApp, params: &Value) -> Reply {
         }
         Some(_) => return Err(err(ERR_PARAMS, "\"name\" must be a string")),
     };
-    let mut doc = Doc::new(width, height);
+    let mut doc = match &bytes {
+        Some(bytes) => Doc::from_bytes(bytes).map_err(|e| err(ERR_OTHER, e))?,
+        None => Doc::new(dimension("width")?, dimension("height")?),
+    };
     doc.name = name;
     // The app's own blank untitled tab is reused (once); a tab an earlier Live request made never is. Either
     // way the document ends up in the active tab.
@@ -482,6 +491,15 @@ fn save(app: &mut PixmithApp, i: usize, params: &Value) -> Reply {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
     if !matches!(ext.as_deref(), Some("pxmt" | "aseprite" | "ase")) {
         return Err(err(ERR_PARAMS, "save as .pxmt or .aseprite"));
+    }
+    // Another tab holds the file: with `replace_open` a tab without unsaved changes is closed first.
+    let mut i = i;
+    if bool_param(params, "replace_open")? {
+        let uid = app.tabs[i].doc.uid();
+        if let Some(j) = app.tab_holding(i, &path).filter(|&j| !app.tabs[j].doc.is_dirty()) {
+            app.close_tab(j, None);
+            i = app.tabs.iter().position(|t| t.doc.uid() == uid).unwrap_or(i);
+        }
     }
     app.write_checked(i, &path).map_err(|e| err(ERR_OTHER, e))?;
     Ok(obj(vec![("document", doc_json(app, i))]))

@@ -16,6 +16,8 @@ pub struct Doc {
     pub path: Option<PathBuf>,
     /// A name given to a document that has no file yet (double-click its tab); Save As starts with it.
     pub name: Option<String>,
+    /// The image, GIF or sheet an imported document came from: Save As starts in its folder with its name.
+    pub import_source: Option<PathBuf>,
 }
 
 /// The message of the last failing core call on this thread.
@@ -43,7 +45,7 @@ pub(crate) unsafe fn take_string(s: *mut std::ffi::c_char) -> String {
 
 impl Doc {
     pub fn new(width: u32, height: u32) -> Doc {
-        Doc { ptr: core::pixmith_new(width, height), path: None, name: None }
+        Doc { ptr: core::pixmith_new(width, height), path: None, name: None, import_source: None }
     }
 
     pub fn open(path: &Path) -> Result<Doc, String> {
@@ -53,7 +55,7 @@ impl Doc {
         if ptr.is_null() {
             return Err(last_error());
         }
-        Ok(Doc { ptr, path: Some(path.to_path_buf()), name: None })
+        Ok(Doc { ptr, path: Some(path.to_path_buf()), name: None, import_source: None })
     }
 
     /// Takes ownership of a document the core allocated (an import, say).
@@ -61,7 +63,13 @@ impl Doc {
     /// # Safety
     /// `ptr` must be a live, non-null document that nothing else frees.
     pub(crate) unsafe fn from_raw(ptr: *mut Editor, path: Option<PathBuf>) -> Doc {
-        Doc { ptr, path, name: None }
+        Doc { ptr, path, name: None, import_source: None }
+    }
+
+    /// Remembers the file an import was read from (see `import_source`).
+    pub fn with_import_source(mut self, source: &Path) -> Doc {
+        self.import_source = Some(source.to_path_buf());
+        self
     }
 
     pub fn save(&mut self, path: &Path) -> Result<(), String> {
@@ -139,6 +147,16 @@ impl Doc {
         let out = unsafe { std::slice::from_raw_parts(bytes, len) }.to_vec();
         unsafe { live::pixmith_bytes_free(bytes, len) };
         Ok(out)
+    }
+
+    /// A new, unnamed document from `.pxmt` or `.aseprite` bytes (Live mode). Nothing is created on failure.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Doc, String> {
+        // SAFETY: the bytes are readable for their length; a non-null result is a document we now own.
+        let ptr = unsafe { live::pixmith_decode_document(bytes.as_ptr(), bytes.len()) };
+        if ptr.is_null() {
+            return Err(last_error());
+        }
+        Ok(Doc { ptr, path: None, name: None, import_source: None })
     }
 
     /// Swaps in `.pxmt` or `.aseprite` bytes as one undo step named `label` (Live mode). The document is

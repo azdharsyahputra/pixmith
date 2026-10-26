@@ -322,6 +322,7 @@ final class ScriptSessions: ObservableObject {
         let active = slot === model.activeSlotObject
         if active { model.fileURL = url } else { slot.fileURL = url }
         slot.customName = nil
+        slot.importSource = nil
         RecentFiles.shared.add(url)
         guard saved else { return }
         if active {

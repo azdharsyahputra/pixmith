@@ -96,6 +96,9 @@ pub struct Slice {
     pub name: String,
     pub nine_patch: bool,
     pub has_pivot: bool,
+    /// First frame the pivot applies to (only meaningful with `has_pivot`). Frames before it have no pivot. The
+    /// .aseprite format stores one pivot flag per slice, so a file always loads with 0.
+    pub pivot_from: u32,
     /// Sorted by frame, one key per frame.
     pub keys: Vec<SliceKey>,
     pub user: UserData,
@@ -105,6 +108,32 @@ impl Slice {
     /// The key in effect at `frame`: the last one starting at or before it.
     pub fn key_at(&self, frame: u32) -> Option<&SliceKey> {
         self.keys.iter().rev().find(|k| k.frame <= frame)
+    }
+
+    /// The pivot at `frame`; `None` without a pivot or before the first pivot key.
+    pub fn pivot_at(&self, frame: u32) -> Option<(i32, i32)> {
+        if !self.has_pivot || frame < self.pivot_from {
+            return None;
+        }
+        self.key_at(frame).or(self.keys.first()).map(|k| k.pivot)
+    }
+
+    /// Sets the pivot without naming a frame: a slice with no pivot yet gets it on every existing key, one that has
+    /// one changes only its first key (later keys keep their own).
+    pub fn set_pivot_all(&mut self, p: (i32, i32)) {
+        if self.has_pivot {
+            return self.set_pivot_at(0, p);
+        }
+        self.keys.iter_mut().for_each(|k| k.pivot = p);
+        self.has_pivot = true;
+        self.pivot_from = 0;
+    }
+
+    /// Keys a pivot at `frame` (the pivot then applies from the earliest frame it was set on).
+    pub fn set_pivot_at(&mut self, frame: u32, p: (i32, i32)) {
+        self.pivot_from = if self.has_pivot { self.pivot_from.min(frame) } else { frame };
+        self.has_pivot = true;
+        key_for_edit(self, frame).pivot = p;
     }
 }
 
@@ -126,6 +155,9 @@ impl Extra {
         let at = at as u32;
         for s in &mut self.slices {
             s.keys.iter_mut().filter(|k| k.frame >= at).for_each(|k| k.frame += 1);
+            if s.pivot_from >= at {
+                s.pivot_from += 1;
+            }
         }
     }
 
@@ -146,6 +178,7 @@ impl Extra {
         for s in &mut self.slices {
             s.keys.iter_mut().for_each(|k| k.frame = new_index(k.frame));
             s.keys.sort_by_key(|k| k.frame);
+            s.pivot_from = new_index(s.pivot_from);
         }
     }
 
@@ -179,6 +212,7 @@ impl Extra {
         for s in &mut self.slices {
             let Some(&tail) = s.keys.last() else { continue };
             s.keys.retain(|k| k.frame <= last);
+            s.pivot_from = s.pivot_from.min(last);
             if s.keys.is_empty() {
                 s.keys.push(SliceKey { frame: last, ..tail });
             }
@@ -190,6 +224,7 @@ impl Extra {
         let i = i as u32;
         for s in &mut self.slices {
             s.keys.iter_mut().filter(|k| k.frame > i).for_each(|k| k.frame -= 1);
+            s.pivot_from = s.pivot_from.saturating_sub((s.pivot_from > i) as u32);
             // Keys that now share a frame: the later one wins.
             let mut seen: Vec<SliceKey> = Vec::new();
             for k in s.keys.drain(..) {
@@ -635,6 +670,10 @@ pub fn set_props(
     let mut sl = e.sprite.extra.slices[i].clone();
     sl.name = name.to_string();
     sl.nine_patch = center.is_some();
+    // The editor sets a pivot for the whole slice; only Lua keys one from a later frame.
+    if pivot.is_none() || !sl.has_pivot {
+        sl.pivot_from = 0;
+    }
     sl.has_pivot = pivot.is_some();
     let k = key_for_edit(&mut sl, frame);
     if let Some(c) = center {
@@ -707,7 +746,7 @@ pub fn json_meta(s: &Sprite, scale: usize) -> String {
             if sl.nine_patch {
                 write!(out, ", \"center\": {}", rect(k.center)).unwrap();
             }
-            if sl.has_pivot {
+            if sl.has_pivot && k.frame >= sl.pivot_from {
                 write!(out, ", \"pivot\": {{ \"x\": {}, \"y\": {} }}", k.pivot.0 as i64 * sc, k.pivot.1 as i64 * sc)
                     .unwrap();
             }
@@ -764,6 +803,7 @@ pub unsafe extern "C" fn pixmith_slice_get(doc: *const Editor, i: u32, frame: u3
         if out.is_null() {
             return true;
         }
+        let has_pivot = sl.pivot_at(frame).is_some();
         let v = [
             k.bounds.x,
             k.bounds.y,
@@ -774,7 +814,7 @@ pub unsafe extern "C" fn pixmith_slice_get(doc: *const Editor, i: u32, frame: u3
             k.center.y,
             k.center.w as i32,
             k.center.h as i32,
-            sl.has_pivot as i32,
+            has_pivot as i32,
             k.pivot.0,
             k.pivot.1,
             k.frame as i32,
@@ -972,6 +1012,7 @@ mod tests {
             name: "icon".into(),
             nine_patch: true,
             has_pivot: true,
+            pivot_from: 0,
             keys: vec![
                 SliceKey { frame: 0, bounds: rect(1, 2, 8, 9), center: rect(2, 2, 4, 5), pivot: (-1, 3) },
                 SliceKey { frame: 3, bounds: rect(-4, 0, 3, 3), center: rect(0, 0, 1, 1), pivot: (2, 2) },
@@ -1003,6 +1044,7 @@ mod tests {
             name: "hit".into(),
             nine_patch: true,
             has_pivot: true,
+            pivot_from: 0,
             keys: vec![SliceKey { frame: 0, bounds: rect(2, 3, 5, 6), center: rect(1, 1, 3, 4), pivot: (2, 2) }],
             user: UserData {
                 text: Some("data".into()),
@@ -1309,6 +1351,7 @@ mod tests {
             name: "a\"b".into(),
             nine_patch: true,
             has_pivot: true,
+            pivot_from: 0,
             keys: vec![SliceKey { frame: 0, bounds: rect(1, 2, 3, 4), center: rect(1, 1, 1, 1), pivot: (1, 0) }],
             user: UserData { text: Some("t".into()), color: Some([255, 0, 0, 255]), props: None },
         });
@@ -1319,5 +1362,32 @@ mod tests {
         assert!(j.contains("\"pivot\": { \"x\": 2, \"y\": 0 }"));
         assert_eq!(j.matches('{').count(), j.matches('}').count());
         assert_eq!(json_meta(&Sprite::new(1, 1), 1), ",\n    \"slices\": []");
+    }
+
+    #[test]
+    fn pivot_is_absent_before_its_first_key() {
+        let mut s = Sprite::new(8, 8);
+        let k = |frame| SliceKey { frame, bounds: rect(0, 0, 2, 2), ..Default::default() };
+        let mut sl = Slice { keys: vec![k(0)], ..Default::default() };
+        assert_eq!(sl.pivot_at(0), None);
+        let mut all = Slice { keys: vec![k(0), k(4)], ..Default::default() };
+        all.set_pivot_all((7, 8));
+        assert_eq!((all.pivot_at(0), all.pivot_at(4)), (Some((7, 8)), Some((7, 8))));
+        sl.set_pivot_at(2, (3, 4));
+        assert_eq!(
+            (sl.pivot_at(0), sl.pivot_at(1), sl.pivot_at(2), sl.pivot_at(5)),
+            (None, None, Some((3, 4)), Some((3, 4)))
+        );
+        s.extra.slices.push(sl.clone());
+        let j = json_meta(&s, 1);
+        assert_eq!(j.matches("\"pivot\"").count(), 1, "{j}");
+        // A pivot set on an earlier frame extends the range backwards.
+        sl.set_pivot_at(0, (1, 1));
+        assert_eq!((sl.pivot_at(0), sl.pivot_at(2)), (Some((1, 1)), Some((3, 4))));
+        // Inserting a frame before the first pivot key moves it along.
+        let mut ex = Extra { slices: vec![Slice { keys: vec![k(0)], ..Default::default() }], ..Default::default() };
+        ex.slices[0].set_pivot_at(2, (1, 2));
+        ex.frame_inserted(1);
+        assert_eq!((ex.slices[0].pivot_at(2), ex.slices[0].pivot_at(3)), (None, Some((1, 2))));
     }
 }

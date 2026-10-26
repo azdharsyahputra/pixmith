@@ -299,7 +299,8 @@ impl PixmithApp {
     /// Reads the file (`size` picks an icon size) and shows it in a tab.
     pub fn finish_open_image(&mut self, path: &Path, size: Option<u32>) {
         match Doc::import_image(path, size) {
-            Ok(mut doc) => {
+            Ok(doc) => {
+                let mut doc = doc.with_import_source(path);
                 self.add_recent(path);
                 doc.touch();
                 self.present(doc);

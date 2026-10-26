@@ -42,6 +42,12 @@ pub enum SelectionChange {
     Set(Region),
 }
 
+/// A new editor holding the document in `bytes` (`.pxmt` or `.aseprite`), decoded and validated before anything
+/// else happens: a front end creates the tab only when this succeeded, so a failed request leaves nothing behind.
+pub fn decode_document(bytes: &[u8]) -> Result<Editor, String> {
+    pxmt::read_document(bytes).map(Editor::new)
+}
+
 /// The active selection as a [`Region`], `None` when nothing is selected.
 pub fn selection_region(e: &Editor) -> Option<Region> {
     let (w, h) = (e.sprite.width, e.sprite.height);
@@ -172,6 +178,25 @@ pub unsafe extern "C" fn pixmith_live_selection(
     })
 }
 
+/// A new document from `bytes` (`.pxmt` or `.aseprite`), not changed or dirty, with an empty history. NULL (see
+/// `pixmith_last_error`) when the bytes cannot be decoded or validated. Free with `pixmith_free`.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_decode_document(bytes: *const u8, len: usize) -> *mut Editor {
+    crate::ffi::guarded("pixmith_decode_document", std::ptr::null_mut(), || {
+        if bytes.is_null() {
+            set_error("no document bytes");
+            return std::ptr::null_mut();
+        }
+        match decode_document(std::slice::from_raw_parts(bytes, len)) {
+            Ok(e) => Box::into_raw(Box::new(e)),
+            Err(msg) => {
+                set_error(msg);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
 /// Frees bytes returned by `pixmith_encode_document`.
 #[no_mangle]
 pub unsafe extern "C" fn pixmith_bytes_free(bytes: *mut u8, len: usize) {
@@ -284,6 +309,19 @@ mod tests {
     fn apply(e: &mut Editor, bytes: &[u8], label: &str) -> bool {
         let l = CString::new(label).unwrap();
         unsafe { pixmith_apply_document(e, bytes.as_ptr(), bytes.len(), l.as_ptr()) }
+    }
+
+    #[test]
+    fn decoding_builds_a_whole_document_or_nothing() {
+        let mut a = Editor::new(Sprite::new(8, 8));
+        a.sprite.draw_line(0, 0, 1, 1, 5, 5, RED, 1);
+        let bytes = encode(&mut a);
+        let p = unsafe { pixmith_decode_document(bytes.as_ptr(), bytes.len()) };
+        assert!(!p.is_null());
+        let b = unsafe { Box::from_raw(p) };
+        assert_eq!(b.sprite.render(0), a.sprite.render(0));
+        assert!(unsafe { pixmith_decode_document(bytes.as_ptr(), bytes.len() / 2) }.is_null());
+        assert!(unsafe { pixmith_decode_document(std::ptr::null(), 0) }.is_null());
     }
 
     #[test]

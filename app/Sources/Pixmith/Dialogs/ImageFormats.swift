@@ -81,7 +81,7 @@ extension SpriteModel {
             guard let chosen = askIconSize(sizes, file: url.lastPathComponent) else { return }
             size = chosen
         }
-        adopt(readImage(url, iconSize: size))
+        adopt(readImage(url, iconSize: size), source: url)
         RecentFiles.shared.add(url)
     }
 

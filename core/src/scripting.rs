@@ -1145,13 +1145,15 @@ impl UserData for LayerH {
             Ok(())
         });
         f.add_field_method_get("opacity", |_, t| Ok(t.get()?.opacity));
-        f.add_field_method_set("opacity", |_, t, v: i64| {
+        f.add_field_method_set("opacity", |_, t, v: Value| {
+            let v = whole("layer.opacity", &v)?;
             t.get()?.opacity = v.clamp(0, 255) as u8;
             Ok(())
         });
         // Aseprite's BlendMode numbering (see `commands.rs`).
         f.add_field_method_get("blendMode", |_, t| Ok(commands::blend_to_aseprite(t.get()?.blend_mode)));
-        f.add_field_method_set("blendMode", |_, t, v: i64| {
+        f.add_field_method_set("blendMode", |_, t, v: Value| {
+            let v = whole("layer.blendMode", &v)?;
             t.get()?.blend_mode = commands::blend_from_aseprite(v)?;
             Ok(())
         });
@@ -1314,7 +1316,8 @@ impl LayerH {
 impl UserData for FrameH {
     fn add_fields<F: UserDataFields<Self>>(f: &mut F) {
         f.add_field_method_get("duration", |_, t| Ok(t.0.sprite().durations[t.check()?]));
-        f.add_field_method_set("duration", |_, t, v: i64| {
+        f.add_field_method_set("duration", |_, t, v: Value| {
+            let v = whole("frame.duration", &v)?;
             let i = t.check()?;
             t.0.sprite().durations[i] = v.clamp(1, u16::MAX as i64) as u16;
             Ok(())
@@ -1346,7 +1349,8 @@ impl UserData for TagH {
             Ok(())
         });
         f.add_field_method_get("from", |_, t| Ok(t.get()?.from as usize + 1));
-        f.add_field_method_set("from", |_, t, v: i64| {
+        f.add_field_method_set("from", |_, t, v: Value| {
+            let v = whole("tag.from", &v)?;
             let f = t.0.frame_index(Some(v))?;
             let tag = t.get()?;
             let (a, b) = (f as u16, tag.to);
@@ -1354,7 +1358,8 @@ impl UserData for TagH {
             Ok(())
         });
         f.add_field_method_get("to", |_, t| Ok(t.get()?.to as usize + 1));
-        f.add_field_method_set("to", |_, t, v: i64| {
+        f.add_field_method_set("to", |_, t, v: Value| {
+            let v = whole("tag.to", &v)?;
             let f = t.0.frame_index(Some(v))?;
             let tag = t.get()?;
             let (a, b) = (tag.from, f as u16);
@@ -1362,7 +1367,8 @@ impl UserData for TagH {
             Ok(())
         });
         f.add_field_method_get("direction", |_, t| Ok(t.get()?.direction));
-        f.add_field_method_set("direction", |_, t, v: i64| {
+        f.add_field_method_set("direction", |_, t, v: Value| {
+            let v = whole("tag.direction", &v)?;
             if !(0..=3).contains(&v) {
                 return Err(Error::runtime(format!("direction {v} is not in 0..3 (see app.direction)")));
             }
@@ -1370,7 +1376,8 @@ impl UserData for TagH {
             Ok(())
         });
         f.add_field_method_get("repeatCount", |_, t| Ok(t.get()?.repeat));
-        f.add_field_method_set("repeatCount", |_, t, v: i64| {
+        f.add_field_method_set("repeatCount", |_, t, v: Value| {
+            let v = whole("tag.repeatCount", &v)?;
             t.get()?.repeat = v.clamp(0, u16::MAX as i64) as u16;
             Ok(())
         });
@@ -1384,7 +1391,8 @@ impl UserData for TagH {
             Ok(())
         });
         f.add_field_method_get("aniDir", |_, t| Ok(t.get()?.direction));
-        f.add_field_method_set("aniDir", |_, t, v: i64| {
+        f.add_field_method_set("aniDir", |_, t, v: Value| {
+            let v = whole("tag.aniDir", &v)?;
             if !(0..=3).contains(&v) {
                 return Err(Error::runtime(format!("direction {v} is not an AniDir value")));
             }
@@ -1443,7 +1451,8 @@ impl UserData for CelH {
             t.check()?;
             Ok(t.0.sprite().cels[t.2][t.1].as_ref().map_or(255, |c| c.opacity))
         });
-        f.add_field_method_set("opacity", |_, t, v: i64| {
+        f.add_field_method_set("opacity", |_, t, v: Value| {
+            let v = whole("cel.opacity", &v)?;
             t.check()?;
             if t.0.sprite().set_cel_opacity(t.1, t.2, v.clamp(0, 255) as u8) {
                 Ok(())
@@ -1455,7 +1464,8 @@ impl UserData for CelH {
             t.check()?;
             Ok(t.0.sprite().cel_z_index(t.1, t.2).unwrap_or(0))
         });
-        f.add_field_method_set("zIndex", |_, t, v: i64| {
+        f.add_field_method_set("zIndex", |_, t, v: Value| {
+            let v = whole("cel.zIndex", &v)?;
             t.check()?;
             let z = v.clamp(i16::MIN as i64, i16::MAX as i64) as i32;
             if t.0.sprite().set_cel_z_index(t.1, t.2, z) {
@@ -1865,6 +1875,25 @@ fn slice_rect(x: i64, y: i64, w: i64, h: i64) -> LuaResult<crate::document::slic
 }
 
 /// An optional trailing frame argument (a number or a frame handle); the active frame when absent.
+/// An integer field value. Lua numbers with a fraction would otherwise fail with mlua's bare
+/// "error converting Lua number to i64 (out of range)".
+fn whole(field: &str, v: &Value) -> LuaResult<i64> {
+    match v {
+        Value::Integer(i) => Ok(*i),
+        Value::Number(n) if n.fract() == 0.0 && n.abs() < 9.0e18 => Ok(*n as i64),
+        Value::Number(n) if field == "frame.duration" && n.is_finite() && n.fract() != 0.0 => {
+            Err(Error::runtime(format!(
+            "frame.duration is whole milliseconds (1-65535); got {n} \u{2014} Aseprite uses seconds, multiply by 1000"
+        )))
+        }
+        Value::Number(n) if n.is_finite() && n.fract() != 0.0 => {
+            Err(Error::runtime(format!("{field} must be a whole number, got {n}")))
+        }
+        Value::Number(n) => Err(Error::runtime(format!("{field} is out of range, got {n}"))),
+        other => Err(Error::runtime(format!("{field} must be a whole number, got {}", other.type_name()))),
+    }
+}
+
 fn take_frame(ctx: &Ctx, a: &mut MultiValue) -> LuaResult<u32> {
     match a.pop_front() {
         None | Some(Value::Nil) => Ok(ctx.frame_index(None)? as u32),
@@ -1927,10 +1956,7 @@ impl UserData for SliceH {
         });
         f.add_field_method_get("pivot", |_, t| {
             let sl = t.get()?;
-            if !sl.has_pivot {
-                return Ok(None);
-            }
-            Ok(sl.key_at(0).or(sl.keys.first()).map(|k| geometry::PointV { x: k.pivot.0 as i64, y: k.pivot.1 as i64 }))
+            Ok(sl.pivot_at(0).map(|p| geometry::PointV { x: p.0 as i64, y: p.1 as i64 }))
         });
         f.add_field_method_set("pivot", |_, t, v: Value| {
             let sl = t.get()?;
@@ -1942,8 +1968,7 @@ impl UserData for SliceH {
             if x.abs() > 1 << 20 || y.abs() > 1 << 20 {
                 return Err(Error::runtime("pivot out of range"));
             }
-            crate::document::slices::key_for_edit(sl, 0).pivot = (x as i32, y as i32);
-            sl.has_pivot = true;
+            sl.set_pivot_all((x as i32, y as i32));
             Ok(())
         });
     }
@@ -1997,27 +2022,32 @@ impl UserData for SliceH {
                 None | Some(Value::Nil) => t.0.frame_index(None)?,
                 Some(v) => t.0.frame_of(&v)?,
             } as u32;
-            let sl = t.get()?;
-            if !sl.has_pivot {
-                return Ok((None, None));
-            }
-            let p = sl.key_at(f).or(sl.keys.first()).map(|k| k.pivot);
+            let p = t.get()?.pivot_at(f);
             Ok((p.map(|p| p.0), p.map(|p| p.1)))
         });
-        // setPivot(x, y [, frame]) or setPivot(point [, frame])
+        // setPivot(x, y [, frame]) or setPivot(point [, frame]). Without a frame, a slice with no pivot yet gets it on
+        // all its keys (so every frame has it); with a frame the pivot starts there.
         m.add_method("setPivot", |_, t, mut a: MultiValue| {
             let p = geometry::take_point(&mut a, "setPivot")?;
-            let f = take_frame(&t.0, &mut a)?;
+            let f = match a.pop_front() {
+                None | Some(Value::Nil) => None,
+                Some(v) => Some(t.0.frame_of(&v)? as u32),
+            };
             if p.x.abs() > 1 << 20 || p.y.abs() > 1 << 20 {
                 return Err(Error::runtime("pivot out of range"));
             }
             let sl = t.get()?;
-            crate::document::slices::key_for_edit(sl, f).pivot = (p.x as i32, p.y as i32);
-            sl.has_pivot = true;
+            let p = (p.x as i32, p.y as i32);
+            match f {
+                Some(f) => sl.set_pivot_at(f, p),
+                None => sl.set_pivot_all(p),
+            }
             Ok(())
         });
         m.add_method("clearPivot", |_, t, ()| {
-            t.get()?.has_pivot = false;
+            let sl = t.get()?;
+            sl.has_pivot = false;
+            sl.pivot_from = 0;
             Ok(())
         });
         m.add_method("delete", |_, t, ()| {
@@ -2562,6 +2592,45 @@ mod tests {
         assert_eq!(s.durations, vec![100, 250]);
         assert_eq!(&s.cels[1][1].as_ref().unwrap().pixels[..4], &[0, 255, 0, 255]);
         assert_eq!(&s.cels[0][0].as_ref().unwrap().pixels[(2 * 4 + 1) * 4..][..4], &RED);
+    }
+
+    #[test]
+    fn setting_a_pivot_without_a_frame_covers_every_key() {
+        let mut e = Editor::new(Sprite::new(16, 16));
+        ok(
+            &mut e,
+            r#"
+            for _ = 1, 5 do sprite:newFrame() end
+            -- without a frame, a slice with no pivot gets it on every key; later keys inherit it
+            local u = sprite:newSlice("u", 0, 0, 2, 2)
+            app.activeFrame = 4
+            u:setPivot(Point(9, 8))
+            u:setBounds(1, 1, 2, 2, 3)
+            local fx, fy = u:getPivot(1)
+            assert(fx == 9 and fy == 8 and u.pivot == Point(9, 8))
+            local gx, gy = u:getPivot(3)
+            assert(gx == 9 and gy == 8)
+            -- with a pivot already, the frameless call changes frame 1 only
+            u:setPivot(1, 2)
+            assert(select(1, u:getPivot(1)) == 1 and select(1, u:getPivot(3)) == 9)
+            "#,
+        );
+    }
+
+    #[test]
+    fn integer_fields_explain_a_fractional_value() {
+        let mut e = Editor::new(Sprite::new(2, 2));
+        let o = run_src(&mut e, "sprite.frames[1].duration = 0.1");
+        let err = o.error.unwrap_or_default();
+        assert!(err.contains("frame.duration is whole milliseconds (1-65535); got 0.1"), "{err}");
+        let o = run_src(&mut e, "sprite.layers[1].opacity = 12.5");
+        let err = o.error.unwrap_or_default();
+        assert!(err.contains("layer.opacity must be a whole number, got 12.5"), "{err}");
+        ok(
+            &mut e,
+            "sprite.frames[1].duration = 120.0 sprite.layers[1].opacity = 200 assert(sprite.frames[1].duration == 120)",
+        );
+        assert_eq!(e.sprite.durations, vec![120]);
     }
 
     #[test]
@@ -3525,6 +3594,9 @@ mod tests {
             s:setPivot(3, 4, 2)
             local qx, qy = s:getPivot(3)
             assert(s.hasPivot and qx == 3 and qy == 4)
+            -- before the first pivot key there is no pivot
+            local nx, ny = s:getPivot(1)
+            assert(nx == nil and ny == nil and s.pivot == nil)
             s.name = "hurt"
             s.userData.text = "box"
             local t = sprite:newSlice("other", 0, 0, 2, 2)

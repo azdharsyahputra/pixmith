@@ -850,12 +850,18 @@ enum LiveHandler {
     }
 
     private static func newDocument(_ params: [String: Any]) throws -> [String: Any] {
+        // Everything is checked and built before a tab exists, so a request that fails (or whose client gives up)
+        // never leaves a half-made document behind.
         func dimension(_ key: String) throws -> Int {
             let v = try requiredInt(params, key)
             guard (1...4096).contains(v) else { throw LiveError.params("\"\(key)\" must be 1 to 4096") }
             return v
         }
-        let (w, h) = (try dimension("width"), try dimension("height"))
+        var bytes: Data?
+        if let v = params["pxmt"], !(v is NSNull) {
+            guard let d = decodeBase64(try string(params, "pxmt")) else { throw LiveError.params("\"pxmt\" is not base64") }
+            bytes = d
+        }
         var name: String?
         if let v = params["name"], !(v is NSNull) {
             guard let s = v as? String else { throw LiveError.params("\"name\" must be a string") }
@@ -865,7 +871,17 @@ enum LiveHandler {
         }
         // A blank untitled tab the app opened itself is reused, else the document gets a new tab; either way it is
         // the active one.
-        presentFromLive(pixmith_new(UInt32(w), UInt32(h)), url: nil)
+        let built: OpaquePointer
+        if let bytes {
+            let d = bytes.withUnsafeBytes { raw -> OpaquePointer? in
+                pixmith_decode_document(raw.bindMemory(to: UInt8.self).baseAddress ?? UnsafePointer(bitPattern: 1)!, bytes.count)
+            }
+            guard let d else { throw LiveError.other(String(cString: pixmith_last_error())) }
+            built = d
+        } else {
+            built = pixmith_new(UInt32(try dimension("width")), UInt32(try dimension("height")))
+        }
+        presentFromLive(built, url: nil)
         model.activeSlotObject?.customName = name
         model.objectWillChange.send()
         refresh()
@@ -881,6 +897,7 @@ enum LiveHandler {
         if url.pathExtension.lowercased() == "png" {
             guard let d = url.path.withCString({ pixmith_import_png($0) }) else { throw LiveError.other(model.lastError) }
             presentFromLive(d, url: nil)
+            model.activeSlotObject?.importSource = url
             model.changed()
             RecentFiles.shared.add(url)
         } else if let slot = model.slot(for: url), let i = model.slots.firstIndex(where: { $0 === slot }) {
@@ -895,7 +912,14 @@ enum LiveHandler {
     }
 
     private static func save(_ slot: DocumentSlot, _ params: [String: Any]) throws -> [String: Any] {
-        let active = slot === model.activeSlotObject
+        var replaceOpen = false
+        if let v = params["replace_open"], !(v is NSNull) {
+            guard let n = v as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else {
+                throw LiveError.params("\"replace_open\" must be true or false")
+            }
+            replaceOpen = n.boolValue
+        }
+        var active = slot === model.activeSlotObject
         let url: URL
         if let v = params["path"], !(v is NSNull) {
             url = try absolutePath(params)
@@ -907,10 +931,16 @@ enum LiveHandler {
         guard ["pxmt", "aseprite", "ase"].contains(url.pathExtension.lowercased()) else {
             throw LiveError.params("save as .pxmt or .aseprite")
         }
+        // Another tab holds the file: with `replace_open` a tab without unsaved changes is closed first.
+        let key = url.resolvingSymlinksInPath()
+        if replaceOpen, let other = model.slots.first(where: { $0 !== slot && $0.fileURL?.resolvingSymlinksInPath() == key }),
+           !model.isDirty(other), let i = model.slots.firstIndex(where: { $0 === other }) {
+            model.closeTab(i, discardChanges: true)
+            active = slot === model.activeSlotObject
+        }
         if active {
             if let message = model.writeChecked(to: url) { throw LiveError.other(message) }
         } else {
-            let key = url.resolvingSymlinksInPath()
             if let other = model.slots.first(where: { $0 !== slot && $0.fileURL?.resolvingSymlinksInPath() == key }) {
                 throw LiveError.other("“\(model.name(of: other))” is already open in another tab. Close that tab first.")
             }

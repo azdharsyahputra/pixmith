@@ -6,7 +6,7 @@ use crate::doc::Doc;
 use crate::ui::tools::view::GridType;
 use crate::ui::{selection, tilemap, tools, transform};
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // MARK: Selection and transform (`Selection.swift`, `FreeTransform.swift`)
 
@@ -201,9 +201,10 @@ fn pick(title: &str, name: &str, extensions: &[&str]) -> Option<PathBuf> {
 }
 
 /// Opens an imported document in a tab, or reports why it failed.
-fn present(app: &mut PixmithApp, doc: Result<Doc, String>) {
+fn present(app: &mut PixmithApp, source: &Path, doc: Result<Doc, String>) {
     match doc {
-        Ok(mut doc) => {
+        Ok(doc) => {
+            let mut doc = doc.with_import_source(source);
             // An import is unsaved work (`SpriteModel.changed()`).
             doc.touch();
             app.present(doc);
@@ -234,7 +235,7 @@ pub fn sheet_import_dialog(app: &mut PixmithApp, ctx: &egui::Context) {
     match action {
         DialogAction::Primary => {
             app.files.sheet_import = None;
-            present(app, Doc::import_sheet(&path, w, h));
+            present(app, &path, Doc::import_sheet(&path, w, h));
         }
         DialogAction::Cancel => app.files.sheet_import = None,
         _ => {}
@@ -244,14 +245,14 @@ pub fn sheet_import_dialog(app: &mut PixmithApp, ctx: &egui::Context) {
 /// File > Import > Sprite Sheet with JSON…
 pub fn import_sheet_with_json(app: &mut PixmithApp) {
     if let Some(path) = pick("Import Sprite Sheet with JSON", "Aseprite JSON", &["json"]) {
-        present(app, Doc::import_sheet_json(&path));
+        present(app, &path, Doc::import_sheet_json(&path));
     }
 }
 
 /// File > Import > Animated GIF as New Sprite…
 pub fn import_gif_as_sprite(app: &mut PixmithApp) {
     if let Some(path) = pick("Import Animated GIF", "GIF", &["gif"]) {
-        present(app, Doc::import_gif(&path));
+        present(app, &path, Doc::import_gif(&path));
     }
 }
 

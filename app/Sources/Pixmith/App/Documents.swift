@@ -30,6 +30,8 @@ final class DocumentSlot: Identifiable {
     var untitledNumber = 1
     /// A name given to a document that has no file yet (double-click its tab); the Save panel starts with it.
     var customName: String?
+    /// The image, GIF or sheet this document was imported from: Save As starts in its folder with its name.
+    var importSource: URL?
     /// Set when the tab is closed, just before its document is freed; a closed slot never touches `doc`.
     var closed = false
     /// The reference image and its placement belong to the document.
@@ -341,6 +343,7 @@ extension SpriteModel {
             replace(with: pixmith_new(UInt32(Prefs.newWidth), UInt32(Prefs.newHeight)))
             fileURL = nil
             slot.untitledNumber = 1
+            slot.importSource = nil
             return true
         }
         if index == activeSlot {

@@ -320,9 +320,11 @@ final class SpriteModel: ObservableObject {
         guard !MainWindow.hasSheet else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [Self.pxmtType] + Self.asepriteTypes
-        let base = fileURL?.deletingPathExtension().lastPathComponent ?? activeSlotObject?.customName ?? "Untitled"
+        let imported = fileURL == nil ? activeSlotObject?.importSource : nil
+        let base = fileURL?.deletingPathExtension().lastPathComponent ?? activeSlotObject?.customName
+            ?? imported?.deletingPathExtension().lastPathComponent ?? "Untitled"
         panel.nameFieldStringValue = base + ".pxmt"
-        panel.directoryURL = fileURL?.deletingLastPathComponent()
+        panel.directoryURL = fileURL?.deletingLastPathComponent() ?? imported?.deletingLastPathComponent()
         if panel.runModal() == .OK, let url = panel.url { write(to: Self.withDocumentExtension(url)) }
     }
 

@@ -157,12 +157,23 @@ fn slices(root: &Value, frames: usize, scale: usize) -> Vec<Slice> {
             keys.dedup_by_key(|k| k.frame);
             let nine_patch =
                 s.get("keys").and_then(Value::as_array).is_some_and(|ks| ks.iter().any(|k| k.get("center").is_some()));
-            let has_pivot =
-                s.get("keys").and_then(Value::as_array).is_some_and(|ks| ks.iter().any(|k| k.get("pivot").is_some()));
+            let pivot_frames: Vec<u32> = s
+                .get("keys")
+                .and_then(Value::as_array)
+                .map(|ks| {
+                    ks.iter()
+                        .filter(|k| k.get("pivot").is_some())
+                        .map(|k| uint(k, "frame").unwrap_or(0) as u32)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let has_pivot = !pivot_frames.is_empty();
+            let pivot_from = pivot_frames.into_iter().min().unwrap_or(0);
             Slice {
                 name: s.get("name").and_then(Value::as_str).unwrap_or("Slice").to_string(),
                 nine_patch,
                 has_pivot,
+                pivot_from,
                 keys,
                 user: UserData {
                     color: s.get("color").and_then(Value::as_str).and_then(parse_color),
