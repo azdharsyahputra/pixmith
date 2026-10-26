@@ -175,7 +175,7 @@ user stops it).
 
 - `app.sprite`: the same as the global `sprite` (`nil` without a document).
 - `app.isUIAvailable`: boolean.
-- `app.fgColor`, `app.bgColor`: `0xRRGGBBAA`, read and write. A write is sent to the front end as `app.set`.
+- `app.fgColor`, `app.bgColor`: `Color` objects when read (the front end reports them as `0xRRGGBBAA`); a write takes a `Color` or an integer. A write is sent to the front end as `app.set`.
 - `app.apiVersion` becomes 3.
 
 ---

@@ -255,6 +255,17 @@ fn map_cels(s: &mut Sprite, layer_ok: impl Fn(usize) -> bool, mut f: impl FnMut(
             let out = f(i % w, i / w, [px[0], px[1], px[2], px[3]]);
             px.copy_from_slice(&out);
         }
+        // The part beyond the canvas follows. Coordinates only matter modulo a dither matrix (at most 8).
+        if let Some(o) = c.outside.as_mut() {
+            let o = Arc::make_mut(o);
+            let ow = o.w as usize;
+            for (i, px) in o.rgba.chunks_exact_mut(4).enumerate() {
+                let (x, y) =
+                    ((o.x as i64 + (i % ow) as i64).rem_euclid(8), (o.y as i64 + (i / ow) as i64).rem_euclid(8));
+                let out = f(x as usize, y as usize, [px[0], px[1], px[2], px[3]]);
+                px.copy_from_slice(&out);
+            }
+        }
     });
     // Tile images follow (positions are tile-local); this also re-renders tilemap cels.
     if !s.tilesets.is_empty() {
@@ -656,6 +667,14 @@ pub fn set_palette_entry(s: &mut Sprite, index: usize, c: [u8; 4]) -> bool {
                         px.copy_from_slice(&c);
                     }
                 }
+                // Pixels beyond the canvas carry no remembered indices and follow by color.
+                if let Some(o) = cel.outside.as_mut() {
+                    for px in Arc::make_mut(o).rgba.chunks_exact_mut(4) {
+                        if px[..4] == old {
+                            px.copy_from_slice(&c);
+                        }
+                    }
+                }
             },
         );
         // Tile images carry no remembered indices, so they follow by color.
@@ -676,7 +695,7 @@ pub fn palette_from_sprite(s: &Sprite, max: usize) -> Vec<[u8; 4]> {
         if !seen.insert(Arc::as_ptr(cel)) {
             continue;
         }
-        for p in cel.pixels.chunks_exact(4) {
+        for p in cel.pixels.chunks_exact(4).chain(cel.outside.iter().flat_map(|o| o.rgba.chunks_exact(4))) {
             if p[3] != 0 {
                 *counts.entry([p[0], p[1], p[2], p[3]]).or_insert(0) += 1;
             }

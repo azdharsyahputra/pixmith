@@ -4,7 +4,9 @@
 //! reference is in `docs/LUA_API.md`; this is the summary.
 //!
 //! Conventions: pixel coordinates and palette indices are 0-based; layers, frames, tags and
-//! lists are 1-based (as usual in Lua). Colors are integers `0xRRGGBBAA`. Handles
+//! lists are 1-based (as usual in Lua). Colors are `Color` objects or integers `0xRRGGBBAA`
+//! (Aseprite pixel values `0xAABBGGRR` where Aseprite uses them: `Color(n)`, `app.pixelColor`,
+//! `Image` pixels; see `color.rs`). Handles
 //! (`sprite.layers[i]`, `sprite.frames[i]`, `sprite.tags[i]`, `sprite:cel(l, f)`) refer to a
 //! position in the stack; after a call that deletes or moves layers, frames or tags, handles
 //! obtained earlier raise "stale handle" instead of silently pointing at something else.
@@ -64,29 +66,44 @@
 //! sprite.paletteSize, sprite:getPaletteColor(i), sprite:setPaletteColor(i, color), sprite:addPaletteColor(color)
 //!
 //! app.alert(msg), app.undoLabel(text), app.blend.Multiply ..., app.direction.PingPong ..., print(...)
-//! app.version, app.apiVersion, app.activeLayer / app.activeFrame (read, or assign to select them)
+//! app.version, app.apiVersion, app.activeLayer / app.activeFrame (handles; assign to select them)
 //! color.rgba(r, g, b [, a]), color.split(c) -> r, g, b, a
+//!
+//! -- Aseprite compatibility (one file each): color.rs Color / app.pixelColor, sprites.rs Sprite(...) / app.open /
+//! -- app.sprites / saveAs / close, fs.rs io / os / app.fs, access.rs the permission questions, commands.rs
+//! -- app.command / app.transaction / Version / enumerations, palettes.rs Palette
 //! ```
 //!
 //! The whole run is one undo step (sprite and selection), and a script that fails leaves the
 //! document untouched. In Indexed and Grayscale sprites every cel the script changed is snapped
-//! to the color mode when the run ends. The sandbox has only the base, table, string, utf8, math
-//! and coroutine libraries (no `os`, `io`, `package`, `debug`, `dofile`, `loadfile`; `load`
-//! accepts text only; the one file access is `Image{ fromFile = }`, which reads a PNG by absolute path). An instruction budget, a wall-clock limit and a memory limit stop runaway
-//! scripts. A single pathological string pattern match is one VM instruction and cannot be
+//! to the color mode when the run ends. The sandbox has the base, table, string, utf8, math and
+//! coroutine libraries, plus `io`, `os`, `dofile`, `loadfile` and `app.fs`, which ask the front end
+//! before touching a path or running a program (docs/LUA_HOST_API.md); there is no `package`,
+//! `debug` or `require`, and `load` accepts text only. An instruction budget, a wall-clock limit
+//! (not counting time spent in a permission dialog) and a memory limit stop runaway scripts. A single pathological string pattern match is one VM instruction and cannot be
 //! interrupted.
 
 use crate::document::color_mode;
 use crate::document::{Editor, Sprite};
 use crate::paint::selection::Selection;
+pub mod access;
+mod color;
+mod commands;
+#[cfg(test)]
+mod compat_tests;
 mod dialog;
 mod events;
+mod fs;
 mod geometry;
 pub mod host;
 mod image;
+mod palettes;
 mod plugins;
 #[cfg(test)]
 mod session_tests;
+mod sprites;
+
+pub use sprites::{ActiveDoc, NewDocument};
 
 use mlua::chunk::ChunkMode;
 use mlua::{
@@ -172,6 +189,49 @@ pub struct Outcome {
     pub select: Option<(usize, usize)>,
     /// The error that stopped the script, if any (the document is then unchanged).
     pub error: Option<String>,
+    /// Documents the script created (`Sprite(...)`) or opened (`app.open`), in creation order, closed ones
+    /// removed; empty when the script failed. The front end opens them as tabs.
+    pub new_documents: Vec<NewDocument>,
+    /// Which document is active after the run (see `docs/LUA_HOST_API.md`).
+    pub active: ActiveDoc,
+    /// The script closed the document it ran on (`sprite:close()`); the front end closes the tab.
+    pub close_original: bool,
+    /// The script saved the document it ran on with `sprite:saveAs(path)` to a document format: its new file.
+    pub original_path: Option<std::path::PathBuf>,
+    /// ... and the document has not changed since, so the front end can treat it as saved.
+    pub original_saved: bool,
+}
+
+impl Outcome {
+    fn failed(messages: Vec<String>, error: String) -> Outcome {
+        Outcome {
+            messages,
+            select: None,
+            error: Some(error),
+            new_documents: Vec::new(),
+            active: ActiveDoc::Unchanged,
+            close_original: false,
+            original_path: None,
+            original_saved: false,
+        }
+    }
+}
+
+/// Settings of one run besides the budgets.
+#[derive(Clone, Debug)]
+pub struct RunConfig {
+    /// Names the script in permission requests; "always allow" is remembered per name.
+    pub script_name: String,
+    /// The file of the document the script runs on (`sprite.filename`).
+    pub doc_path: Option<std::path::PathBuf>,
+    /// Path prefixes this run may read and write without asking (besides `access::set_allowed_paths`).
+    pub allowed_paths: Vec<std::path::PathBuf>,
+}
+
+impl Default for RunConfig {
+    fn default() -> Self {
+        RunConfig { script_name: "script".into(), doc_path: None, allowed_paths: Vec::new() }
+    }
 }
 
 struct Ctx {
@@ -193,6 +253,15 @@ struct Ctx {
     has_doc: Cell<bool>,
     /// Bytes held by free-standing script images (see `image.rs`); they live outside the Lua heap.
     image_bytes: Cell<usize>,
+    /// For a document the script created or opened: the editor `ed` points into.
+    #[allow(dead_code)]
+    owned: Option<Box<Editor>>,
+    /// State shared by all documents of the run (see `sprites.rs`).
+    shared: Rc<sprites::Shared>,
+    /// This document's file and open/closed state.
+    doc: sprites::Doc,
+    /// What `app.command.Undo` / `Redo` step through (see `commands.rs`).
+    undo: commands::UndoLog,
 }
 
 impl Ctx {
@@ -200,6 +269,10 @@ impl Ctx {
     fn new(ed: &mut Editor) -> Ctx {
         Ctx {
             ed: ed as *mut Editor,
+            owned: None,
+            shared: sprites::Shared::new(),
+            doc: sprites::Doc::new(true, None),
+            undo: Default::default(),
             messages: RefCell::new(Vec::new()),
             label: RefCell::new(None),
             layer: Cell::new(0),
@@ -210,6 +283,39 @@ impl Ctx {
             rt: RefCell::new(None),
             has_doc: Cell::new(true),
             image_bytes: Cell::new(0),
+        }
+    }
+
+    /// A document the script creates or opens: its own editor, sharing the run's state with `parent`.
+    fn child(parent: &Rc<Ctx>, sprite: Sprite, path: Option<std::path::PathBuf>) -> Rc<Ctx> {
+        let mut ed = Box::new(Editor::new(sprite));
+        let ptr: *mut Editor = &mut *ed;
+        let ctx = Rc::new(Ctx {
+            ed: ptr,
+            owned: Some(ed),
+            shared: parent.shared.clone(),
+            doc: sprites::Doc::new(false, path),
+            undo: Default::default(),
+            messages: RefCell::new(Vec::new()),
+            label: RefCell::new(None),
+            layer: Cell::new(0),
+            frame: Cell::new(0),
+            selected: Cell::new(false),
+            epoch: Cell::new(0),
+            mask: RefCell::new(None),
+            rt: RefCell::new(parent.rt.borrow().clone()),
+            has_doc: Cell::new(true),
+            image_bytes: Cell::new(0),
+        });
+        ctx.undo.reset(ctx.sprite().clone(), None);
+        ctx
+    }
+
+    /// Time spent waiting for the front end (a permission dialog) does not count toward the time limit.
+    fn add_wait(&self, d: Duration) {
+        self.shared.waited.set(self.shared.waited.get() + d);
+        if let Some(rt) = self.rt.borrow().as_ref() {
+            rt.add_wait(d);
         }
     }
 
@@ -251,9 +357,18 @@ impl Ctx {
             h.get()?;
             return Ok(h.1);
         }
+        if let Value::String(name) = v {
+            let name = name.to_string_lossy();
+            return self
+                .sprite()
+                .layers
+                .iter()
+                .position(|l| l.name == name)
+                .ok_or_else(|| Error::runtime(format!("no layer is named \"{name}\"")));
+        }
         match geometry::int_of(v) {
             Some(i) => self.layer_index(Some(i)),
-            None => Err(Error::runtime("expected a layer or a layer number")),
+            None => Err(Error::runtime("expected a layer, a layer number or a layer name")),
         }
     }
 
@@ -498,13 +613,8 @@ impl UserData for SpriteH {
         f.add_field_method_get("paletteSize", |_, t| Ok(t.0.sprite().palette.len()));
         f.add_field_method_get("activeLayer", |_, t| Ok(t.0.layer.get() + 1));
         f.add_field_method_get("activeFrame", |_, t| Ok(t.0.frame.get() + 1));
-        f.add_field_method_get("colorMode", |_, t| {
-            Ok(match t.0.sprite().color_mode {
-                color_mode::ColorMode::Rgba => "rgba",
-                color_mode::ColorMode::Grayscale => "grayscale",
-                color_mode::ColorMode::Indexed => "indexed",
-            })
-        });
+        sprites::add_fields(f);
+        palettes::add_fields(f);
         f.add_field_method_get("layers", |lua, t| {
             let n = t.0.sprite().layers.len();
             lua.create_sequence_from((0..n).map(|i| LayerH::new(&t.0, i)))
@@ -552,6 +662,9 @@ impl UserData for SpriteH {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
+        sprites::add_methods(m);
+        commands::add_methods(m);
+        palettes::add_methods(m);
         // MARK: Pixels
         // getPixel(x, y [, layer [, frame]]) or getPixel(point [, layer [, frame]])
         m.add_method("getPixel", |_, t, mut a: MultiValue| {
@@ -567,10 +680,9 @@ impl UserData for SpriteH {
         // setPixel(x, y, color [, layer [, frame]]) or setPixel(point, color [, layer [, frame]])
         m.add_method("setPixel", |_, t, mut a: MultiValue| {
             let p = geometry::take_point(&mut a, "setPixel")?;
-            let color = geometry::take_opt_int(&mut a, "setPixel color")?
-                .ok_or_else(|| Error::runtime("setPixel needs a color"))?;
+            let c = color::arg(&a.pop_front().unwrap_or(Value::Nil))
+                .map_err(|_| Error::runtime("setPixel needs a color (a Color or a 0xRRGGBBAA number)"))?;
             let (l, f) = take_site(&t.0, &mut a)?;
-            let c = color_arg(color)?;
             let s = t.0.sprite();
             if s.layers[l].is_group() {
                 return Err(Error::runtime("cannot draw on a group layer"));
@@ -653,14 +765,14 @@ impl UserData for SpriteH {
                 )));
             }
             let mut colors = Vec::with_capacity(count);
-            for v in pixels.sequence_values::<i64>() {
-                colors.push(color_arg(v?)?);
+            for v in pixels.sequence_values::<color::PxColor>() {
+                colors.push(v?.0);
             }
             write_rect(s, layer, f, rect, &mut colors.into_iter());
             Ok(())
         });
-        m.add_method("fillSelection", |_, t, (color, layer, frame): (i64, Option<i64>, Option<i64>)| {
-            let c = color_arg(color)?;
+        m.add_method("fillSelection", |_, t, (color, layer, frame): (color::PxColor, Option<i64>, Option<i64>)| {
+            let c = color.0;
             let l = t.0.drawable_layer(layer)?;
             let f = t.0.frame_index(frame)?;
             let Some(mask) = t.0.mask() else { return Ok(0usize) };
@@ -709,8 +821,8 @@ impl UserData for SpriteH {
             }
             Ok(LayerH::new(&t.0, i))
         });
-        m.add_method("deleteLayer", |_, t, i: i64| {
-            let l = t.0.layer_index(Some(i))?;
+        m.add_method("deleteLayer", |_, t, v: Value| {
+            let l = t.0.layer_of(&v)?;
             if !t.0.sprite().remove_layer(l) {
                 return Err(Error::runtime("the last drawable layer cannot be deleted"));
             }
@@ -757,15 +869,44 @@ impl UserData for SpriteH {
         });
 
         // MARK: Frames
-        m.add_method("newFrame", |_, t, copy: Option<bool>| {
+        // newFrame([copy]) appends an empty frame (a copy of the last one with `true`); newFrame(frame) inserts a
+        // copy of that frame after it, as in Aseprite.
+        m.add_method("newFrame", |_, t, arg: Option<Value>| {
             let s = t.0.sprite();
             if s.frame_count() >= MAX_SCRIPT_FRAMES || !s.cels_fit_budget(s.width as u64, s.height as u64) {
                 return Err(Error::runtime(format!(
                     "too many frames (at most {MAX_SCRIPT_FRAMES}) or not enough memory"
                 )));
             }
-            let last = s.frame_count() - 1;
-            let i = s.add_frame(last, copy.unwrap_or(false));
+            let (after, copy) = match arg {
+                None | Some(Value::Nil) => (s.frame_count() - 1, false),
+                Some(Value::Boolean(b)) => (s.frame_count() - 1, b),
+                Some(v) => (t.0.frame_of(&v)?, true),
+            };
+            let i = s.add_frame(after, copy);
+            Ok(FrameH::new(&t.0, i))
+        });
+        // newEmptyFrame([frameNumber]): an empty frame inserted at that position (default: the end).
+        m.add_method("newEmptyFrame", |_, t, arg: Option<Value>| {
+            let s = t.0.sprite();
+            if s.frame_count() >= MAX_SCRIPT_FRAMES || !s.cels_fit_budget(s.width as u64, s.height as u64) {
+                return Err(Error::runtime(format!(
+                    "too many frames (at most {MAX_SCRIPT_FRAMES}) or not enough memory"
+                )));
+            }
+            let at = match arg {
+                None | Some(Value::Nil) => s.frame_count(),
+                Some(v) => t.0.frame_of(&v)?,
+            };
+            let i = if at == 0 {
+                // Before the first frame: insert after it and swap in place by moving it to the front.
+                let n = s.add_frame(0, false);
+                s.move_frame(n, 0);
+                0
+            } else {
+                s.add_frame(at - 1, false)
+            };
+            t.0.invalidate_handles();
             Ok(FrameH::new(&t.0, i))
         });
         m.add_method("duplicateFrame", |_, t, i: i64| {
@@ -774,8 +915,8 @@ impl UserData for SpriteH {
             t.0.invalidate_handles();
             Ok(FrameH::new(&t.0, n))
         });
-        m.add_method("deleteFrame", |_, t, i: i64| {
-            let f = t.0.frame_index(Some(i))?;
+        m.add_method("deleteFrame", |_, t, v: Value| {
+            let f = t.0.frame_of(&v)?;
             if !t.0.sprite().remove_frame(f) {
                 return Err(Error::runtime("the last frame cannot be deleted"));
             }
@@ -826,18 +967,61 @@ impl UserData for SpriteH {
             s.extra.slices.push(crate::document::slices::Slice { name, keys: vec![key], ..Default::default() });
             Ok(SliceH::new(&t.0, s.extra.slices.len() - 1))
         });
-        m.add_method("deleteSlice", |_, t, i: i64| {
+        m.add_method("deleteSlice", |_, t, v: Value| {
             let n = t.0.sprite().extra.slices.len();
-            let i = usize::try_from(i - 1)
-                .ok()
-                .filter(|&i| i < n)
-                .ok_or_else(|| Error::runtime(format!("slice {i} does not exist (1..{n})")))?;
+            let i = match &v {
+                Value::UserData(u) => {
+                    let h = u
+                        .borrow::<SliceH>()
+                        .map_err(|_| Error::runtime("expected a slice, a slice number or a slice name"))?;
+                    h.1
+                }
+                Value::String(name) => {
+                    let name = name.to_string_lossy();
+                    t.0.sprite()
+                        .extra
+                        .slices
+                        .iter()
+                        .position(|x| x.name == name)
+                        .ok_or_else(|| Error::runtime(format!("no slice is named \"{name}\"")))?
+                }
+                other => {
+                    let i = geometry::int_of(other)
+                        .ok_or_else(|| Error::runtime("expected a slice, a slice number or a slice name"))?;
+                    usize::try_from(i - 1)
+                        .ok()
+                        .filter(|&i| i < n)
+                        .ok_or_else(|| Error::runtime(format!("slice {i} does not exist (1..{n})")))?
+                }
+            };
+            if i >= n {
+                return Err(Error::runtime("slice does not exist"));
+            }
             t.0.sprite().extra.slices.remove(i);
             t.0.invalidate_handles();
             Ok(())
         });
-        m.add_method("deleteTag", |_, t, i: i64| {
-            let i = t.0.tag_index(i)?;
+        m.add_method("deleteTag", |_, t, v: Value| {
+            let i = match &v {
+                Value::UserData(u) => {
+                    let h =
+                        u.borrow::<TagH>().map_err(|_| Error::runtime("expected a tag, a tag number or a tag name"))?;
+                    h.get()?;
+                    h.1
+                }
+                Value::String(name) => {
+                    let name = name.to_string_lossy();
+                    t.0.sprite()
+                        .tags
+                        .iter()
+                        .position(|x| x.name == name)
+                        .ok_or_else(|| Error::runtime(format!("no tag is named \"{name}\"")))?
+                }
+                other => t.0.tag_index(
+                    geometry::int_of(other)
+                        .ok_or_else(|| Error::runtime("expected a tag, a tag number or a tag name"))?,
+                )?,
+            };
             t.0.sprite().remove_tag(i);
             t.0.invalidate_handles();
             Ok(())
@@ -877,7 +1061,7 @@ impl UserData for SpriteH {
             t.0.sprite().clear_cels((l, l), (f, f));
             Ok(())
         });
-        // newCel(layer, frame [, image [, position]]): puts the image (RGBA, copied; clipped to the canvas) into
+        // newCel(layer, frame [, image [, position]]): puts the image (RGBA, copied; kept whole even beyond the canvas) into
         // the cel with its top-left at `position` (default 0,0), replacing the cel, in one call. Without an
         // image the cel is empty. `layer` and `frame` are numbers or handles.
         m.add_method("newCel", |_, t, (layer, frame, img, pos): (Value, Value, Option<Value>, Option<Value>)| {
@@ -910,8 +1094,8 @@ impl UserData for SpriteH {
                 .map(|c| u32::from_be_bytes(*c) as i64)
                 .ok_or_else(|| Error::runtime(format!("palette index {i} does not exist (0..{})", s.palette.len())))
         });
-        m.add_method("setPaletteColor", |_, t, (i, color): (i64, i64)| {
-            let c = color_arg(color)?;
+        m.add_method("setPaletteColor", |_, t, (i, color): (i64, color::PxColor)| {
+            let c = color.0;
             let s = t.0.sprite();
             let idx = usize::try_from(i).unwrap_or(usize::MAX);
             if idx == s.palette.len() && idx < 256 {
@@ -923,8 +1107,8 @@ impl UserData for SpriteH {
                 Err(Error::runtime(format!("palette index {i} does not exist (0..{})", s.palette.len())))
             }
         });
-        m.add_method("addPaletteColor", |_, t, color: i64| {
-            let c = color_arg(color)?;
+        m.add_method("addPaletteColor", |_, t, color: color::PxColor| {
+            let c = color.0;
             let s = t.0.sprite();
             if let Some(i) = s.palette.iter().position(|&p| p == c) {
                 return Ok(i);
@@ -965,14 +1149,24 @@ impl UserData for LayerH {
             t.get()?.opacity = v.clamp(0, 255) as u8;
             Ok(())
         });
-        f.add_field_method_get("blendMode", |_, t| Ok(t.get()?.blend_mode));
+        // Aseprite's BlendMode numbering (see `commands.rs`).
+        f.add_field_method_get("blendMode", |_, t| Ok(commands::blend_to_aseprite(t.get()?.blend_mode)));
         f.add_field_method_set("blendMode", |_, t, v: i64| {
-            if !(0..=18).contains(&v) {
-                return Err(Error::runtime(format!("blend mode {v} is not in 0..18")));
-            }
-            t.get()?.blend_mode = v as u16;
+            t.get()?.blend_mode = commands::blend_from_aseprite(v)?;
             Ok(())
         });
+        f.add_field_method_get("stackIndex", |_, t| {
+            t.get()?;
+            Ok(t.1 + 1)
+        });
+        f.add_field_method_get("isImage", |_, t| Ok(t.get()?.kind == 0));
+        f.add_field_method_get("isBackground", |_, t| Ok(t.get()?.flags & 8 != 0));
+        f.add_field_method_get("isEditable", |_, t| Ok(!t.get()?.is_locked()));
+        f.add_field_method_get("sprite", |_, t| {
+            t.get()?;
+            Ok(SpriteH(t.0.clone()))
+        });
+        add_user_data_fields(f, |t: &LayerH| UserDataH::new(&t.0, 1, t.1, 0));
         f.add_field_method_get("isGroup", |_, t| Ok(t.get()?.is_group()));
         f.add_field_method_get("isTilemap", |_, t| Ok(t.get()?.kind == crate::document::tilemap::KIND_TILEMAP));
         f.add_field_method_get("isReference", |_, t| Ok(t.get()?.is_reference()));
@@ -993,6 +1187,11 @@ impl UserData for LayerH {
         f.add_field_method_get("isVisible", |_, t| {
             t.get()?;
             Ok(t.0.sprite().is_layer_shown(t.1))
+        });
+        // Assigning sets the layer's own visibility (Aseprite's `layer.isVisible = false`).
+        f.add_field_method_set("isVisible", |_, t, v: bool| {
+            t.get()?.visible = v;
+            Ok(())
         });
         f.add_field_method_get("tileset", |_, t| {
             let l = t.get()?;
@@ -1025,6 +1224,13 @@ impl UserData for LayerH {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
+        m.add_meta_method(mlua::MetaMethod::Eq, |_, t, o: Value| {
+            Ok(match o {
+                Value::UserData(u) => u.borrow::<LayerH>().is_ok_and(|o| Rc::ptr_eq(&o.0, &t.0) && o.1 == t.1),
+                _ => false,
+            })
+        });
+        m.add_meta_method(mlua::MetaMethod::ToString, |_, t, ()| Ok(format!("Layer(\"{}\")", t.get()?.name)));
         // layer:cel(frame) -> the cel, or nil when the layer has no image there (as in Aseprite).
         m.add_method("cel", |_, t, frame: Value| {
             t.get()?;
@@ -1114,6 +1320,21 @@ impl UserData for FrameH {
             Ok(())
         });
         f.add_field_method_get("index", |_, t| Ok(t.check()? + 1));
+        f.add_field_method_get("frameNumber", |_, t| Ok(t.check()? + 1));
+        f.add_field_method_get("sprite", |_, t| {
+            t.check()?;
+            Ok(SpriteH(t.0.clone()))
+        });
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
+        m.add_meta_method(mlua::MetaMethod::Eq, |_, t, o: Value| {
+            Ok(match o {
+                Value::UserData(u) => u.borrow::<FrameH>().is_ok_and(|o| Rc::ptr_eq(&o.0, &t.0) && o.1 == t.1),
+                _ => false,
+            })
+        });
+        m.add_meta_method(mlua::MetaMethod::ToString, |_, t, ()| Ok(format!("Frame({})", t.1 + 1)));
     }
 }
 
@@ -1155,12 +1376,40 @@ impl UserData for TagH {
         });
         f.add_field_method_get("color", |_, t| {
             let c = t.get()?.color;
-            Ok(u32::from_be_bytes([c[0], c[1], c[2], 255]) as i64)
+            Ok(color::ColorH::from_rgba(&t.0, [c[0], c[1], c[2], 255]))
         });
-        f.add_field_method_set("color", |_, t, v: i64| {
-            let c = color_arg(v)?;
+        f.add_field_method_set("color", |_, t, v: color::PxColor| {
+            let c = v.0;
             t.get()?.color = [c[0], c[1], c[2]];
             Ok(())
+        });
+        f.add_field_method_get("aniDir", |_, t| Ok(t.get()?.direction));
+        f.add_field_method_set("aniDir", |_, t, v: i64| {
+            if !(0..=3).contains(&v) {
+                return Err(Error::runtime(format!("direction {v} is not an AniDir value")));
+            }
+            t.get()?.direction = v as u8;
+            Ok(())
+        });
+        f.add_field_method_get("fromFrame", |_, t| {
+            let from = t.get()?.from as usize;
+            Ok(FrameH::new(&t.0, from))
+        });
+        f.add_field_method_get("toFrame", |_, t| {
+            let to = t.get()?.to as usize;
+            Ok(FrameH::new(&t.0, to))
+        });
+        f.add_field_method_get("frames", |_, t| {
+            let tag = t.get()?;
+            Ok(tag.to as usize - tag.from as usize + 1)
+        });
+        f.add_field_method_get("data", |_, t| {
+            t.get()?;
+            Ok(UserDataH::new(&t.0, 3, t.1, 0).read()?.text.unwrap_or_default())
+        });
+        f.add_field_method_set("data", |_, t, v: Option<String>| {
+            t.get()?;
+            UserDataH::new(&t.0, 3, t.1, 0).write(|u| u.text = v.filter(|s| !s.is_empty()))
         });
         f.add_field_method_get("userData", |_, t| {
             t.get()?;
@@ -1217,7 +1466,9 @@ impl UserData for CelH {
         });
         f.add_field_method_get("isEmpty", |_, t| {
             t.check()?;
-            Ok(t.0.sprite().cels[t.2][t.1].as_ref().is_none_or(|c| c.pixels.chunks_exact(4).all(|p| p[3] == 0)))
+            Ok(t.0.sprite().cels[t.2][t.1]
+                .as_ref()
+                .is_none_or(|c| c.outside.is_none() && c.pixels.chunks_exact(4).all(|p| p[3] == 0)))
         });
         f.add_field_method_get("linked", |_, t| {
             t.check()?;
@@ -1232,10 +1483,22 @@ impl UserData for CelH {
             t.check()?;
             Ok(UserDataH::new(&t.0, 2, t.2, t.1))
         });
-        f.add_field_method_get("layer", |_, t| Ok(t.1 + 1));
-        f.add_field_method_get("frame", |_, t| Ok(t.2 + 1));
+        // Objects as in Aseprite (`cel.frame.frameNumber`); `cel.frameNumber` is the plain number.
+        f.add_field_method_get("layer", |_, t| {
+            t.check()?;
+            Ok(LayerH::new(&t.0, t.1))
+        });
+        f.add_field_method_get("frame", |_, t| {
+            t.check()?;
+            Ok(FrameH::new(&t.0, t.2))
+        });
         f.add_field_method_get("frameNumber", |_, t| Ok(t.2 + 1));
-        // The box around the cel's non-transparent pixels (Pixmith cels are canvas-sized; see `image.rs`).
+        f.add_field_method_get("sprite", |_, t| {
+            t.check()?;
+            Ok(SpriteH(t.0.clone()))
+        });
+        add_user_data_fields(f, |t: &CelH| UserDataH::new(&t.0, 2, t.2, t.1));
+        // The box around all of the cel's non-transparent pixels, also those beyond the canvas edges.
         f.add_field_method_get("bounds", |_, t| {
             t.check()?;
             Ok(image::cel_rect(t.0.sprite(), t.1, t.2))
@@ -1446,13 +1709,29 @@ impl UserDataH {
     }
 }
 
+/// Aseprite's `layer.data` (string) and `layer.color` (Color) shortcuts for the user data of `T`.
+fn add_user_data_fields<T: 'static, F: UserDataFields<T>>(f: &mut F, make: fn(&T) -> UserDataH) {
+    f.add_field_method_get("data", move |_, t| Ok(make(t).read()?.text.unwrap_or_default()));
+    f.add_field_method_set("data", move |_, t, v: Option<String>| {
+        make(t).write(|u| u.text = v.filter(|s| !s.is_empty()))
+    });
+    f.add_field_method_get("color", move |_, t| {
+        let u = make(t);
+        Ok(color::ColorH::from_rgba(&u.ctx, u.read()?.color.unwrap_or([0, 0, 0, 0])))
+    });
+    f.add_field_method_set("color", move |_, t, v: Option<color::PxColor>| {
+        let c = v.map(|c| c.0);
+        make(t).write(|u| u.color = c)
+    });
+}
+
 impl UserData for UserDataH {
     fn add_fields<F: UserDataFields<Self>>(f: &mut F) {
         f.add_field_method_get("text", |_, t| Ok(t.read()?.text));
         f.add_field_method_set("text", |_, t, v: Option<String>| t.write(|u| u.text = v.filter(|s| !s.is_empty())));
-        f.add_field_method_get("color", |_, t| Ok(t.read()?.color.map(|c| pack(&c))));
-        f.add_field_method_set("color", |_, t, v: Option<i64>| {
-            let c = v.map(color_arg).transpose()?;
+        f.add_field_method_get("color", |_, t| Ok(t.read()?.color.map(|c| color::ColorH::from_rgba(&t.ctx, c))));
+        f.add_field_method_set("color", |_, t, v: Option<color::PxColor>| {
+            let c = v.map(|c| c.0);
             t.write(|u| u.color = c)
         });
     }
@@ -1499,8 +1778,8 @@ impl TilesetH {
         }
         let mut snap = Snap::new(s);
         let mut data = Vec::with_capacity(tw * th * 4);
-        for v in pixels.sequence_values::<i64>() {
-            data.extend(snap.get(color_arg(v?)?));
+        for v in pixels.sequence_values::<color::PxColor>() {
+            data.extend(snap.get(v?.0));
         }
         self.get()?.tiles[i] = Arc::new(data);
         crate::document::tilemap::refresh_tileset_users(s, self.1);
@@ -1774,9 +2053,8 @@ const BLEND_NAMES: [&str; 19] = [
 
 fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
     let g = lua.globals();
-    // Nothing that touches files; `load` is limited to text chunks.
-    g.set("dofile", Value::Nil)?;
-    g.set("loadfile", Value::Nil)?;
+    // `dofile` / `loadfile` and the file functions of `io` / `os` ask first (see `fs.rs`); `load` is limited
+    // to text chunks.
     let load: Function = g.get("load")?;
     g.set(
         "load",
@@ -1848,9 +2126,10 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
             Ok(())
         })?,
     )?;
+    // Blend modes and tag directions use Aseprite's numbering (BlendMode.* / AniDir.* are the same tables).
     let blend = lua.create_table()?;
     for (i, n) in BLEND_NAMES.iter().enumerate() {
-        blend.set(*n, i)?;
+        blend.set(*n, commands::blend_to_aseprite(i as u16))?;
     }
     app.set("blend", blend)?;
     let direction = lua.create_table()?;
@@ -1858,25 +2137,19 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
         direction.set(*n, i)?;
     }
     app.set("direction", direction)?;
-    app.set("version", env!("CARGO_PKG_VERSION"))?;
-    // Bumped when the API grows, so scripts can check `app.apiVersion >= 2`.
-    app.set("apiVersion", 2)?;
+    // Bumped when the API grows, so scripts can check `app.apiVersion >= 2`. `app.version` is a Version object.
+    app.set("apiVersion", commands::API_VERSION)?;
 
-    // `app.activeLayer` / `app.activeFrame` read and set the defaults of the pixel calls, and ask
-    // the editor to select that layer and frame when the run ends.
+    // `app.activeLayer` / `app.activeFrame` / `app.activeSprite` and the other properties that depend on the
+    // documents of the run are served by `sprites::app_get` / `app_set`; assigning `app.activeLayer` or
+    // `app.activeFrame` also asks the editor to select that layer and frame when the run ends.
     let meta = lua.create_table()?;
     let c = ctx.clone();
     meta.set(
         "__index",
-        lua.create_function(move |_, (_t, key): (Value, Value)| {
+        lua.create_function(move |lua, (_t, key): (Value, Value)| {
             let name = if let Value::String(s) = &key { s.to_string_lossy() } else { String::new() };
-            Ok(match name.as_str() {
-                "activeLayer" => Some(c.layer.get() + 1),
-                "activeFrame" => Some(c.frame.get() + 1),
-                "fgColor" => Some(c.colors().0 as usize),
-                "bgColor" => Some(c.colors().1 as usize),
-                _ => None,
-            })
+            Ok(sprites::app_get(lua, &c, &name)?.unwrap_or(Value::Nil))
         })?,
     )?;
     let c = ctx.clone();
@@ -1884,27 +2157,12 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
         "__newindex",
         lua.create_function(move |_, (t, key, value): (Table, Value, Value)| {
             let name = if let Value::String(s) = &key { s.to_string_lossy() } else { String::new() };
-            let index = |v: &Value| match v {
-                Value::Integer(i) => Ok(*i),
-                Value::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => Ok(*n as i64),
-                _ => Err(Error::runtime("expected a layer or frame number")),
-            };
+            if sprites::app_set(&c, &name, &value)? {
+                return Ok(());
+            }
             match name.as_str() {
-                "activeLayer" => {
-                    let l = c.layer_index(Some(index(&value)?))?;
-                    if c.sprite().layers[l].is_group() {
-                        return Err(Error::runtime("a group cannot be the active layer"));
-                    }
-                    c.layer.set(l);
-                    c.selected.set(true);
-                }
-                "activeFrame" => {
-                    c.frame.set(c.frame_index(Some(index(&value)?))?);
-                    c.selected.set(true);
-                }
                 "fgColor" | "bgColor" => {
-                    let col = color_arg(index(&value)?)?;
-                    let col = u32::from_be_bytes(col);
+                    let col = u32::from_be_bytes(color::arg(&value)?);
                     if let Some(rt) = c.rt.borrow().as_ref() {
                         if name == "fgColor" {
                             rt.emit_app_set(Some(col), None);
@@ -1921,27 +2179,16 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
     app.set_metatable(Some(meta))?;
     g.set("app", app)?;
 
-    let color = lua.create_table()?;
-    color.set(
-        "rgba",
-        lua.create_function(|_, (r, g, b, a): (i64, i64, i64, Option<i64>)| {
-            let ch = |v: i64| v.clamp(0, 255) as u32;
-            Ok((ch(r) << 24 | ch(g) << 16 | ch(b) << 8 | ch(a.unwrap_or(255))) as i64)
-        })?,
-    )?;
-    color.set(
-        "split",
-        lua.create_function(|_, c: i64| {
-            let [r, g, b, a] = color_arg(c)?;
-            Ok((r, g, b, a))
-        })?,
-    )?;
-    g.set("color", color)?;
+    g.set("color", lua.create_table()?)?;
 
     g.set("sprite", SpriteH(ctx.clone()))?;
-    g.get::<Table>("app")?.raw_set("sprite", g.get::<Value>("sprite")?)?;
     geometry::install(lua)?;
     image::install(lua, ctx)?;
+    color::install(lua, ctx)?;
+    sprites::install(lua, ctx)?;
+    palettes::install(lua, ctx)?;
+    fs::install(lua, ctx)?;
+    commands::install(lua, ctx)?;
     host::install(lua, ctx)?;
     Ok(())
 }
@@ -1967,22 +2214,30 @@ pub fn run_with(
     limits: Limits,
     cancel: &'static AtomicBool,
 ) -> Outcome {
+    run_in(e, source, active, limits, cancel, &RunConfig::default())
+}
+
+/// Like `run_with`, with the script's name, the document's file and run-specific permissions.
+pub fn run_in(
+    e: &mut Editor,
+    source: &str,
+    active: (usize, usize),
+    limits: Limits,
+    cancel: &'static AtomicBool,
+    cfg: &RunConfig,
+) -> Outcome {
     let before = e.sprite.clone();
     let (w, h) = (e.sprite.width, e.sprite.height);
     let old_mask = e.sel.mask.clone().filter(|m| m.w == w && m.h == h);
-    let ctx = Rc::new(Ctx {
-        ed: e as *mut Editor,
-        messages: RefCell::new(Vec::new()),
-        label: RefCell::new(None),
-        layer: Cell::new(active.0.min(e.sprite.layers.len() - 1)),
-        frame: Cell::new(active.1.min(e.sprite.frame_count() - 1)),
-        selected: Cell::new(false),
-        epoch: Cell::new(0),
-        mask: RefCell::new(old_mask.clone()),
-        rt: RefCell::new(None),
-        has_doc: Cell::new(true),
-        image_bytes: Cell::new(0),
-    });
+    let ctx = Rc::new(Ctx::new(e));
+    ctx.layer.set(active.0.min(e.sprite.layers.len() - 1));
+    ctx.frame.set(active.1.min(e.sprite.frame_count() - 1));
+    *ctx.mask.borrow_mut() = old_mask.clone();
+    *ctx.shared.original.borrow_mut() = Rc::downgrade(&ctx);
+    *ctx.doc.path.borrow_mut() = cfg.doc_path.clone();
+    *ctx.shared.access.script.borrow_mut() = cfg.script_name.clone();
+    *ctx.shared.access.extra.borrow_mut() = cfg.allowed_paths.clone();
+    ctx.undo.reset(before.clone(), old_mask.clone());
     let result = exec(&ctx, source, limits, cancel);
     let messages = ctx.messages.borrow().clone();
     let label = ctx.label.borrow().clone();
@@ -1996,25 +2251,40 @@ pub fn run_with(
         }
         (l, ctx.frame.get().min(s.frame_count() - 1))
     });
-    drop(ctx);
-    match result {
+    let outcome = match result {
         Ok(()) => {
             conform_changed_cels(&mut e.sprite, &before);
             e.sprite.flush_links();
-            if e.sprite != before || new_mask != old_mask {
+            let docs = sprites::finish(&ctx, true);
+            if ctx.shared.close_original.get() {
+                // The document is closed: nothing of it is committed.
+                e.sprite = before;
+            } else if e.sprite != before || new_mask != old_mask {
                 let after = std::mem::replace(&mut e.sprite, before);
                 e.checkpoint(); // records the old selection and sprite
                 e.sprite = after;
                 e.sel.mask = new_mask;
                 e.label_last(label.as_deref().unwrap_or("Script"));
             }
-            Outcome { messages, select, error: None }
+            Outcome {
+                messages,
+                select,
+                error: None,
+                new_documents: docs.new_documents,
+                active: docs.active,
+                close_original: docs.close_original,
+                original_path: docs.original_path,
+                original_saved: docs.original_saved,
+            }
         }
         Err(err) => {
             e.sprite = before;
-            Outcome { messages, select: None, error: Some(clean_error(&err)) }
+            sprites::finish(&ctx, false);
+            Outcome::failed(messages, clean_error(&err))
         }
-    }
+    };
+    drop(ctx);
+    outcome
 }
 
 /// Snaps the cels a script created or modified to the sprite's color mode (Indexed, Grayscale).
@@ -2040,7 +2310,8 @@ fn clean_error(e: &Error) -> String {
 
 /// A Lua state with the sandboxed standard libraries and the Pixmith API installed.
 fn new_sandbox(ctx: &Rc<Ctx>, memory: usize) -> LuaResult<Lua> {
-    let libs = StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH | StdLib::COROUTINE;
+    let libs =
+        StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH | StdLib::COROUTINE | StdLib::IO | StdLib::OS;
     let lua = Lua::new_with(libs, LuaOptions::default())?;
     lua.set_memory_limit(memory)?;
     setup(&lua, ctx)?;
@@ -2053,6 +2324,7 @@ fn exec(ctx: &Rc<Ctx>, source: &str, limits: Limits, cancel: &'static AtomicBool
     const STEP: u32 = 1000;
     let started = Instant::now();
     let executed = std::cell::Cell::new(0u64);
+    let shared = ctx.shared.clone();
     lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(STEP), move |_, _| {
         executed.set(executed.get() + STEP as u64);
         if cancel.load(Ordering::Relaxed) {
@@ -2061,7 +2333,7 @@ fn exec(ctx: &Rc<Ctx>, source: &str, limits: Limits, cancel: &'static AtomicBool
         if executed.get() > limits.instructions {
             return Err(Error::runtime("script stopped: instruction limit exceeded"));
         }
-        if started.elapsed() > limits.time {
+        if started.elapsed().saturating_sub(shared.waited.get()) > limits.time {
             return Err(Error::runtime("script stopped: time limit exceeded"));
         }
         Ok(VmState::Continue)
@@ -2124,6 +2396,18 @@ unsafe fn run_ffi_limits(
     limits: Limits,
     out: *mut *mut c_char,
 ) -> bool {
+    run_ffi_cfg(doc, source, active, limits, &RunConfig::default(), out)
+}
+
+unsafe fn run_ffi_cfg(
+    doc: *mut Editor,
+    source: *const c_char,
+    active: Option<(usize, usize)>,
+    limits: Limits,
+    cfg: &RunConfig,
+    out: *mut *mut c_char,
+) -> bool {
+    host::clear_sync_docs();
     if !out.is_null() {
         *out = std::ptr::null_mut();
     }
@@ -2131,7 +2415,8 @@ unsafe fn run_ffi_limits(
     e.dirty.mark_all();
     let src = CStr::from_ptr(source).to_string_lossy().into_owned();
     let active = active.unwrap_or_else(|| (e.sprite.layers.iter().rposition(|l| !l.is_group()).unwrap_or(0), 0));
-    let outcome = run_with(e, &src, active, limits, &CANCEL);
+    let mut outcome = run_in(e, &src, active, limits, &CANCEL, cfg);
+    host::store_sync_docs(&mut outcome);
     if !out.is_null() {
         let mut lines = outcome.messages.clone();
         if let Some((l, f)) = outcome.select {
@@ -2180,6 +2465,30 @@ pub unsafe extern "C" fn pixmith_run_script_at(
 ) -> bool {
     crate::ffi::guarded("pixmith_run_script_at", doc, || {
         run_ffi(doc, source, Some((layer as usize, frame as usize)), out_messages)
+    })
+}
+
+/// Like `pixmith_run_script_at`, with the script's name (shown in permission requests, and the key of "always allow";
+/// NULL = "script") and the file of the document (`sprite.filename`; may be NULL). Documents the script created or
+/// opened are available afterwards from `pixmith_script_outcome(0, 0)` and `pixmith_script_take_doc(0, 0, i)`.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_run_script_named(
+    doc: *mut Editor,
+    source: *const c_char,
+    layer: u32,
+    frame: u32,
+    script_name: *const c_char,
+    doc_path: *const c_char,
+    out_messages: *mut *mut c_char,
+) -> bool {
+    crate::ffi::guarded("pixmith_run_script_named", doc, || {
+        let text = |p: *const c_char| (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned());
+        let cfg = RunConfig {
+            script_name: text(script_name).unwrap_or_else(|| "script".into()),
+            doc_path: text(doc_path).map(std::path::PathBuf::from),
+            allowed_paths: Vec::new(),
+        };
+        run_ffi_cfg(doc, source, Some((layer as usize, frame as usize)), Limits::default(), &cfg, out_messages)
     })
 }
 
@@ -2309,9 +2618,16 @@ mod tests {
         let o = ok(
             &mut e,
             r#"
-            for _, name in ipairs({ "os", "io", "package", "debug", "dofile", "loadfile", "require" }) do
+            for _, name in ipairs({ "package", "debug", "require" }) do
               assert(_G[name] == nil, name .. " must not exist")
             end
+            -- io, os, dofile and loadfile exist but ask before touching anything (see the access tests).
+            assert(io.stdin == nil and os.exit and os.setlocale == nil)
+            assert(not pcall(io.open, "/etc/hosts"), "no permission handler: denied")
+            assert(not pcall(os.execute, "echo hi"))
+            assert(not pcall(os.remove, "/tmp/pixmith-never"))
+            assert(not pcall(dofile, "/etc/hosts") and not pcall(loadfile, "/etc/hosts"))
+            assert(os.getenv("PIXMITH_SECRET_NOT_ALLOWED") == nil and not pcall(os.exit))
             assert(load("return 1 + 1")() == 2, "text chunks load")
             local f = load(string.dump(function() return 1 end))
             assert(f == nil, "bytecode must not load")
@@ -2623,7 +2939,7 @@ mod tests {
             t.direction = app.direction.PingPong
             t.repeatCount = 3
             t.color = 0x336699FF
-            assert(t.color == 0x336699FF)
+            assert(t.color == Color(0x33, 0x66, 0x99) and t.color.red == 0x33)
             local u = sprite:newTag("idle", 5, 2)       -- swapped ends are put in order
             assert(u.from == 2 and u.to == 5)
             u.from = 6                                  -- crossing the other end keeps from <= to
@@ -2750,7 +3066,7 @@ mod tests {
             assert(not c1.isEmpty and c1.opacity == 255)
             assert(c2.isEmpty and c2.opacity == 255 and not c2.linked)
             assert(c3.linked and #c3.linkedFrames == 1 and c3.linkedFrames[1] == 1)
-            assert(c1.layer == 1 and c1.frame == 1)
+            assert(c1.layer.stackIndex == 1 and c1.frame.frameNumber == 1 and c1.frameNumber == 1)
             c1.opacity = 100
             assert(sprite:cel(1, 3).opacity == 100, "linked cels share their opacity")
             assert(c3:unlink())
@@ -3031,16 +3347,20 @@ mod tests {
               assert(ud.text == nil and ud.color == nil)
               ud.text = "note " .. i
               ud.color = 0x10203040 + i
-              assert(ud.text == "note " .. i and ud.color == 0x10203040 + i)
+              assert(ud.text == "note " .. i and ud.color.red == 0x10 and ud.color.alpha == 0x40 + i)
             end
             targets[2].text = ""            -- empty text and nil clear
             targets[3].color = nil
             assert(targets[2].text == nil and targets[3].color == nil)
             targets[3].text = "kept"
-            print(sprite.userData.text, sprite.layers[1].userData.color)
+            print(sprite.userData.text, tostring(sprite.layers[1].userData.color))
+            assert(sprite.data == "note 1" and sprite.color.alpha == 0x41 and sprite.layers[1].color.alpha == 0x42)
+            sprite.layers[1].data = "via data"
+            assert(sprite.layers[1].userData.text == "via data")
+            sprite.layers[1].data = ""
             "#,
         );
-        assert_eq!(o.messages, vec![format!("note 1\t{}", 0x10203042u32)]);
+        assert_eq!(o.messages, vec!["note 1\tColor{ r=16, g=32, b=48, a=66 }".to_string()]);
         let back = crate::formats::ase::read(&crate::formats::ase::write(&e.sprite)).unwrap();
         assert_eq!(back.extra.sprite.text.as_deref(), Some("note 1"));
         assert_eq!(back.layers[0].user_data.color, Some([0x10, 0x20, 0x30, 0x42]));
@@ -3260,11 +3580,12 @@ mod tests {
         let o = run(
             &mut e,
             r#"
-            assert(type(app.version) == "string" and app.apiVersion >= 2)
-            assert(app.activeLayer == 1 and app.activeFrame == 1 and sprite.activeLayer == 1)
+            assert(app.version.major ~= nil and tostring(app.version):find("%d+%.%d+%.%d+") and app.apiVersion >= 2)
+            assert(app.activeLayer.stackIndex == 1 and app.activeFrame.frameNumber == 1 and sprite.activeLayer == 1)
             app.activeLayer = 3
             app.activeFrame = 2
-            assert(sprite.activeLayer == 3 and sprite.activeFrame == 2 and app.activeLayer == 3)
+            assert(sprite.activeLayer == 3 and sprite.activeFrame == 2 and app.activeLayer.stackIndex == 3)
+            assert(app.activeLayer == sprite.layers[3] and app.activeFrame == sprite.frames[2])
             sprite:setPixel(0, 0, 0xFF0000FF)          -- now draws on layer 3, frame 2
             app.custom = 5                             -- other fields behave like a plain table
             assert(app.custom == 5 and app.nothing == nil)
@@ -3339,6 +3660,6 @@ mod tests {
         assert!(o.error.is_some(), "a 1M-entry table must not fit in 2 MB");
         assert_eq!(e.history_len().0, 0);
         // The sandbox itself is unchanged.
-        ok(&mut e, "assert(os == nil and io == nil and debug == nil and package == nil and load(string.dump(function() end)) == nil)");
+        ok(&mut e, "assert(debug == nil and package == nil and load(string.dump(function() end)) == nil)");
     }
 }

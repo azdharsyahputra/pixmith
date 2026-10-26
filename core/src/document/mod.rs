@@ -2,6 +2,7 @@
 
 pub mod color_mode;
 pub mod layers;
+pub mod offcanvas;
 pub mod slices;
 pub mod spritedata;
 pub mod tilemap;
@@ -9,6 +10,8 @@ pub mod tilemap;
 use crate::document::color_mode::ColorMode;
 use crate::history::store::{compact_top, inverse_of, settle_all, Entry, Witness};
 use std::sync::Arc;
+
+pub use crate::document::offcanvas::OffCanvas;
 
 /// PICO-8 palette, used for new sprites and files without a palette.
 const DEFAULT_PALETTE: [u32; 16] = [
@@ -96,7 +99,8 @@ pub struct Tag {
     pub user_data: crate::document::slices::UserData,
 }
 
-/// A full-canvas RGBA buffer with straight (non-premultiplied) alpha.
+/// A full-canvas RGBA buffer with straight (non-premultiplied) alpha, plus the part of the cel's
+/// content beyond the canvas edges (`outside`; see `document::offcanvas`).
 ///
 /// Build cels with `Cel { opacity, pixels, ..Default::default() }` so that new fields do not
 /// have to be added to every literal.
@@ -113,6 +117,9 @@ pub struct Cel {
     /// Z-index of the cel chunk: the cel draws as if its layer sat `z_index` places higher (or lower
     /// when negative) in the stack; see `layers::composite_range_in`.
     pub z_index: i16,
+    /// The part of the cel's content beyond the canvas edges, if any (see `document::offcanvas`):
+    /// what is visible inside the canvas always comes from `pixels`.
+    pub outside: Option<Arc<OffCanvas>>,
 }
 
 /// Copy-on-write of a cel shared with undo history goes through here: large pixel buffers reuse
@@ -126,6 +133,7 @@ impl Clone for Cel {
             user_data: self.user_data.clone(),
             indices: self.indices.clone(),
             z_index: self.z_index,
+            outside: self.outside.clone(),
         }
     }
 }
@@ -133,7 +141,15 @@ impl Clone for Cel {
 /// An empty, fully opaque cel (`derive(Default)` would make the opacity 0).
 impl Default for Cel {
     fn default() -> Self {
-        Cel { opacity: 255, pixels: Vec::new(), tiles: None, user_data: Default::default(), indices: None, z_index: 0 }
+        Cel {
+            opacity: 255,
+            pixels: Vec::new(),
+            tiles: None,
+            user_data: Default::default(),
+            indices: None,
+            z_index: 0,
+            outside: None,
+        }
     }
 }
 
@@ -203,6 +219,9 @@ impl Sprite {
         for cel in self.cels.iter().flatten().flatten() {
             let grid = cel.tiles.as_ref().map_or(0, |g| g.tiles.len() * 4);
             f(Arc::as_ptr(cel) as usize, cel.pixels.len() + grid);
+            if let Some(o) = &cel.outside {
+                f(Arc::as_ptr(o) as usize, o.rgba.len());
+            }
             if let Some(i) = &cel.indices {
                 f(Arc::as_ptr(i) as usize, i.len());
             }
@@ -214,7 +233,7 @@ impl Sprite {
 
     /// Checks the structural invariants the editing code relies on, in time proportional to the
     /// number of cels (not pixels): every frame has one cel slot per layer, buffers have the
-    /// canvas size, tile grids and tilesets are consistent, layer nesting is a proper tree.
+    /// canvas size, off-canvas parts are within bounds, tile grids and tilesets are consistent, layer nesting is a proper tree.
     pub fn validate(&self) -> Result<(), String> {
         if self.width == 0 || self.height == 0 {
             return Err("the canvas has no pixels".into());
@@ -249,6 +268,7 @@ impl Sprite {
                 return Err("a tile image does not match its tileset's tile size".into());
             }
         }
+        let mut outside_bytes = 0usize;
         for (f, row) in self.cels.iter().enumerate() {
             if row.len() != self.layers.len() {
                 return Err(format!("frame {} has {} cel slots for {} layers", f + 1, row.len(), self.layers.len()));
@@ -266,6 +286,20 @@ impl Sprite {
                         cel.pixels.len(),
                         w * h * 4
                     ));
+                }
+                if let Some(o) = &cel.outside {
+                    o.check().map_err(|e| format!("layer {} in frame {}: {e}", l + 1, f + 1))?;
+                    if cel.tiles.is_some() {
+                        return Err(format!(
+                            "the tilemap cel of layer {} in frame {} has off-canvas pixels",
+                            l + 1,
+                            f + 1
+                        ));
+                    }
+                    outside_bytes += o.rgba.len();
+                    if outside_bytes > MAX_CEL_MEMORY {
+                        return Err("the cels hold too many pixels beyond the canvas".into());
+                    }
                 }
                 if cel.indices.as_ref().is_some_and(|i| i.len() != w * h) {
                     return Err("a cel's palette index hints do not match the canvas".into());

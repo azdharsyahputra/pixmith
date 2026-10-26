@@ -18,6 +18,7 @@ func registerScenarios() {
     registerProjects()
     registerExtensions()
     registerLuaDialog()
+    registerScriptHost()
     registerLive()
     registerColor()
     registerRetouch()

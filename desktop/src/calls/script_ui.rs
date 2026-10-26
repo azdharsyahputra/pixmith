@@ -11,6 +11,7 @@ use pixmith_core::formats::json::{self, Value};
 use pixmith_core::scripting::host;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{CString, c_char};
+use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,6 +52,13 @@ pub trait ScriptHost {
     fn apply(&mut self, session: u64, txn: u64, doc: Option<&mut Doc>) -> i32;
     /// `pixmith_script_set_colors`.
     fn set_colors(&mut self, fg: u32, bg: u32);
+    /// `pixmith_script_set_doc_path`: the file of the document called `tag` (`sprite.filename`); `None` forgets it.
+    fn set_doc_path(&mut self, _tag: u64, _path: Option<&Path>) {}
+    /// `pixmith_script_take_doc`: document `index` that transaction `txn` of `session` created or opened, once.
+    /// The document carries no path; the caller sets it from the `docs` message.
+    fn take_doc(&mut self, _session: u64, _txn: u64, _index: u32) -> Option<Doc> {
+        None
+    }
     /// `pixmith_script_stop`.
     fn stop(&mut self, session: u64);
     /// `pixmith_script_count`: live sessions.
@@ -211,6 +219,16 @@ impl ScriptHost for CoreHost {
 
     fn set_colors(&mut self, fg: u32, bg: u32) {
         host::pixmith_script_set_colors(fg, bg);
+    }
+
+    fn set_doc_path(&mut self, tag: u64, path: Option<&Path>) {
+        host::set_doc_path(tag, path.map(PathBuf::from));
+    }
+
+    fn take_doc(&mut self, session: u64, txn: u64, index: u32) -> Option<Doc> {
+        let ptr = host::pixmith_script_take_doc(session, txn, index);
+        // SAFETY: the core hands over a document nothing else owns, or null.
+        (!ptr.is_null()).then(|| unsafe { Doc::from_raw(ptr, None) })
     }
 
     fn stop(&mut self, session: u64) {

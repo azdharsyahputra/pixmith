@@ -603,12 +603,19 @@ extension SpriteModel {
             errorMessage = lastError
             return
         }
+        addBackgroundTab(doc: d, url: url)
+        RecentFiles.shared.add(url)
+    }
+
+    /// Adds a tab holding `d` (which the model takes ownership of) behind the active one, without switching to it.
+    @discardableResult
+    func addBackgroundTab(doc d: OpaquePointer, url: URL?) -> DocumentSlot {
         let slot = DocumentSlot(doc: d, fileURL: url)
         slot.untitledNumber = nextUntitledNumber()
         slot.layer = max(0, Int(pixmith_layer_count(d)) - 1)
         slot.zoom = Prefs.initialZoom(width: Int(pixmith_width(d)), height: Int(pixmith_height(d)))
         slots.append(slot)
-        RecentFiles.shared.add(url)
+        return slot
     }
 }
 

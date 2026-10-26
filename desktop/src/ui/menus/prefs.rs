@@ -167,8 +167,8 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
         .id(egui::Id::new("preferences_window"))
         .collapsible(false)
         .resizable(false)
-        .fixed_size(vec2(488.0, 548.0))
-        .default_pos(ctx.content_rect().center() - vec2(244.0, 300.0))
+        .fixed_size(vec2(488.0, 640.0))
+        .default_pos(ctx.content_rect().center() - vec2(244.0, 320.0))
         .frame(frame)
         .open(&mut open)
         .show(ctx, |ui| {
@@ -298,6 +298,23 @@ fn general(app: &mut PixmithApp, ui: &mut Ui) {
     note(
         ui,
         "Lets tools on this computer, such as the Pixmith MCP server, edit the open documents. Each edit is an undo step.",
+    );
+    ui.add_space(space::SM);
+    group(ui, "Scripts: file access", |ui| {
+        row(ui, "Forget allowed scripts", true, |ui| {
+            if super::controls::bar_button(ui, "Forget", true, false).clicked() {
+                crate::calls::script_access::forget_grants();
+                app.gamedev.notice = Some(crate::ui::gamedev::Notice {
+                    title: "Scripts".into(),
+                    text: "Scripts will ask again before they use files or run commands.".into(),
+                    warning: false,
+                });
+            }
+        });
+    });
+    note(
+        ui,
+        "Scripts ask before they read or write files or run commands. \u{201c}Always Allow\u{201d} lasts until Pixmith quits.",
     );
     ui.add_space(space::SM);
     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {

@@ -13,4 +13,5 @@ pub mod ui;
 
 pub use app::PixmithApp;
 pub use calls::projects;
+pub use calls::script_access;
 pub use calls::script_ui;

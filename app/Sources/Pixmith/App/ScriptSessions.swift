@@ -62,6 +62,8 @@ final class ScriptSessions: ObservableObject {
         guard !MainWindow.hasSheet else { return }
         model.finishTransients()
         observeModel()
+        ScriptPermissions.install()
+        syncDocPaths()
         pixmith_script_set_colors(model.color, model.opts.secondary)
         let id = source.withCString { src in
             name.withCString { n in
@@ -72,7 +74,7 @@ final class ScriptSessions: ObservableObject {
             model.errorMessage = String(cString: pixmith_last_error())
             return
         }
-        sessions[id] = Info(name: name, isPlugin: false)
+        sessions[id] = Info(name: ScriptPermissions.displayName(name), isPlugin: false)
         startTimer()
     }
 
@@ -80,6 +82,8 @@ final class ScriptSessions: ObservableObject {
     @discardableResult
     func loadPlugin(source: String, name: String, dir: String?, prefsPath: String?) -> UInt64 {
         observeModel()
+        ScriptPermissions.install()
+        syncDocPaths()
         pixmith_script_set_colors(model.color, model.opts.secondary)
         let id = source.withCString { src in
             name.withCString { n in
@@ -242,6 +246,9 @@ final class ScriptSessions: ObservableObject {
                 quiet = false
             }
         }
+        if ok, let docs = m["docs"] as? [String: Any] {
+            takeDocuments(session: session, txn: txn, docs: docs, original: slot(forTag: tagValue))
+        }
         if failure == "script cancelled" { return }
         guard !messages.isEmpty || failure != nil else { return }
         let conflict = failure?.hasPrefix("The document changed") ?? false
@@ -254,6 +261,78 @@ final class ScriptSessions: ObservableObject {
     // MARK: Documents
 
     private var tags: [ObjectIdentifier: UInt64] = [:]
+    private var registeredPaths: [UInt64: String] = [:]
+
+    /// Tells the core which file each tab has (`sprite.filename`, `app.open` of the script's own document).
+    func syncDocPaths() {
+        for slot in model.slots {
+            let url = slot === model.activeSlotObject ? model.fileURL : slot.fileURL
+            let path = url?.path
+            let t = tag(of: slot)
+            if registeredPaths[t] == path { continue }
+            registeredPaths[t] = path
+            withOptionalCString(path) { pixmith_script_set_doc_path(t, $0) }
+        }
+    }
+
+    /// The `docs` object of a `txn` message (docs/LUA_HOST_API.md, section 2): the documents the script created or
+    /// opened become tabs (clean when the core says they equal their file), the one it left active is activated, and
+    /// what it did to its own document (saved it under a path, closed it) is followed.
+    private func takeDocuments(session: UInt64, txn: UInt64, docs: [String: Any], original: DocumentSlot?) {
+        var created: [Int: DocumentSlot] = [:]
+        for entry in docs["new"] as? [[String: Any]] ?? [] {
+            guard let index = (entry["index"] as? NSNumber)?.intValue,
+                  let d = pixmith_script_take_doc(session, txn, UInt32(index)) else { continue }
+            let url = (entry["path"] as? String).map { URL(fileURLWithPath: $0) }
+            if let url, let open = model.slot(for: url) {
+                pixmith_free(d)  // that file is already a tab: show it instead of a second copy
+                created[index] = open
+                continue
+            }
+            if entry["modified"] as? Bool ?? true { pixmith_touch(d) } else { pixmith_mark_saved(d) }
+            AppRoute.shared.enterEditor()
+            created[index] = model.addBackgroundTab(doc: d, url: url)
+            if let url { RecentFiles.shared.add(url) }
+        }
+        // What the script did to the document it ran on.
+        let closeOriginal = docs["closeOriginal"] as? Bool ?? false
+        if !closeOriginal, let original, let path = docs["originalPath"] as? String {
+            adoptSavedPath(URL(fileURLWithPath: path), saved: docs["originalSaved"] as? Bool ?? false, slot: original)
+        }
+        // The tab to show.
+        quiet = true
+        defer { quiet = false }
+        switch docs["active"] {
+        case let n as NSNumber:
+            if let slot = created[n.intValue], let i = model.slots.firstIndex(where: { $0 === slot }) { model.activate(i) }
+        case let s as String where s == "original":
+            if let original, let i = model.slots.firstIndex(where: { $0 === original }) { model.activate(i) }
+        default:
+            break
+        }
+        if closeOriginal, let original, let i = model.slots.firstIndex(where: { $0 === original }) {
+            model.closeTab(i, discardChanges: true)
+        }
+        syncDocPaths()
+    }
+
+    /// The script saved its document with `saveAs` to a document file: the tab becomes that file, and is clean when
+    /// nothing changed after the save.
+    private func adoptSavedPath(_ url: URL, saved: Bool, slot: DocumentSlot) {
+        let active = slot === model.activeSlotObject
+        if active { model.fileURL = url } else { slot.fileURL = url }
+        slot.customName = nil
+        RecentFiles.shared.add(url)
+        guard saved else { return }
+        if active {
+            pixmith_mark_saved(model.doc)
+            model.savedRevision = model.revision
+        } else {
+            pixmith_mark_saved(slot.doc)
+            slot.savedRevision = slot.revision
+        }
+        Autosaver.shared.discard(slot)
+    }
 
     /// A small number that stands for a document in events and results (JSON numbers keep 53 bits, so no pointers).
     func tag(of slot: DocumentSlot?) -> UInt64 {
@@ -275,6 +354,7 @@ final class ScriptSessions: ObservableObject {
     @discardableResult
     func send(_ session: UInt64, _ event: [String: Any]) -> Bool {
         guard let data = try? JSONSerialization.data(withJSONObject: event), let json = String(data: data, encoding: .utf8) else { return false }
+        syncDocPaths()
         return json.withCString {
             pixmith_script_send(session, model.doc, tag(of: model.activeSlotObject), UInt32(model.layer), UInt32(model.frame), $0)
         }
@@ -284,6 +364,7 @@ final class ScriptSessions: ObservableObject {
     func broadcast(_ event: [String: Any]) -> UInt32 {
         guard pixmith_script_count() > 0,
               let data = try? JSONSerialization.data(withJSONObject: event), let json = String(data: data, encoding: .utf8) else { return 0 }
+        syncDocPaths()
         return json.withCString {
             pixmith_script_broadcast(model.doc, tag(of: model.activeSlotObject), UInt32(model.layer), UInt32(model.frame), $0)
         }
@@ -384,6 +465,8 @@ final class ScriptSessions: ObservableObject {
 
     /// A run that goes on for more than a moment without a dialog of its own blocks the window with a sheet.
     private func updateBusy() {
+        // A script waiting for the user's answer to a file permission alert is not busy.
+        guard ScriptPermissions.asking == 0 else { return }
         for (id, info) in sessions where info.state == "running" {
             guard let since = info.runningSince, Date().timeIntervalSince(since) > 0.3, busyWindows[id] == nil,
                   !dialogs.values.contains(where: { $0.session == id && $0.modal }),

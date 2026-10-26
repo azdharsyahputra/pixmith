@@ -206,6 +206,12 @@ impl PixmithApp {
         ui::menus::apply_appearance(&mut app, &cc.egui_ctx);
         app.canvas.tools.enable_persistence(ui::tools::view::ViewSettings::default_path());
         app.gamedev.start();
+        // Scripts ask before they touch files or run commands (the tests and PIXMITH_NO_DIALOGS have no handler: the
+        // core denies).
+        if std::env::var_os("PIXMITH_NO_DIALOGS").is_none() {
+            crate::calls::script_access::install(&cc.egui_ctx);
+            app.gamedev.lua.enable_permission_dialogs(true);
+        }
         app.extensions.plugins.enabled = true;
         // Pixmith Live follows the preference (on by default); the server starts with the first frame.
         app.live.managed = true;

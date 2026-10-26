@@ -15,8 +15,9 @@ are shown in a dialog when the script ends.
 | Pixel coordinates (`x`, `y`) | 0-based, origin top-left |
 | Palette indices | 0-based |
 | Layers, frames, tags, cels | 1-based, layer 1 is the bottom of the stack |
-| Colors | integers `0xRRGGBBAA` (`0xFF0000FF` is opaque red, `0` is transparent) |
-| Blend modes | 0-18, see `app.blend` |
+| Colors | `Color` objects, or integers `0xRRGGBBAA` (`0xFF0000FF` is opaque red, `0` is transparent); see [Colors](#colors) |
+| Blend modes | Aseprite's `BlendMode` numbers 0-18 (`app.blend.*` is the same table) |
+| Color modes, directions | Aseprite's `ColorMode`, `AniDir` numbers |
 
 Optional `layer` / `frame` arguments default to the layer and frame that were active when the
 script started (`sprite.activeLayer`, `sprite.activeFrame`).
@@ -31,37 +32,76 @@ addressed by position too, and tile indices shift when a tile is deleted.
 
 Errors raised by API calls can be caught with `pcall`; the error value is a string.
 
-Aseprite scripts run largely unchanged: `Point`, `Size`, `Rectangle`, `Image`, `sprite:newCel`,
-`sprite:newSlice(Rectangle)` and the rest of the Aseprite names exist; see [Geometry](#geometry-point-size-rectangle),
-[Images](#images) and [Aseprite compatibility](#aseprite-compatibility).
+Aseprite scripts run largely unchanged: `Color`, `app.pixelColor`, `Point`, `Size`, `Rectangle`, `Image`,
+`Palette`, `Sprite(...)`, `app.open`, `app.fs`, `io`, `os`, `app.command`, `sprite:newCel`,
+`sprite:newSlice(Rectangle)` and the rest of the Aseprite names exist; see [Colors](#colors),
+[Files and permissions](#files-and-permissions), [Documents](#documents), [`app.command`](#appcommand),
+[Geometry](#geometry-point-size-rectangle), [Images](#images) and [Aseprite compatibility](#aseprite-compatibility).
 
 ## Sandbox
 
-Available: the base functions, `table`, `string`, `utf8`, `math`, `coroutine`. Not available:
-`os`, `io`, `package`, `require`, `debug`, `dofile`, `loadfile`. `load` accepts text chunks only
-(no bytecode). A run is stopped with an error after 300 million VM instructions, 10 seconds or
-128 MB of Lua memory, whichever comes first (hosts can raise these, see [Limits](#limits-for-embedders)).
+Available: the base functions, `table`, `string`, `utf8`, `math`, `coroutine`, and `io`, `os`, `dofile`, `loadfile`
+and `app.fs` behind permission questions (next section). Not available: `package`, `require`, `debug`,
+`os.exit`, `os.setlocale`, `io.stdin`. `load` accepts text chunks only (no bytecode). `os.getenv` answers for a short
+list of harmless variables (`HOME`, `USER`, `TMPDIR`, ...) and `nil` for the rest. A run is stopped with an error
+after 300 million VM instructions, 10 seconds or 128 MB of Lua memory, whichever comes first (hosts can raise
+these, see [Limits](#limits-for-embedders)); time spent waiting for a permission dialog or a `Dialog` does not count.
 One very expensive `string.find`/`gsub` pattern is a single VM instruction and cannot be interrupted,
 so avoid catastrophic patterns.
 
-**File access.** Scripts cannot read or write files, with one exception: `Image{ fromFile = "/absolute/path.png" }`
-reads a PNG file. The path must be absolute; the file must be a regular file of at most 256 MB that starts
-with the PNG signature and decodes to at most 8192 x 8192 pixels. Nothing else can be read, nothing can be
-written (`Image:saveAs` raises an error), and the decoded pixels only ever end up in an `Image`.
-
 Scripts cannot grow the document without bound either: at most 1024 layers, 4096 frames, 4096
 tags, 4096 slices and 64 MB of tile pixels per tileset. Free-standing `Image`s (kept outside the Lua
-heap) are limited to 67,108,864 pixels (the largest canvas) each and 512 MB alive at once.
+heap) are limited to 67,108,864 pixels (the largest canvas) each and 512 MB alive at once, and one run may
+create or open at most 32 sprites (512 MB of pixels together).
+
+## Files and permissions
+
+Like Aseprite, a script **asks first** before it touches anything outside its document. Each of these calls
+needs permission for the path (or, for programs, the command) it names:
+
+| Call | Needs |
+| --- | --- |
+| `io.open` (read modes), `io.lines`, `io.input(path)`, `dofile`, `loadfile`, `Image{ fromFile }`, `Palette{ fromFile }`, `app.open`, `Sprite{ fromFile }`, `sprite:loadPalette`, `app.fs.isFile` / `isDirectory` / `fileSize` / `listFiles` | read |
+| `io.open` (modes `w`, `a`, `r+`, ...), `io.output(path)`, `os.remove`, `os.rename` (both paths), `app.fs.makeDirectory` / `makeAllDirectories` / `removeDirectory`, `sprite:saveAs` / `saveCopyAs`, `image:saveAs`, `palette:saveAs`, `app.command.ExportSpriteSheet` / `SaveFile*` | write |
+| `os.execute(command)`, `io.popen(command)` | execute |
+
+A question is answered, in this order, by: a path the host pre-allowed (`allowed_paths`, e.g. the MCP server's
+`allow_paths`); an earlier **Allow once** for the same path or a parent directory in the same run (a write grant
+also covers reads); a path returned by `os.tmpname()` in this run; an earlier **Always allow this script** for that
+kind of access (until the app quits); otherwise the front end's dialog. With no front end handler (command line,
+tests) the answer is *no*, and the call raises `permission denied: script "name" may not read /path`. The answer
+is a Lua error, so `pcall` catches it. See [LUA_HOST_API.md](LUA_HOST_API.md) for what a front end implements.
+
+`io` and `os` are Lua's own libraries once permission is given: `io.open` returns the usual file objects
+(`read`, `write`, `lines`, `seek`, `close`, ...), `os.time`, `os.date`, `os.clock`, `os.difftime`, `os.tmpname`,
+`os.remove`, `os.rename`, `os.execute` work as in Lua. Standard input does not exist (`io.read()` returns `nil`).
+
+`app.fs` (strings use `/`; `\` is also accepted as a separator in the path functions):
+
+| Function | |
+| --- | --- |
+| `pathSeparator` | `"/"` |
+| `filePath(p)`, `fileName(p)`, `fileExtension(p)`, `fileTitle(p)`, `filePathAndTitle(p)` | `"/a/b/c.png"` gives `"/a/b"`, `"c.png"`, `"png"`, `"c"`, `"/a/b/c"` |
+| `normalizePath(p)`, `joinPath(a, b, ...)` | lexical (`.` / `..` removed, separators `/`); never asks |
+| `currentPath()`, `appPath()`, `tempPath()`, `userDocsPath()`, `userConfigPath()` | directories as strings; never asks |
+| `isFile(p)`, `isDirectory(p)`, `fileSize(p)` (0 when missing), `listFiles(dir)` (sorted names) | read |
+| `makeDirectory(p)`, `makeAllDirectories(p)`, `removeDirectory(p)` (empty directories only) | write; return `true`/`false` |
 
 ## `sprite`
 
-### Properties (read-only)
+### Properties
 
 | Name | |
 | --- | --- |
 | `width`, `height` | canvas size |
 | `layerCount`, `frameCount`, `paletteSize` | counts |
-| `colorMode` | `"rgba"`, `"grayscale"` or `"indexed"` |
+| `colorMode` | Aseprite's `ColorMode`: `ColorMode.RGB` 0, `GRAY` / `GRAYSCALE` 1, `INDEXED` 2 |
+| `filename` | the document's file (`""` when it has none; read/write: assigning only renames, `saveAs` writes) |
+| `isModified` | whether the sprite differs from the file it was last saved to or opened from |
+| `spec` | an `ImageSpec` of the canvas: `Image(sprite.spec)` |
+| `palettes` | a list with the sprite's palette (`sprite.palettes[1]`), see [Palette](#palette) |
+| `rootLayers`, `backgroundLayer` | top-level layers; the background layer or `nil` (`layers` is the flat list, children included) |
+| `data`, `color` | the sprite's user data text and `Color` (shortcuts for `userData.text` / `.color`) |
 | `activeLayer`, `activeFrame` | 1-based, as chosen in the editor when the script started |
 | `bounds`, `size` | `Rectangle(0, 0, width, height)` and `Size(width, height)` |
 | `layers`, `frames`, `tags` | lists of handles, snapshots taken at access time |
@@ -102,7 +142,7 @@ cels the script changed are snapped once more when the run ends.
 
 - `sprite:newLayer([name])` adds a layer on top of the stack (never inside a group) and returns it.
 - `sprite:newGroup([name])` adds an empty group on top.
-- `sprite:deleteLayer(i)` deletes a layer and, for a group, everything in it. The last drawable layer
+- `sprite:deleteLayer(layer)` (a layer handle, its number or its name) deletes a layer and, for a group, everything in it. The last drawable layer
   cannot be deleted.
 - `sprite:moveLayer(i, to)` moves layer `i` (with its children) one step at a time, like dragging
   it in the layer list, until it reaches position `to`, and returns the position it ended at.
@@ -115,34 +155,38 @@ Layer handle fields:
 
 | Field | |
 | --- | --- |
-| `name`, `visible`, `opacity` (0-255), `blendMode` (0-18) | read/write |
-| `isGroup`, `isTilemap`, `index`, `level` | read-only (`level` is the nesting depth, 0 at the top) |
+| `name`, `visible`, `opacity` (0-255), `blendMode` (a `BlendMode` value) | read/write |
+| `isGroup`, `isTilemap`, `isImage`, `isBackground`, `isEditable`, `index` (= `stackIndex`), `level`, `sprite` | read-only (`level` is the nesting depth, 0 at the top) |
 | `isReference` | read/write: a reference layer is shown in the editor but never exported; turning it on also locks the layer against drawing. Groups cannot be reference layers |
 | `parent` | the containing group, or `nil` |
 | `children` | direct children of a group (bottom to top); empty for other layers |
-| `isVisible` | read-only: shown on the canvas, i.e. `visible` and every parent group `visible` |
+| `isVisible` | shown on the canvas, i.e. `visible` and every parent group `visible`; assigning sets `visible` |
 | `tileset` | the tileset of a tilemap layer, or `nil` |
-| `userData` | text and color attached to the layer (see User data) |
+| `userData` | text and color attached to the layer (see User data); `layer.data` / `layer.color` are shortcuts |
 
 Tilemap layers also have `layer:getTile(x, y [, frame])` and
 `layer:setTile(x, y, index [, flipX, flipY, diagonal [, frame]])`; see Tilemaps.
 
 ### Frames
 
-- `sprite:newFrame([copy])` appends a frame after the last one (empty, or a copy of it when `copy` is true).
+- `sprite:newFrame([copy])` appends a frame after the last one (empty, or a copy of it when `copy` is true);
+  `sprite:newFrame(frame)` inserts a copy of that frame after it (Aseprite's form).
+- `sprite:newEmptyFrame([frameNumber])` inserts an empty frame so that it becomes that frame number (default: the end).
 - `sprite:duplicateFrame(i)` inserts a copy of frame `i` right after it and returns it.
-- `sprite:deleteFrame(i)` deletes a frame; tags are adjusted. The last frame cannot be deleted.
+- `sprite:deleteFrame(frame)` (a handle or a number) deletes a frame; tags are adjusted. The last frame cannot be deleted.
 
-Frame handle fields: `duration` (milliseconds, read/write), `index`.
+Frame handle fields: `duration` (milliseconds, read/write), `index` (= `frameNumber`), `sprite`. Frame and layer
+handles compare with `==` by position.
 
 ### Tags
 
 - `sprite:newTag(name, from, to)` adds a tag over frames `from..to` (swapped ends are put in order) and returns it.
-- `sprite:deleteTag(i)`, or `tag:delete()`.
+- `sprite:deleteTag(tag)` (a handle, number or name), or `tag:delete()`.
 
 Tag handle fields: `name`, `from`, `to` (frame numbers, kept in order), `direction` (see
-`app.direction`), `repeatCount` (0 = forever), `color` (`0xRRGGBBFF`) are read/write; `index` is
-read-only.
+`app.direction` / `AniDir`; `aniDir` is the same value), `repeatCount` (0 = forever), `color` (a `Color`;
+integers and `Color`s are accepted when assigning) and `data` (the user data text) are read/write; `index`,
+`frames` (how many), `fromFrame` / `toFrame` (frame handles) are read-only.
 
 ### Cels
 
@@ -153,19 +197,23 @@ read-only.
   `sprite:deleteCel(cel)` / `sprite:deleteCel(layer, frame)` is the Aseprite spelling.
 - `sprite:newCel(layer, frame [, image [, position]])` makes (or replaces) the cel of `layer`/`frame` and returns
   it. With an `Image` the cel shows that image with its top-left at `position` (a `Point`, default `0, 0`),
-  clipped to the canvas, in one call; without one the cel is empty. See [Images](#images).
+  in one call; the position may lie beyond the canvas edges and the whole image is kept (only what is inside the
+  canvas is drawn); without an image the cel is empty. See [Images](#images).
 
 Cel handle: `opacity` (0-255, read/write, the cel must not be empty), `zIndex` (-32768..32767, read/write, the cel must not be empty: the cel draws as if its layer sat that many places higher, or lower when negative; the order is layer index plus z-index and ties go to the lower layer; linked cels share it), `isEmpty` (no cel or fully
 transparent), `linked` (shares its image with other frames), `linkedFrames` (list of the other
-frame numbers that share it), `layer`, `frame` (numbers; `frameNumber` is the same as `frame`),
+frame numbers that share it), `layer`, `frame` (a layer handle and a frame handle, as in Aseprite:
+`cel.frame.frameNumber`; `cel.frameNumber` is the plain number), `sprite`, `data` / `color` (user data shortcuts),
 and `cel:unlink()` which gives the cel its own copy. Aseprite's cel geometry:
 
-- `cel.bounds` (read-only `Rectangle`) and `cel.position` (`Point`, read/write): Pixmith cels are canvas-sized
-  buffers, so these describe the box around the cel's non-transparent pixels (`0,0,0,0` / `Point(0, 0)` for an
-  empty cel). Assigning `cel.position` moves the pixels; whatever leaves the canvas is lost.
+- `cel.bounds` (read-only `Rectangle`) and `cel.position` (`Point`, read/write): as in Aseprite a cel is an image
+  with a position that may extend beyond the canvas. These describe the box around all of the cel's
+  non-transparent pixels, inside the canvas or not (`0,0,0,0` / `Point(0, 0)` for an empty cel); coordinates can be
+  negative. Assigning `cel.position` moves the whole cel and loses nothing: moving it off the canvas and back
+  restores every pixel. Positions must stay within -32768..32767 (the `.aseprite` file format's range).
 - `cel.image` (read/write): a **live view** of that box as an `Image` (`nil` for an empty cel): drawing on it
-  draws on the cel. Assigning an `Image` replaces the cel's pixels with it, keeping the cel's position
-  (`0, 0` for an empty cel).
+  draws on the cel, also on the parts beyond the canvas. Assigning an `Image` replaces the cel's content with it,
+  keeping the cel's position (`0, 0` for an empty cel).
 
 Linked frames are one image. A script that processes every frame of a linked cel would process
 that image several times; use `linkedFrames` to handle it only from its first frame (see
@@ -214,7 +262,7 @@ clears the cell. The layer must be a tilemap layer. The diagonal flip only appli
 
 `sprite.userData`, `layer.userData`, `cel.userData`, `tag.userData` and `slice.userData` give access
 to the text and color Aseprite attaches to those objects: `ud.text` (string or `nil`) and
-`ud.color` (`0xRRGGBBAA` or `nil`), both read/write; assign `nil` (or `""` for the text) to clear.
+`ud.color` (a `Color` or `nil`; integers `0xRRGGBBAA` and `Color`s are accepted when assigning), both read/write; assign `nil` (or `""` for the text) to clear.
 Writing user data to an empty cel creates the cel.
 
 ### Selection
@@ -234,30 +282,43 @@ undo step.
 
 ### Palette
 
-- `sprite:getPaletteColor(i)`, `sprite:setPaletteColor(i, color)` (index `paletteSize` appends a
+- `sprite:getPaletteColor(i)` (a `0xRRGGBBAA` integer), `sprite:setPaletteColor(i, color)` (index `paletteSize` appends a
   color; in Indexed mode pixels using the old color follow), `sprite:addPaletteColor(color)`
   (returns the index, reusing an existing identical color).
+- Aseprite's palette object: `sprite.palettes[1]` is live (edits change the sprite); `Palette(n)`, `Palette{ fromFile = path }`
+  (`.gpl`, `.hex`, an image, or a `.aseprite` / `.pxmt` file) and `palette:clone()` make free-standing ones.
+  `#palette`, `palette:getColor(i)` (a `Color`), `palette:setColor(i, color)`, `palette:resize(n)` (1..256; new entries are
+  opaque black), `palette:saveAs(path)` (`.gpl`, `.hex` or `.png`). Indices are 0-based and checked.
+  `sprite:setPalette(palette)` and `sprite:loadPalette(path)` replace the sprite's palette (in Indexed mode pixels
+  follow their entries).
 
 ## `app`
 
 - `app.alert(message)` shows `message` when the script ends. `app.alert{ title=, text=, buttons={...} }`
   shows a modal message at once and returns the number of the pressed button (see Dialogs).
-- `app.sprite` is the same as the global `sprite` (`nil` in plugin `init`/`exit`).
+- `app.activeSprite` (also `app.sprite`) is the active document: the one the script runs on until it creates,
+  opens or activates another (`nil` in plugin `init`/`exit` without a document). Assigning a sprite activates it.
+  The global `sprite` always stays the document the script was started on. `app.sprites` lists that document
+  and the ones the script created or opened. See [Documents](#documents).
+- `app.activeLayer`, `app.activeFrame`, `app.activeCel`, `app.activeImage`, `app.activeTag` (also `app.tag`) and
+  `app.site` (`{ sprite, layer, frame, cel, image, frameNumber }`) describe the active sprite, as objects: layer and
+  frame handles, a cel handle (`nil` for an empty cel), the cel's `Image`. `app.range` is the active cel as a one-item
+  range (`type`, `isEmpty`, `layers`, `frames`, `cels`, `images`). Assigning `app.activeLayer` or `app.activeFrame` (a
+  handle or a 1-based number) changes the defaults of the pixel calls immediately and selects that layer or frame in
+  the editor when the script ends (a successful run only). A group cannot be assigned as the active layer.
 - `app.isUIAvailable` is `false` for headless runs (command line), `true` inside the app.
-- `app.fgColor`, `app.bgColor` (`0xRRGGBBAA`): the drawing colors, read and write.
+- `app.fgColor`, `app.bgColor`: the drawing colors as `Color` objects; assign a `Color` or a `0xRRGGBBAA` integer.
 - `app.events:on(name, fn)` / `app.events:off(listener)` and `sprite.events:on("change", fn)`:
   see Events.
-- `app.undoLabel(text)` names the undo step (default "Script").
-- `app.version` is Pixmith's version string; `app.apiVersion` is a number that grows with the API
-  (this reference describes version 4: `Point` / `Size` / `Rectangle` / `Image` arrived in 4), for scripts that
-  need a feature check.
-- `app.activeLayer` and `app.activeFrame` (1-based) read the current defaults of the pixel calls.
-  Assigning one changes those defaults immediately and selects that layer or frame in the editor
-  when the script ends (a successful run only). A group cannot be assigned as the active layer.
-- `app.blend`: `Normal` 0, `Multiply`, `Screen`, `Overlay`, `Darken`, `Lighten`, `ColorDodge`,
-  `ColorBurn`, `HardLight`, `SoftLight`, `Difference`, `Exclusion`, `Hue`, `Saturation`, `Color`,
-  `Luminosity`, `Addition`, `Subtract`, `Divide` (18).
-- `app.direction`: `Forward` 0, `Reverse` 1, `PingPong` 2, `PingPongReverse` 3.
+- `app.undoLabel(text)` names the undo step (default "Script"). `app.transaction([label,] fn)` runs `fn` and undoes
+  its changes if it raises; `app.undo()` / `app.redo()` step through what the script did so far (see `app.command`).
+- `app.refresh()` does nothing (there is nothing to redraw while a script runs).
+- `app.version` is a `Version` object (`app.version.major`, `tostring(app.version)`, comparable with `<`, `<=`, `==`);
+  `Version("1.3-rc1")`, `Version(1, 3, 0)` and `Version{ major=, minor=, patch= }` create them. `app.apiVersion` is the
+  level of the Aseprite scripting API this reference follows (21).
+- `app.blend` = `BlendMode` under the older names: `Normal` 0, `Multiply`, `Screen`, ... (the values are Aseprite's).
+- `app.direction`: `Forward` 0, `Reverse` 1, `PingPong` 2, `PingPongReverse` 3 (same as `AniDir`).
+- `app.pixelColor`, `app.fs`, `app.open`, `app.command`: see their sections.
 - `print(...)` works like Lua's, but goes to the dialog shown when the script ends.
 
 ## Dialogs, events and plugins
@@ -352,6 +413,108 @@ function exit(plugin) end                                            -- optional
 Rust hosts use `scripting::host::Host::{load_plugin, run_command, stop, poll, send, broadcast, apply}`; the
 C ABI is `pixmith_plugin_load` and `pixmith_script_*` ([LUA_DIALOG.md](LUA_DIALOG.md) section 4).
 
+## Colors
+
+Three number formats meet in the API; each function speaks exactly one, so know which:
+
+| Format | Where | Example: opaque red |
+| --- | --- | --- |
+| Pixmith color integer `0xRRGGBBAA` | everything that existed before `Color` did: `sprite:getPixel` / `setPixel` / `getPixels` / `setPixels`, `getPaletteColor` / `setPaletteColor`, `color.rgba`, `color.split`, `fillSelection`, tile pixels, `app.fgColor = n`, dialog colors, `tag.color = n` | `0xFF0000FF` |
+| Aseprite pixel value | `Color(n)`, `app.pixelColor.*`, and the `Image` pixel functions (`getPixel`, `putPixel`, `drawPixel`, `clear`, `isPlain`, `pixels()`) | `0xFF0000FF` (RGB images store it as `0xAABBGGRR`, so only red and white look alike in both formats) |
+| `Color` objects | Aseprite's color class | `Color(255, 0, 0)` |
+
+**Every function that takes a color accepts a `Color` object as well as a Pixmith integer**, so
+`sprite:setPixel(0, 0, Color(255, 0, 0))` and `sprite:setPixel(0, 0, 0xFF0000FF)` are the same call. Functions that
+return a color return a Pixmith integer when they always did (`getPixel`, `getPaletteColor`, `getPixels`) and a
+`Color` where Aseprite returns one (`app.fgColor`, `app.bgColor`, `palette:getColor`, `tag.color`, `layer.color`,
+`userData.color`, `dlg.data.<color widget>`). Images follow Aseprite: `image:getPixel` returns a pixel value
+(RGB `0xAABBGGRR`, grayscale `gray | alpha << 8`, indexed images the palette index), and `putPixel` takes the same
+kind of value or a `Color`.
+
+Bridges: `color.toPixel(c)` (Pixmith integer or `Color` to Aseprite pixel value), `color.fromPixel(px)` (the other
+way), `color.rgba(r, g, b [, a])` / `color.split(c)` (Pixmith integers). A `Color` used in a bit operation
+(`c >> 24`, `c & 0xFF`) acts as its Pixmith integer, so scripts that did arithmetic on `app.fgColor` keep working.
+Comparing a `Color` with a plain number using `==` is always false: convert one side.
+
+`Color` constructors (all channel numbers 0-255 unless noted):
+
+- `Color(r, g, b [, a])`, `Color{ r=, g=, b=, a= }` (or `red=`, `green=`, `blue=`, `alpha=`; `a` defaults to 255),
+  `Color(pixelValue)` (Aseprite's `0xAABBGGRR`), `Color("#rrggbb")` / `"#rrggbbaa"` / `"#rgb"` / `"#rgba"`.
+- `Color{ h=, s=, v=, a= }` HSV (hue 0-360, saturation and value 0-1; also `hue=`, `saturation=`, `value=`),
+  `Color{ h=, s=, l=, a= }` HSL (`lightness=`).
+- `Color{ gray=, alpha= }` and `Color{ index= }` (a palette index of the active sprite).
+
+Properties (all readable; assigning `red`, `green`, `blue`, `alpha`, `hue`, `saturation`, `value`, `lightness`,
+`hslHue`, `hslSaturation`, `hsvHue`, `hsvSaturation`, `hsvValue`, `gray` or `index` changes the color; colors are
+mutable): `red`, `green`, `blue`, `alpha` (also `r`, `g`, `b`, `a`), `hue` / `saturation` / `value` (HSV),
+`lightness` (HSL), `hsvHue`, `hsvSaturation`, `hsvValue`, `hslHue`, `hslSaturation`, `hslLightness`, `gray`
+(luma for RGB colors), `index` (the nearest palette entry for RGB colors), `rgbaPixel` (`0xAABBGGRR`), `grayPixel`
+(`gray | alpha << 8`). `==` compares the resolved RGBA (two index colors compare by index); `tostring` gives
+`Color{ r=1, g=2, b=3, a=4 }` (or the `h=`/`s=`/`v=`, `gray=`, `index=` form of the model it was built with).
+
+`app.pixelColor`: `rgba(r, g, b [, a])` packs `r | g << 8 | b << 16 | a << 24`; `rgbaR(px)`, `rgbaG`, `rgbaB`,
+`rgbaA` unpack; `graya(v [, a])` packs `v | a << 8`; `grayaV(px)`, `grayaA(px)` unpack.
+
+## Documents
+
+A script runs on one document (the global `sprite`), but can create more, as in Aseprite:
+
+- `Sprite(width, height [, colorMode])`, `Sprite(ImageSpec{ width=, height=, colorMode= })`, `Sprite(otherSprite)` (a
+  copy), `Sprite{ fromFile = path }` (any file Pixmith opens: `.aseprite`, `.pxmt`, PNG, GIF, ...) create a sprite
+  with one layer, one frame and an (empty) first cel. It becomes the active sprite.
+- `app.open(path)` opens a file and makes it active (`nil` when it cannot be read; if the path is already open in the run
+  it returns that sprite). `app.sprites` lists the open sprites; `app.activeSprite = s` switches.
+- `sprite:saveAs(path)`: saves in the format of the extension (`.aseprite` / `.ase`, `.pxmt`, `.png`, `.gif`, `.webp`,
+  `.jpg`, `.bmp`, `.tga`, `.ico`, `.pcx`, `.flc`); for `.aseprite` / `.ase` / `.pxmt` the sprite's `filename`
+  becomes `path`, other extensions export and leave `filename` alone. `sprite:saveCopyAs(path)` never changes
+  `filename`. A still format with several frames writes one file per frame, `<name>-001.png`, `<name>-002.png`, ...
+- `sprite:close()` closes it (the previous sprite becomes active again). Using a closed sprite raises an error.
+- `sprite.filename` of the document the script runs on is its file as the editor knows it.
+
+What the editor shows afterwards: sprites still open when the script ends open as new tabs (images such as PNGs
+untitled), the active one is selected, the original document's edits are one undo step, and a closed original is
+closed without a save prompt. A script that fails opens nothing (files it already wrote stay). See
+[LUA_HOST_API.md](LUA_HOST_API.md).
+
+## `app.command`
+
+`app.command.Name{ ... }` runs a command on the active sprite (the parameters are Aseprite's). Commands that exist:
+
+- Frames and layers: `NewFrame{ content = "empty" }` (a copy of the active frame by default), `RemoveFrame`, `NewLayer{ name, group, reference }`,
+  `RemoveLayer`, `DuplicateLayer`, `MergeDownLayer`, `FlattenLayers`, `GotoFirstFrame`, `GotoPreviousFrame`,
+  `GotoNextFrame`, `GotoLastFrame`, `GotoFrame{ frame }`, `GotoPreviousLayer`, `GotoNextLayer`.
+- History: `Undo`, `Redo` step back and forward through the changes the script made itself: each command, each
+  `app.transaction` and the plain API edits between them are one step each (nothing from before the script
+  can be undone).
+- Transformations: `Flip{ orientation = "horizontal" | "vertical", target = "canvas" }` (the whole sprite; without `target` it
+  flips the selection or the active cel), `FlipHorizontal`, `FlipVertical` (the whole sprite),
+  `Rotate{ angle = 90 | 180 | 270 }` (the whole sprite; `target = "mask"` rotates the selection or cel),
+  `CanvasSize{ left, top, right, bottom }` (negative values crop), `SpriteSize{ width, height }` (or one of them,
+  or `scale`; nearest neighbour), `CropSprite` (to the selection), `AutocropSprite` (to the content),
+  `ChangePixelFormat{ format = "rgb" | "gray" | "indexed", dithering = "none" | "ordered" }`.
+- Filters on the active cel, limited to the selection: `ReplaceColor{ from, to, tolerance }`, `Outline{ color, place = "outside" | "inside", matrix }`,
+  `InvertColor`, `Desaturate`, `BrightnessContrast{ brightness, contrast }` (-100..100), `HueSaturation{ hue, saturation, lightness }`,
+  `Despeckle`.
+- Selection and cels: `SelectAll`, `DeselectMask`, `InvertMask`, `MaskContent`, `Clear`, `ClearCel`.
+- Files: `NewFile{ width, height, colorMode }`, `OpenFile{ filename }`, `SaveFile`, `SaveFileAs{ filename }`,
+  `SaveFileCopyAs{ filename }`, `CloseFile`, `DuplicateSprite`, `ExportSpriteSheet{ type = SpriteSheetType.HORIZONTAL | VERTICAL | ROWS | COLUMNS | PACKED,
+  textureFilename, dataFilename, columns, rows, shapePadding, borderPadding, extrude }` (a PNG sheet and Aseprite-style JSON; layers
+  as shown, all frames; `PACKED` is a square-ish grid; `trim`, `splitLayers`, `tag`, `openGenerated`, ... are ignored).
+- `Refresh` does nothing.
+
+Every other Aseprite command (`Zoom`, `Cut`, `Copy`, `Paste`, `ShowGrid`, `Options`, ...) raises
+`app.command.X is not available in Pixmith`. File commands ask for permission like the API calls do.
+
+## Enumerations
+
+`BlendMode` (`NORMAL` 0, `DARKEN`, `MULTIPLY`, `COLOR_BURN`, `LIGHTEN`, `SCREEN`, `COLOR_DODGE`, `ADDITION`, `OVERLAY`,
+`SOFT_LIGHT`, `HARD_LIGHT`, `DIFFERENCE`, `EXCLUSION`, `SUBTRACT`, `DIVIDE`, `HSL_HUE`, `HSL_SATURATION`, `HSL_COLOR`,
+`HSL_LUMINOSITY` 18 -- Aseprite's numbering; `layer.blendMode`, `drawImage` and `app.blend` use it), `ColorMode`
+(`RGB` 0, `GRAY` = `GRAYSCALE` 1, `INDEXED` 2, `BITMAP` 3, `TILEMAP` 4), `FlipType` (`HORIZONTAL` 0, `VERTICAL` 1),
+`AniDir` (`FORWARD` 0, `REVERSE`, `PING_PONG`, `PING_PONG_REVERSE` 3), `SpriteSheetType` (`HORIZONTAL` 1, `VERTICAL`,
+`ROWS`, `COLUMNS`, `PACKED` 5), `SpriteSheetDataFormat` (`JSON_HASH` 0, `JSON_ARRAY`), `RangeType` (`EMPTY` 0,
+`LAYERS`, `FRAMES`, `CELS` 3).
+
 ## Geometry: `Point`, `Size`, `Rectangle`
 
 Value types as in Aseprite. They are copies: changing a field of one never changes the object it was built from.
@@ -395,13 +558,15 @@ local copy = Image(art)                           -- Image(image) clones; Image(
 sprite:newCel(sprite.layers[1], 1, art, Point(8, 8))      -- the whole image becomes the cel, in Rust
 ```
 
-Constructors: `Image(width, height [, colorMode])`, `Image{ width=, height=, colorMode= }` / `Image(ImageSpec{...})`,
-`Image(size)`, `Image(otherImage)` (a copy) and `Image{ fromFile = path }`. `fromFile` follows the rules in
-[Sandbox](#sandbox): absolute path, PNG only (any bit depth or color type; palette PNGs are expanded), at most
-8192 x 8192. Images are **always RGBA in memory**; the `colorMode` given to `Image` (`ColorMode.RGB` 0,
-`GRAY` / `GRAYSCALE` 1, `INDEXED` 2, `TILEMAP` 3) is only remembered, and pixel values are `0xRRGGBBAA` colors,
-exactly as with `sprite:getPixel`. Writing an image into a cel of an Indexed or Grayscale sprite snaps its
-colors to the palette or to gray.
+Constructors: `Image(width, height [, colorMode])`, `Image{ width=, height=, colorMode= }` / `Image(ImageSpec{...})` /
+`Image(sprite.spec)`, `Image(size)`, `Image(otherImage)` (a copy) and `Image{ fromFile = path }`. `fromFile` needs read
+permission and an absolute path; a PNG (any bit depth or color type; palette PNGs are expanded) or, for other
+extensions, any image Pixmith opens (the first frame); at most 8192 x 8192 for PNG. Images are **always RGBA in
+memory**; the `colorMode` given to `Image` (`ColorMode.RGB` 0, `GRAY` / `GRAYSCALE` 1, `INDEXED` 2) is remembered and
+decides what the pixel functions return and take (see [Colors](#colors)): RGB `0xAABBGGRR`, grayscale
+`gray | alpha << 8`, indexed a palette index of the active sprite. A `cel.image` of an Indexed or Grayscale sprite
+speaks that mode. Writing an image into a cel of an Indexed or Grayscale sprite snaps its colors to the palette
+or to gray.
 
 Fields: `width`, `height`, `bounds` (Rectangle), `size` (Size), `colorMode`, `rowStride` (`width * 4`),
 `bytesPerPixel` (4), `spec`, `cel` (the cel a `cel.image` view belongs to, else `nil`), and
@@ -415,8 +580,9 @@ img.bytes = string.rep("\xff\x00\x00\xff", 1024 * 1024)   -- opaque red; a coupl
 
 Reading `img.bytes` creates a Lua string of that size, which counts toward the Lua memory limit.
 
-Methods: `getPixel(x, y)` (`0` outside), `putPixel(x, y, color)` (replace), `drawPixel(x, y, color)` (alpha-blend),
-`clear([color | rectangle])`, `clone()`, `isEqual(image)`, `isEmpty()`, `isPlain(color)`,
+Methods: `getPixel(x, y)` (`0` outside, a pixel value), `putPixel(x, y, value | Color)` (replace),
+`drawPixel(x, y, value | Color)` (alpha-blend), `clear([value | Color | rectangle [, value | Color]])`, `clone()`,
+`isEqual(image)`, `isEmpty()`, `isPlain(value | Color)`,
 `drawImage(image, point [, opacity [, blendMode]])` (also `drawImage(image, x, y, ...)`; alpha-composites with the
 image's top-left at `point`, clipped; opacity 0-255; `blendMode` as in `app.blend`),
 `drawSprite(sprite, frame [, point])` (draws the composited frame), `resize(w, h)` / `resize(size)` (nearest
@@ -424,11 +590,13 @@ neighbour; not on `cel.image` views) and `pixels([rectangle])`:
 
 ```lua
 for it in img:pixels() do      -- `it` is one object advanced in place, as in Aseprite
-  if it() == 0xFF0000FF then it(0x00FF00FF) end     -- it() reads, it(color) writes; it.x, it.y
+  if it() == 0xFF0000FF then it(0xFF00FF00) end     -- it() reads, it(value) writes; it.x, it.y (pixel values)
 end
 ```
 
-`img:saveAs(path)` raises an error: scripts cannot write files.
+`img:flip([FlipType])` flips in place (horizontal by default); `img:shrinkBounds([color])` returns the `Rectangle`
+around everything that is not transparent (or not that color); `img:saveAs(path)` writes any format Pixmith exports
+(write permission).
 
 All bulk operations (`bytes`, `drawImage`, `clear`, `clone`, `newCel`, `cel.image = img`,
 `sprite:setPixels(layer, frame, img)`) are done in Rust, so a whole 1024 x 1024 image costs a handful of VM
@@ -445,6 +613,13 @@ instructions, 10 seconds and 128 MiB of Lua memory. The type is public and can b
   drawable layer and frame 1 are the defaults for the pixel calls);
 - `scripting::run(editor, source, active: (layer, frame), limits)` and
   `scripting::run_with(editor, source, active, limits, cancel: &'static AtomicBool)`;
+- `scripting::run_in(editor, source, active, limits, cancel, &RunConfig { script_name, doc_path, allowed_paths })`
+  names the script for permission questions, gives `sprite.filename`, and pre-allows path prefixes for that run;
+  `Outcome` then also carries `new_documents`, `active`, `close_original`, `original_path`, `original_saved`
+  (docs/LUA_HOST_API.md);
+- `scripting::access::{set_permission_handler, set_allowed_paths}` and the C ABI
+  `pixmith_script_set_permission_handler` / `pixmith_script_set_allowed_paths` for the permission questions;
+  `pixmith_run_script_named` for a script name and document path;
 - `scripting::host::Host::with_limits(limits)` for sessions (dialogs, events, plugins): the limits apply to each
   transaction;
 - the C ABI `pixmith_run_script_limits(doc, source, layer, frame, instructions, time_ms, memory_mb, out_messages)`
@@ -456,48 +631,82 @@ instruction budget, but it is bounded by the image size caps above.
 ## Aseprite compatibility
 
 Pixmith opens `.aseprite` files, and the scripting API follows Aseprite's names and semantics where Pixmith has
-the concept, so a typical Aseprite script works unchanged.
+the concept (reference: https://www.aseprite.org/api/, `app.apiVersion` 21), so a typical Aseprite script works unchanged.
 
-**Supported (Aseprite spelling and meaning):** `Point`, `Size`, `Rectangle` (all constructors, fields,
-`contains` / `intersects` / `intersect` / `union`, `==`, `tostring`); `Image` (`Image(w, h [, colorMode])`,
-`Image{ fromFile }`, `bytes`, `getPixel`, `putPixel`, `drawPixel`, `drawImage`, `drawSprite`, `clear`, `clone`,
-`isEqual`, `isEmpty`, `isPlain`, `pixels`, `resize`, `width` / `height` / `bounds` / `colorMode` / `rowStride` /
-`bytesPerPixel` / `spec`, `ImageSpec`, `ColorMode`); `sprite:newCel(layer, frame, image, position)`,
-`sprite:deleteCel`, `layer:cel(frame)`, `layer.cels`, `sprite.cels`, `cel.image` (get and set), `cel.position`,
-`cel.bounds`, `cel.frameNumber`; `sprite:newSlice(rectangle)`, `slice.bounds` / `center` / `pivot`;
-`sprite.bounds`; `selection:select` / `add` / `subtract` / `intersect` / `contains(point)` / `origin` / `bounds`;
-layers, groups, frames (`duration`), tags, tilesets and tilemaps, user data, palette, `Dialog` (see
-[LUA_DIALOG.md](LUA_DIALOG.md)), `app.events`, plugins (`init` / `exit`, `newCommand`), `app.alert`, `app.fgColor`.
+**Supported (Aseprite spelling and meaning):**
 
-**Known differences:**
+- `Color` (every constructor, HSV / HSL / gray / index models, mutable properties, `==`, `tostring`), `app.pixelColor`;
+  every color argument takes a `Color` or a Pixmith integer.
+- `Point`, `Size`, `Rectangle`; `Image` (constructors, `bytes`, pixel functions in Aseprite's pixel format, `drawImage`,
+  `drawSprite`, `clear`, `clone`, `isEqual`, `isEmpty`, `isPlain`, `pixels`, `resize`, `flip`, `shrinkBounds`, `saveAs`,
+  `ImageSpec`); `Palette` (see above).
+- Documents: `Sprite(w, h [, colorMode])`, `Sprite(ImageSpec)`, `Sprite(sprite)`, `Sprite{ fromFile }`, `app.open`, `app.sprites`,
+  `app.activeSprite` (read and assign), `sprite:saveAs` / `saveCopyAs` / `close`, `sprite.filename`, `sprite.isModified`,
+  `sprite.spec`, `sprite.colorMode` (a `ColorMode`), `sprite:flatten()`, `sprite:resize`, `sprite:crop`, `sprite:newEmptyFrame`.
+- Files: `io`, `os` (`remove`, `rename`, `execute`, `tmpname`, `time`, `date`, `clock`, `getenv` for harmless variables),
+  `dofile`, `loadfile`, all of `app.fs`, with Aseprite-style permission questions.
+- `app.command.*` (the list above), `app.transaction`, `app.undo` / `redo`, `app.refresh`, `app.activeLayer` / `activeFrame` /
+  `activeCel` / `activeImage` / `activeTag` / `site` / `range` (objects), `app.version` (a `Version`), `app.apiVersion`,
+  `app.fgColor` / `bgColor` (`Color`), `app.alert`, `app.events`, `app.isUIAvailable`.
+- `BlendMode`, `ColorMode`, `FlipType`, `AniDir`, `SpriteSheetType`, `SpriteSheetDataFormat`, `RangeType`; `layer.blendMode`
+  uses `BlendMode` values; `layer.isVisible` can be assigned; `layer.stackIndex`, `isImage`, `isBackground`, `isEditable`,
+  `layer.sprite`, `layer.data` / `color`; cels with `layer` / `frame` / `sprite` objects, `cel.image`, `cel.position`,
+  `cel.bounds`, `cel.frameNumber`, `cel.data` / `color`; `frame.frameNumber`; `tag.aniDir`, `fromFrame`, `toFrame`, `frames`,
+  `data`, `color` (a `Color`); `sprite.rootLayers`, `backgroundLayer`, `data`, `color`; `sprite:deleteLayer` / `deleteFrame` /
+  `deleteTag` / `deleteSlice` with handles or names; `sprite:newFrame(frame)`; `sprite:newCel`, `sprite:newSlice(rectangle)`,
+  `slice.bounds` / `center` / `pivot`; selection `select` / `add` / `subtract` / `intersect` / `contains(point)` / `origin` /
+  `bounds`; layers, groups, frames, tags, tilesets and tilemaps, user data, `Dialog` (see [LUA_DIALOG.md](LUA_DIALOG.md)),
+  plugins (`init` / `exit`, `newCommand`).
 
-- **Colors** are plain integers `0xRRGGBBAA`. There is no `Color` object and no `app.pixelColor`; Aseprite's
-  `app.pixelColor.rgba()` packs `0xAABBGGRR` instead. Use `color.rgba(r, g, b, a)` / `color.split(c)`.
-- **Images are always RGBA.** `Image(w, h, ColorMode.INDEXED)` gives an RGBA image that only remembers the
-  mode; its pixel values are colors, not palette indices.
-- **Cels are canvas-sized.** `cel.position` / `cel.bounds` describe the box around the non-transparent pixels, so a
-  cel whose pixels touch the canvas edge or are moved off it loses the clipped part; images larger than the canvas
-  are clipped when placed. `cel.image` is a view of that box, sized when you read it.
+**Known differences** (everything else in Aseprite's API is not implemented):
+
+- **Colors** have three number formats (see [Colors](#colors)): older Pixmith functions keep `0xRRGGBBAA`, while `Color(n)`,
+  `app.pixelColor` and `Image` pixels use Aseprite's `0xAABBGGRR`. `app.fgColor`, `bgColor`, `tag.color`, `userData.color`
+  and dialog color values are `Color` objects now: `app.fgColor == 0xFF0000FF` is false, use `app.fgColor == Color(255, 0, 0)`.
+  `sprite:getPixel`, `getPixels`, `getPaletteColor` still return integers. `app.blend.*`, `layer.blendMode` and
+  `drawImage` blend modes now use Aseprite's numbers (symbolic names are unchanged; raw numbers 0-18 mean something else).
+  `sprite.colorMode` is a `ColorMode` number, not a string. `app.activeLayer` / `app.activeFrame` are handles, not numbers
+  (`sprite.activeLayer` / `activeFrame` are the numbers); `cel.layer` / `cel.frame` are handles too (`cel.frameNumber` is the number).
+- **Images are always RGBA in memory.** An indexed image has no palette of its own: its index values refer to the palette
+  of the active sprite. `Image(w, h, ColorMode.INDEXED)` stores RGBA colors (index values are converted on the way in
+  and out).
+- **Only the canvas is drawn on.** A cel's content may extend beyond the canvas (and files keep it), but drawing
+  tools, filters, `sprite:getPixel` / `setPixel` / `setPixels` and exports work on the canvas; use `cel.image` to
+  reach the parts beyond the edges. Tilemap cels cannot extend beyond the canvas. `cel.image` is `nil` for a cel that is
+  fully transparent, so a fresh `Sprite(w, h)` has a cel but `cel.image` is `nil` until something is drawn (use
+  `Image(sprite.spec)` and `sprite:newCel`).
 - `sprite:cel(layer, frame)` always returns a handle (Aseprite returns nothing for an empty cel; `layer:cel(frame)`
-  does return `nil`). `cel.layer` and `cel.frame` are numbers (1-based), not objects.
+  and `app.activeCel` do return `nil`).
 - `slice.bounds`, `.center` and `.pivot` read and write the first frame's key; `newSlice()` without a rectangle
   covers the whole canvas.
-- **Layers, frames and tags are indices or lightweight handles**, with the stale-handle rule above; there are no
-  `app.activeSprite` / `app.open` / `Sprite{...}` constructors, `sprite:flatten`, `app.command`, `app.fs` or `app.clipboard`;
-  the one document is the global `sprite` (also `app.sprite`).
-- **No file writing and no other file reading**: `Image:saveAs`, `Sprite:saveAs`, `io`, `os` raise errors or do not
-  exist. `Image{ fromFile }` accepts absolute paths to PNG files only (not `.aseprite`, `.gif`, relative paths or
-  `app.fs.joinPath(...)`).
-- `BlendMode` constants are `app.blend.*` (Pixmith numbers, which differ from Aseprite's enum values); `drawImage`
-  takes those.
-- `Image:flip`, `Image:shrink`, `Image:setPalette` and `Image:saveAs` do not exist (the last raises an explicit error).
+- **Layers, frames and tags are indices or lightweight handles**, with the stale-handle rule above (creating a layer or
+  frame with `app.command` in the middle of the stack invalidates handles above it). `sprite.layers` is the flat list
+  with children (Aseprite's lists only top-level layers; use `rootLayers` and `layer.children`).
+- **One palette per sprite**: `sprite.palettes` has one entry; there are no palette frames or palette resources.
+- **Documents**: `app.sprites` only knows the document the script runs on and the ones it created or opened (the editor's
+  other tabs are not visible); `Sprite{ fromFile }` loads a new sprite even if the file is open elsewhere in the run.
+  `saveAs` to an export format does not change `filename`; a multi-frame sprite saved as a still format writes
+  `name-001.png`, `name-002.png`, ... (Aseprite has its own numbering scheme for sequences). Only the formats Pixmith reads and writes work. `app.open` does not show a dialog and
+  returns `nil` for unreadable files.
+- **`io` / `os`**: standard input does not exist; `os.exit`, `os.setlocale`, `package`, `require`, `debug` are gone; `os.getenv`
+  answers for a short whitelist only; no `io.stdout` capture (use `print`).
+- **`app.command`** has the commands listed above; all other commands (clipboard, view, UI) raise an error. `Undo` / `Redo` and
+  `app.transaction` only cover what the script itself did. Filters act on the active cel inside the selection's mask
+  (Aseprite acts on the selected range of cels).
+- **Not implemented at all**: `app.useTool`, `app.clipboard`, `app.window`, `app.preferences`, `app.theme`, `app.tool`,
+  `app.brush`, `app.defaultPalette`, `app.websocket`, `Brush`, creating tilesets, `sprite:assignColorSpace` / `colorSpace`,
+  `sprite.gridBounds` / `pixelRatio`, `Image:setPalette`, the `id` property of cels, layers, sprites and images. `app.range`
+  always describes the active cel (the editor's timeline selection is not visible to scripts).
 - `Point` supports `+`, `-`, unary `-` and `==`; `Size` and `Rectangle` only `==` and `tostring` (no `Point * n` or `Size + Size`).
-
 
 ## `color`
 
+The Pixmith helper table for `0xRRGGBBAA` integers (its functions also take `Color` objects):
+
 - `color.rgba(r, g, b [, a])` packs 0-255 channels (alpha defaults to 255).
 - `color.split(c)` returns `r, g, b, a`.
+- `color.toPixel(c)` converts a Pixmith integer or `Color` to an Aseprite pixel value (`0xAABBGGRR`);
+  `color.fromPixel(px)` converts back.
 
 ## Examples
 
@@ -508,6 +717,10 @@ preferences and an event); it is loaded as a plugin, not run from File > Scripts
 tracks site changes, color changes and edits and offers a command that reports them.
 
 ## Embedding notes
+
+Documents the script created and permission questions are covered in [LUA_HOST_API.md](LUA_HOST_API.md): for the
+synchronous entry points `Outcome` carries the new documents (`pixmith_script_outcome(0, 0)` and
+`pixmith_script_take_doc(0, 0, i)` through the C ABI), and sessions report them in the `txn` message.
 
 `pixmith_run_script_at` returns the alert and `print` lines joined with `\n`. When a successful script
 assigned `app.activeLayer` or `app.activeFrame`, one more line is appended:

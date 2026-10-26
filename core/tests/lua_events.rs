@@ -244,7 +244,7 @@ fn listeners_run_in_registration_order_with_the_event_fields() {
     let s = fe.script(
         r#"
         for i = 1, 4 do
-          app.events:on("sitechange", function(ev) print(i, ev.layer, ev.frame, app.activeLayer, app.activeFrame) end)
+          app.events:on("sitechange", function(ev) print(i, ev.layer, ev.frame, app.activeLayer.stackIndex, app.activeFrame.frameNumber) end)
         end
         "#,
     );
@@ -482,7 +482,7 @@ fn handlers_run_in_the_sandbox() {
         r#"
         app.events:on("sitechange", function()
           local bad = {}
-          for _, name in ipairs({ "os", "io", "package", "debug", "dofile", "loadfile", "require" }) do
+          for _, name in ipairs({ "package", "debug", "require" }) do
             if _G[name] ~= nil then bad[#bad + 1] = name end
           end
           print("bad=" .. #bad, tostring(load(string.dump(function() end))))
@@ -501,14 +501,14 @@ fn handlers_run_in_the_sandbox() {
     // The same holds for a plugin command.
     let p = fe.plugin(
         r#"function init(plugin)
-             plugin:newCommand{ id = "x", title = "X", onclick = function() print(type(os), type(io), type(require)) end }
+             plugin:newCommand{ id = "x", title = "X", onclick = function() print(type(os), type(io), type(require), type(package)) end }
            end"#,
         None,
     );
     fe.idle();
     fe.clear();
     fe.command(p, "x");
-    assert_eq!(msgs(&fe.txn()), ["nil\tnil\tnil"]);
+    assert_eq!(msgs(&fe.txn()), ["table\ttable\tnil\tnil"]);
     fe.end(p);
 }
 
@@ -682,7 +682,7 @@ fn script_colors_reach_handlers_and_assignments_are_reported() {
     fe.host.set_colors(0x112233FF, 0x445566FF);
     let s = fe.script(
         r#"
-        app.events:on("fgcolorchange", function(ev) print(app.fgColor, ev.color) end)
+        app.events:on("fgcolorchange", function(ev) print(tostring(app.fgColor), ev.color) end)
         app.events:on("bgcolorchange", function() app.fgColor = 0x010203FF end)
         "#,
     );
@@ -690,7 +690,7 @@ fn script_colors_reach_handlers_and_assignments_are_reported() {
     fe.clear();
     fe.host.set_colors(0xAABBCCFF, 0x445566FF);
     fe.broadcast(r#"{"type":"app.event","name":"fgcolorchange","color":2864434431}"#);
-    assert_eq!(msgs(&fe.txn()), ["2864434431\t2864434431"]);
+    assert_eq!(msgs(&fe.txn()), ["Color{ r=170, g=187, b=204, a=255 }\t2864434431"]);
     fe.broadcast(r#"{"type":"app.event","name":"bgcolorchange","color":1}"#);
     let set = fe.of_type("app.set");
     assert_eq!(num(&set, "fgColor"), 0x010203FF);

@@ -180,7 +180,8 @@ impl PixmithApp {
             self.error = Some(format!("Could not read {name}."));
             return;
         };
-        self.lua_start_script(&name, &source);
+        // The session is named by the path, so two scripts called alike keep their "always allow" answers apart.
+        self.lua_start_script(&path.to_string_lossy(), &source);
     }
 }
 

@@ -216,8 +216,19 @@ impl Mode {
 
 /// A move in progress: edits are recomputed from the pixels as they were when the drag began.
 enum Drag {
-    Pixels { layer: usize, frame: usize, base: Vec<u8>, mask: Selection, had_selection: bool },
-    Float { x: i32, y: i32 },
+    Pixels {
+        layer: usize,
+        frame: usize,
+        base: Vec<u8>,
+        /// The cel's off-canvas part when the drag began (a whole-cel move carries it along).
+        base_outside: Option<Arc<crate::document::OffCanvas>>,
+        mask: Selection,
+        had_selection: bool,
+    },
+    Float {
+        x: i32,
+        y: i32,
+    },
 }
 
 /// An interactive selection (marquee, lasso) that recombines its shape with `base` on every update.
@@ -697,6 +708,7 @@ pub fn move_begin(e: &mut Editor, layer: usize, frame: usize) -> bool {
         layer,
         frame,
         base: cel_pixels(&e.sprite, layer, frame),
+        base_outside: e.sprite.cels[frame][layer].as_ref().and_then(|c| c.outside.clone()),
         had_selection: sel.is_some(),
         mask: sel.unwrap_or_else(|| Selection::new(w, h, true)),
     });
@@ -706,7 +718,7 @@ pub fn move_begin(e: &mut Editor, layer: usize, frame: usize) -> bool {
 /// Places the moved pixels at total offset (dx, dy) from where the move began.
 pub fn move_to(e: &mut Editor, dx: i32, dy: i32) {
     let Some(drag) = e.sel.drag.take() else { return };
-    let Drag::Pixels { layer, frame, ref base, ref mask, had_selection } = drag else {
+    let Drag::Pixels { layer, frame, ref base, ref base_outside, ref mask, had_selection } = drag else {
         if let Drag::Float { x, y } = drag {
             float_move(e, x + dx, y + dy);
         }
@@ -717,6 +729,19 @@ pub fn move_to(e: &mut Editor, dx: i32, dy: i32) {
     // The drag was begun on a canvas of another size (the sprite was replaced meanwhile).
     if (w, h) != (e.sprite.width, e.sprite.height) {
         e.sel.drag = None;
+        return;
+    }
+    let tilemap = e.sprite.layers[layer].kind == crate::document::tilemap::KIND_TILEMAP;
+    if !had_selection && !tilemap {
+        // Moving the whole cel: its content keeps its place relative to the cel, so what leaves the
+        // canvas is kept and what comes back is revealed (Aseprite behaviour).
+        if let Some(cel) = e.sprite.cel_mut(layer, frame) {
+            cel.pixels.clone_from(base);
+            cel.outside = base_outside.clone();
+            // Content that would reach too far for the file format is not moved.
+            let _ = cel.translate(w as usize, h as usize, dx, dy);
+        }
+        e.sel.drag = Some(drag);
         return;
     }
     if let Some(cel) = e.sprite.cel_mut(layer, frame) {
@@ -771,15 +796,18 @@ pub fn delete(e: &mut Editor, layer: usize, frame: usize) -> bool {
     // Nothing visible in the region: no undo step.
     let anything = e.sprite.cels[frame][layer].as_ref().is_some_and(|c| {
         let sel = e.sel.active(w, h);
-        (0..h as i32).any(|y| {
-            (0..w as i32).any(|x| sel.is_none_or(|s| s.get(x, y)) && c.pixels[px_index(w, x, y)..][..4] != [0; 4])
-        })
+        // Without a selection the whole cel is cleared, including what lies beyond the canvas.
+        (sel.is_none() && c.outside.is_some())
+            || (0..h as i32).any(|y| {
+                (0..w as i32).any(|x| sel.is_none_or(|s| s.get(x, y)) && c.pixels[px_index(w, x, y)..][..4] != [0; 4])
+            })
     });
     if !anything {
         return false;
     }
     e.checkpoint();
     let sel = e.sel.active(w, h);
+    let whole = sel.is_none();
     let Some(cel) = e.sprite.cel_mut(layer, frame) else { return false };
     for y in 0..h as i32 {
         for x in 0..w as i32 {
@@ -787,6 +815,9 @@ pub fn delete(e: &mut Editor, layer: usize, frame: usize) -> bool {
                 cel.pixels[px_index(w, x, y)..][..4].fill(0);
             }
         }
+    }
+    if whole {
+        cel.outside = None;
     }
     sync_tiles(e, layer, frame);
     true
@@ -908,6 +939,9 @@ pub fn transform(e: &mut Editor, layer: usize, frame: usize, op: Op) -> bool {
     let (w, h) = (e.sprite.width, e.sprite.height);
     let sel = e.sel.active(w, h).cloned();
     let (bx, by, bw, bh) = sel.as_ref().and_then(|s| s.bounds()).unwrap_or((0, 0, w as i32, h as i32));
+    if sel.is_none() && e.sprite.cels[frame][layer].as_ref().is_some_and(|c| c.outside.is_some()) {
+        return transform_whole_cel(e, layer, frame, op);
+    }
     let Some(cel) = e.sprite.cel_mut(layer, frame) else { return false };
 
     let (bwu, bhu) = (bw as usize, bh as usize);
@@ -956,6 +990,41 @@ pub fn transform(e: &mut Editor, layer: usize, frame: usize, op: Op) -> bool {
     true
 }
 
+/// `transform` of a whole cel that has content beyond the canvas: the full content is flipped or
+/// rotated about the canvas, like the visible part.
+fn transform_whole_cel(e: &mut Editor, layer: usize, frame: usize, op: Op) -> bool {
+    let (w, h) = (e.sprite.width as usize, e.sprite.height as usize);
+    let (bw, bh) = (w as i64, h as i64);
+    let rotate = matches!(op, Op::RotateCw | Op::RotateCcw);
+    let (nx, ny) = if rotate { ((bw - bh) / 2, (bh - bw) / 2) } else { (0, 0) };
+    let map = |x: i64, y: i64| -> (i64, i64) {
+        let (dx, dy) = match op {
+            Op::FlipH => (bw - 1 - x, y),
+            Op::FlipV => (x, bh - 1 - y),
+            Op::RotateCw => (bh - 1 - y, x),
+            Op::RotateCcw => (y, bw - 1 - x),
+        };
+        (nx + dx, ny + dy)
+    };
+    let Some(cel) = e.sprite.cel_mut(layer, frame) else { return false };
+    let Some(full) = cel.full_image(w, h) else { return true };
+    let (x0, y0) = (full.x as i64, full.y as i64);
+    let (x1, y1) = (x0 + full.w as i64 - 1, y0 + full.h as i64 - 1);
+    let (a, b) = (map(x0, y0), map(x1, y1));
+    let (rx, ry) = (a.0.min(b.0), a.1.min(b.1));
+    let (rw, rh) = ((a.0 - b.0).unsigned_abs() as usize + 1, (a.1 - b.1).unsigned_abs() as usize + 1);
+    let (Ok(rx32), Ok(ry32)) = (i32::try_from(rx), i32::try_from(ry)) else { return false };
+    let mut out = vec![0u8; rw * rh * 4];
+    for sy in 0..full.h {
+        for sx in 0..full.w {
+            let (tx, ty) = map(x0 + sx as i64, y0 + sy as i64);
+            let d = ((ty - ry) as usize * rw + (tx - rx) as usize) * 4;
+            out[d..d + 4].copy_from_slice(&full.rgba[(sy * full.w + sx) * 4..][..4]);
+        }
+    }
+    cel.set_full(w, h, (rx32, ry32, rw, rh), &out).is_ok()
+}
+
 // MARK: Canvas size
 
 /// Resizes the canvas of every frame and layer; old content lands at (ox, oy) in the new canvas.
@@ -983,6 +1052,21 @@ pub fn resize_canvas(e: &mut Editor, nw: i32, nh: i32, ox: i32, oy: i32) -> bool
         let key = Arc::as_ptr(cel);
         let mut px = vec![0u8; nw as usize * nh as usize * 4];
         let (x0, x1) = (ox.max(0), (ox + w).min(nw));
+        // The full content (also what lies beyond the old canvas) is placed on the new canvas.
+        let full = if cel.pixels.len() == w as usize * h as usize * 4 && cel.tiles.is_none() {
+            // Content that was cropped away by this resize is kept beyond the new edges, and content
+            // that was beyond the old edges can come into view.
+            let full = cel.full_image(w as usize, h as usize);
+            full.filter(|f| {
+                cel.outside.is_some()
+                    || f.x as i64 + ox as i64 + f.w as i64 > nw as i64
+                    || f.y as i64 + oy as i64 + f.h as i64 > nh as i64
+                    || f.x as i64 + (ox as i64) < 0
+                    || f.y as i64 + (oy as i64) < 0
+            })
+        } else {
+            None
+        };
         for y in oy.max(0)..(oy + h).min(nh) {
             if x0 < x1 && cel.pixels.len() == w as usize * h as usize * 4 {
                 let src = px_index(w as u32, x0 - ox, y - oy);
@@ -993,14 +1077,19 @@ pub fn resize_canvas(e: &mut Editor, nw: i32, nh: i32, ox: i32, oy: i32) -> bool
         }
         // Tile grids move with the content; their pixels are re-rendered below.
         let tiles = crate::document::tilemap::shifted(cel.tiles.as_ref(), ox, oy);
-        let moved = Arc::new(Cel {
+        let mut moved = Cel {
             opacity: cel.opacity,
             pixels: px,
             tiles,
             user_data: cel.user_data.clone(),
             z_index: cel.z_index,
             ..Default::default()
-        });
+        };
+        if let Some(f) = full {
+            // Fails only for content that would lie too far away for the file format, which is then dropped.
+            let _ = moved.set_full(nw as usize, nh as usize, (f.x + ox, f.y + oy, f.w, f.h), &f.rgba);
+        }
+        let moved = Arc::new(moved);
         done.insert(key, moved.clone());
         *cel = moved;
     }

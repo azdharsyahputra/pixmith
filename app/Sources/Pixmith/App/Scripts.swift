@@ -51,7 +51,8 @@ extension SpriteModel {
             errorMessage = "Could not read \(url.lastPathComponent)."
             return
         }
-        ScriptSessions.shared.start(source: source, name: url.lastPathComponent)
+        // The full path is the script's identity for "Always Allow for This Script" (two scripts may share a file name).
+        ScriptSessions.shared.start(source: source, name: url.standardizedFileURL.path)
     }
 
     func runScriptFromPanel() {

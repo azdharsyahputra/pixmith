@@ -4,7 +4,7 @@
 use crate::document::color_mode::{ColorMode, Encoder};
 use crate::document::spritedata::ColorProfile;
 use crate::document::tilemap;
-use crate::document::{default_palette, Cel, Layer, Sprite, Tag, MAX_CANVAS_PIXELS};
+use crate::document::{default_palette, Cel, Layer, OffCanvas, Sprite, Tag, MAX_CANVAS_PIXELS};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -281,6 +281,12 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
                 let src = to_rgba(&data, depth, &palette, transparent, background);
                 let mut pixels = vec![0; w * h * 4];
                 blit(&mut pixels, w, h, &src, x, y, cw, ch);
+                // What lies beyond the canvas is kept (a part too far away for Pixmith is dropped).
+                let outside = if x < 0 || y < 0 || x as i64 + cw as i64 > w as i64 || y as i64 + ch as i64 > h as i64 {
+                    OffCanvas::extract(w, h, (x, y, cw, ch), &src).ok().flatten().map(Arc::new)
+                } else {
+                    None
+                };
                 let indices = (depth == 8).then(|| {
                     Arc::new(crate::document::color_mode::index_canvas(&data, x, y, cw, ch, w, h, transparent))
                 });
@@ -289,6 +295,7 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
                     pixels,
                     indices,
                     z_index: p.z_index,
+                    outside,
                     ..Default::default()
                 }));
             }
@@ -579,41 +586,66 @@ fn tags_body(tags: &[Tag]) -> Vec<u8> {
     b
 }
 
-/// Writes a cel trimmed to its non-transparent bounds (one transparent pixel if it is empty).
+/// Writes a cel trimmed to its non-transparent bounds, including the part beyond the canvas (one
+/// transparent pixel if it is empty).
 fn cel_body(layer: usize, cel: &Cel, w: usize, h: usize, enc: &mut Encoder, background: bool) -> Vec<u8> {
-    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
-    for y in 0..h {
-        for x in 0..w {
-            if cel.pixels[(y * w + x) * 4 + 3] != 0 {
-                x0 = x0.min(x);
-                y0 = y0.min(y);
-                x1 = x1.max(x + 1);
-                y1 = y1.max(y + 1);
-            }
+    // The file stores x and y as signed 16-bit values and the size as unsigned 16-bit ones.
+    let fits = |(x, y, fw, fh): (i32, i32, usize, usize)| {
+        fw <= u16::MAX as usize && fh <= u16::MAX as usize && x >= i16::MIN as i32 && y >= i16::MIN as i32
+    };
+    let (x0, y0, cw, ch) = match cel.full_bounds(w, h) {
+        Some(b) if fits(b) => b,
+        // Too far or too large for the format: only what is visible inside the canvas is stored.
+        Some(_) => {
+            let mut visible = cel.clone();
+            visible.outside = None;
+            visible.full_bounds(w, h).unwrap_or((0, 0, 1, 1))
         }
-    }
-    if x0 >= x1 {
         // An empty cel is still a cel (a keyframe, possibly with user data): store one transparent pixel.
-        (x0, y0, x1, y1) = (0, 0, 1, 1);
-    }
-    let cw = x1 - x0;
+        None => (0, 0, 1, 1),
+    };
     let hints = cel.indices.as_deref().filter(|i| i.len() == w * h);
     let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
-    for y in y0..y1 {
-        let s = (y * w + x0) * 4;
-        let row_hints = hints.map(|i| &i[y * w + x0..y * w + x1]);
-        z.write_all(&enc.encode_cel_row(background, &cel.pixels[s..s + cw * 4], row_hints)).expect("in-memory write");
+    if cel.outside.is_none() || (x0 >= 0 && y0 >= 0 && x0 as usize + cw <= w && y0 as usize + ch <= h) {
+        let (x0, y0) = (x0 as usize, y0 as usize);
+        for y in y0..y0 + ch {
+            let s = (y * w + x0) * 4;
+            let row_hints = hints.map(|i| &i[y * w + x0..y * w + x0 + cw]);
+            z.write_all(&enc.encode_cel_row(background, &cel.pixels[s..s + cw * 4], row_hints))
+                .expect("in-memory write");
+        }
+    } else {
+        // Content beyond the canvas: encode the full image row by row (palette index hints only
+        // exist for the part inside the canvas).
+        let full = cel.read_region(w, h, (x0, y0, cw, ch));
+        for row in 0..ch {
+            let ay = y0 as i64 + row as i64;
+            let hint_row: Option<Vec<u8>> = hints.map(|hi| {
+                (0..cw)
+                    .map(|c| {
+                        let ax = x0 as i64 + c as i64;
+                        if ax >= 0 && ay >= 0 && ax < w as i64 && ay < h as i64 {
+                            hi[ay as usize * w + ax as usize]
+                        } else {
+                            0
+                        }
+                    })
+                    .collect()
+            });
+            let line = &full[row * cw * 4..(row + 1) * cw * 4];
+            z.write_all(&enc.encode_cel_row(background, line, hint_row.as_deref())).expect("in-memory write");
+        }
     }
     let mut b = Vec::new();
     put_u16(&mut b, layer as u16);
-    put_u16(&mut b, x0 as u16);
-    put_u16(&mut b, y0 as u16);
+    put_u16(&mut b, x0 as i16 as u16);
+    put_u16(&mut b, y0 as i16 as u16);
     b.push(cel.opacity);
     put_u16(&mut b, 2); // compressed image
     put_u16(&mut b, cel.z_index as u16);
     b.extend([0; 5]);
     put_u16(&mut b, cw as u16);
-    put_u16(&mut b, (y1 - y0) as u16);
+    put_u16(&mut b, ch as u16);
     b.extend(z.finish().expect("in-memory write"));
     b
 }
@@ -905,6 +937,35 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_cel_that_sticks_out_of_the_canvas_and_keeps_it() {
+        // 2x1 canvas, an RGBA cel of 4x1 at x = -1: pixels A B C D cover canvas x -1..3.
+        let (a, b, c, d) = ([1, 0, 0, 255], [2, 0, 0, 255], [3, 0, 0, 255], [4, 0, 0, 255]);
+        let mut cel = Vec::new();
+        put_u16(&mut cel, 0); // layer
+        put_u16(&mut cel, (-1i16) as u16);
+        put_u16(&mut cel, 0);
+        cel.push(255);
+        put_u16(&mut cel, 0); // raw
+        cel.extend([0; 7]);
+        put_u16(&mut cel, 4);
+        put_u16(&mut cel, 1);
+        for px in [a, b, c, d] {
+            cel.extend(px);
+        }
+        let mut file = header(1, 2, 1, 32, 0);
+        file.extend(frame(vec![chunk(CHUNK_LAYER, layer_body(&Layer::new("L"))), chunk(CHUNK_CEL, cel)], 100));
+        let len = file.len() as u32;
+        file[..4].copy_from_slice(&len.to_le_bytes());
+        let s = read(&file).unwrap();
+        s.validate().unwrap();
+        let cel = s.cels[0][0].as_ref().unwrap();
+        assert_eq!(&cel.pixels[..], &[b, c].concat()[..]);
+        assert_eq!(cel.full_bounds(2, 1), Some((-1, 0, 4, 1)));
+        assert_eq!(cel.full_image(2, 1).unwrap().rgba, [a, b, c, d].concat());
+        assert_eq!(read(&write(&s)).unwrap(), s);
+    }
+
+    #[test]
     fn empty_cels_survive_a_round_trip() {
         let mut s = Sprite::new(3, 3);
         s.cels[0][0] = Some(Arc::new(Cel {
@@ -914,6 +975,7 @@ mod tests {
             user_data: Default::default(),
             indices: None,
             z_index: 0,
+            outside: None,
         }));
         let back = read(&write(&s)).unwrap();
         assert_eq!(back.cels[0][0].as_ref().map(|c| (c.opacity, c.pixels.iter().all(|&p| p == 0))), Some((200, true)));

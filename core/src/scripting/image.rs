@@ -6,11 +6,14 @@
 //! instructions however it is used. Images are always RGBA in memory; the color mode a script passes
 //! to `Image(w, h, colorMode)` is only remembered (cels snap to the sprite's color mode when written).
 //!
-//! Pixmith cels are full-canvas buffers, so `cel.position` and `cel.bounds` describe the box around
-//! the cel's non-transparent pixels, and `cel.image` is a view of exactly that box.
+//! Like in Aseprite a cel may extend beyond the canvas: `cel.position` and `cel.bounds` describe the box
+//! around all of the cel's non-transparent pixels (negative coordinates and sizes reaching past the
+//! canvas included), and `cel.image` is a view of exactly that box. Moving a cel off the canvas and
+//! back loses nothing (see `document::offcanvas`).
 
+use super::color::{self, PixelArg};
 use super::geometry::{int_of, size_of, take_opt_int, take_point, take_rect, PointV, RectV, SizeV};
-use super::{color_arg, pack, CelH, Ctx, Snap, SpriteH};
+use super::{CelH, Ctx, Snap, SpriteH};
 use crate::document::color_mode::ColorMode;
 use crate::document::Sprite;
 use mlua::{Error, Lua, MultiValue, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value};
@@ -29,8 +32,9 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 enum Kind {
     /// A free-standing image.
     Own { w: usize, h: usize, px: Vec<u8> },
-    /// A window onto a cel: pixel (x, y) of the image is canvas pixel (ox + x, oy + y) of the cel.
-    View { layer: usize, frame: usize, ox: usize, oy: usize, w: usize, h: usize, epoch: u64 },
+    /// A window onto a cel: pixel (x, y) of the image is pixel (ox + x, oy + y) of the cel, in canvas
+    /// coordinates (which may lie beyond the canvas).
+    View { layer: usize, frame: usize, ox: i64, oy: i64, w: usize, h: usize, epoch: u64 },
 }
 
 pub(super) struct ImageInner {
@@ -118,14 +122,10 @@ impl ImageH {
             Kind::Own { px, .. } => Ok(f(px, w, h)),
             Kind::View { layer, frame, ox, oy, .. } => {
                 let s = self.0.ctx.sprite();
-                let mut out = vec![0u8; w * h * 4];
-                if let Some(cel) = s.cels[*frame][*layer].as_ref() {
-                    let cw = s.width as usize;
-                    for r in 0..h {
-                        let src = ((oy + r) * cw + ox) * 4;
-                        out[r * w * 4..(r + 1) * w * 4].copy_from_slice(&cel.pixels[src..src + w * 4]);
-                    }
-                }
+                let out = match s.cels[*frame][*layer].as_ref() {
+                    Some(cel) => cel.read_region(s.width as usize, s.height as usize, (*ox as i32, *oy as i32, w, h)),
+                    None => vec![0u8; w * h * 4],
+                };
                 Ok(f(&out, w, h))
             }
         }
@@ -142,10 +142,55 @@ impl ImageH {
                 drop(kind);
                 let mut data = self.read(|p, _, _| p.to_vec())?;
                 let r = f(&mut data, w, h);
-                blit(self.0.ctx.sprite(), layer, frame, &data, w, h, ox as i64, oy as i64)?;
+                blit_ex(self.0.ctx.sprite(), layer, frame, &data, w, h, ox, oy, true)?;
                 Ok(r)
             }
         }
+    }
+
+    /// The pixel value `getPixel` reports for RGBA `c`, in this image's color mode (Aseprite's formats:
+    /// RGB `0xAABBGGRR`, grayscale `gray | alpha << 8`, indexed: the palette index).
+    fn value_of(&self, c: [u8; 4]) -> i64 {
+        match self.color_mode() {
+            1 => (crate::document::color_mode::luma(c) as i64) | (c[3] as i64) << 8,
+            2 => {
+                let a = super::sprites::active_ctx(&self.0.ctx);
+                let s = a.sprite();
+                if c[3] == 0 {
+                    s.transparent_index as i64
+                } else {
+                    color::nearest_index(&s.palette, c) as i64
+                }
+            }
+            _ => color::px_to_pixel(c) as i64,
+        }
+    }
+
+    /// RGBA for a pixel value or `Color` argument of the pixel functions (the inverse of `value_of`).
+    fn rgba_of(&self, a: PixelArg) -> [u8; 4] {
+        match a {
+            PixelArg::Rgba(c) => c,
+            PixelArg::Value(v) => match self.color_mode() {
+                1 => {
+                    let g = (v & 0xFF) as u8;
+                    [g, g, g, ((v >> 8) & 0xFF) as u8]
+                }
+                2 => {
+                    let act = super::sprites::active_ctx(&self.0.ctx);
+                    let s = act.sprite();
+                    if v == s.transparent_index as u32 {
+                        [0; 4]
+                    } else {
+                        s.palette.get(v as usize).copied().unwrap_or([0, 0, 0, 0])
+                    }
+                }
+                _ => color::pixel_to_px(v),
+            },
+        }
+    }
+
+    fn arg(&self, v: &Value) -> LuaResult<[u8; 4]> {
+        Ok(self.rgba_of(color::pixel_arg(v)?))
     }
 
     pub(super) fn snapshot(&self) -> LuaResult<Vec<u8>> {
@@ -169,9 +214,9 @@ impl ImageH {
                 Ok(())
             }
             Kind::View { layer, frame, ox, oy, .. } => {
-                let (layer, frame, ox, oy) = (*layer, *frame, *ox as i64, *oy as i64);
+                let (layer, frame, ox, oy) = (*layer, *frame, *ox, *oy);
                 drop(kind);
-                blit(self.0.ctx.sprite(), layer, frame, data, w, h, ox, oy)
+                blit_ex(self.0.ctx.sprite(), layer, frame, data, w, h, ox, oy, true)
             }
         }
     }
@@ -186,8 +231,9 @@ impl ImageH {
             Kind::Own { px, .. } => px[(y * w + x) * 4..][..4].try_into().unwrap_or([0; 4]),
             Kind::View { layer, frame, ox, oy, .. } => {
                 let s = self.0.ctx.sprite();
-                let i = ((oy + y) * s.width as usize + ox + x) * 4;
-                s.cels[*frame][*layer].as_ref().map_or([0; 4], |c| c.pixels[i..i + 4].try_into().unwrap_or([0; 4]))
+                s.cels[*frame][*layer]
+                    .as_ref()
+                    .map_or([0; 4], |c| c.pixel_at(s.width as usize, s.height as usize, ox + x as i64, oy + y as i64))
             }
         })
     }
@@ -213,15 +259,16 @@ impl ImageH {
                 Ok(())
             }
             Kind::View { layer, frame, ox, oy, .. } => {
-                let (layer, frame, cx, cy) = (*layer, *frame, (*ox + xu) as i64, (*oy + yu) as i64);
+                let (layer, frame, cx, cy) = (*layer, *frame, *ox + xu as i64, *oy + yu as i64);
                 drop(kind);
-                blit(self.0.ctx.sprite(), layer, frame, &c, 1, 1, cx, cy)
+                blit_ex(self.0.ctx.sprite(), layer, frame, &c, 1, 1, cx, cy, true)
             }
         }
     }
 }
 
-type Box4 = (usize, usize, usize, usize);
+/// A box (x, y, w, h) in canvas coordinates; x and y may be negative.
+type Box4 = (i64, i64, usize, usize);
 
 /// Copies `src` (`sw * sh` RGBA) onto `dst` (`dw * dh` RGBA) with its top-left at (px, py), clipped. Replaces.
 #[allow(clippy::too_many_arguments)]
@@ -255,6 +302,23 @@ pub(super) fn blit(
     px: i64,
     py: i64,
 ) -> LuaResult<()> {
+    blit_ex(s, layer, frame, src, sw, sh, px, py, false)
+}
+
+/// `blit`; with `beyond` the part that falls outside the canvas is kept in the cel instead of being
+/// clipped (except on tilemap layers, which have no content beyond the canvas).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn blit_ex(
+    s: &mut Sprite,
+    layer: usize,
+    frame: usize,
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    px: i64,
+    py: i64,
+    beyond: bool,
+) -> LuaResult<()> {
     debug_assert_eq!(src.len(), sw * sh * 4);
     let snapped: Vec<u8>;
     let data: &[u8] = if s.color_mode == ColorMode::Rgba {
@@ -265,11 +329,22 @@ pub(super) fn blit(
         &snapped
     };
     let (cw, ch) = (s.width as usize, s.height as usize);
+    let tilemap = s.layers[layer].kind == crate::document::tilemap::KIND_TILEMAP;
     let Some(cel) = s.cel_mut(layer, frame) else {
         return Err(Error::runtime("this layer cannot be drawn on (a group, or a locked reference layer)"));
     };
-    copy_clipped(&mut cel.pixels, cw, ch, data, sw, sh, px, py);
-    if s.layers[layer].kind == crate::document::tilemap::KIND_TILEMAP {
+    let inside =
+        px >= 0 && py >= 0 && px.saturating_add(sw as i64) <= cw as i64 && py.saturating_add(sh as i64) <= ch as i64;
+    if beyond && !tilemap && !inside {
+        let (Ok(x), Ok(y)) = (i32::try_from(px), i32::try_from(py)) else {
+            return Err(Error::runtime("the position is too far from the canvas"));
+        };
+        cel.write_region(cw, ch, (x, y, sw, sh), data)
+            .map_err(|e| Error::runtime(format!("cannot place the image: {e}")))?;
+    } else {
+        copy_clipped(&mut cel.pixels, cw, ch, data, sw, sh, px, py);
+    }
+    if tilemap {
         let (x0, y0) = (px.clamp(0, cw as i64) as i32, py.clamp(0, ch as i64) as i32);
         let x1 = px.saturating_add(sw as i64).clamp(0, cw as i64) as i32;
         let y1 = py.saturating_add(sh as i64).clamp(0, ch as i64) as i32;
@@ -281,30 +356,14 @@ pub(super) fn blit(
 
 // MARK: Cels
 
-/// The box around the cel's non-transparent pixels: (x, y, w, h).
+/// The box around all of the cel's non-transparent pixels, beyond the canvas included: (x, y, w, h).
 pub(super) fn cel_bbox(s: &Sprite, layer: usize, frame: usize) -> Option<Box4> {
     let cel = s.cels.get(frame)?.get(layer)?.as_ref()?;
-    let cw = s.width as usize;
-    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
-    for (y, row) in cel.pixels.chunks_exact(cw * 4).enumerate() {
-        let first = row.chunks_exact(4).position(|p| p[3] != 0);
-        let Some(first) = first else { continue };
-        let last = row.chunks_exact(4).rposition(|p| p[3] != 0).unwrap_or(first);
-        x0 = x0.min(first);
-        x1 = x1.max(last + 1);
-        y0 = y0.min(y);
-        y1 = y + 1;
-    }
-    if x1 > x0 && y1 > y0 {
-        Some((x0, y0, x1 - x0, y1 - y0))
-    } else {
-        None
-    }
+    cel.full_bounds(s.width as usize, s.height as usize).map(|(x, y, w, h)| (x as i64, y as i64, w, h))
 }
 
 pub(super) fn cel_rect(s: &Sprite, layer: usize, frame: usize) -> RectV {
-    cel_bbox(s, layer, frame)
-        .map_or_else(RectV::default, |(x, y, w, h)| RectV::new(x as i64, y as i64, w as i64, h as i64))
+    cel_bbox(s, layer, frame).map_or_else(RectV::default, |(x, y, w, h)| RectV::new(x, y, w as i64, h as i64))
 }
 
 /// `cel.image`: a live view of the cel's pixels, or `None` for an empty cel.
@@ -314,11 +373,11 @@ pub(super) fn cel_image(ctx: &Rc<Ctx>, layer: usize, frame: usize) -> Option<Ima
 
 /// `cel.image = img`: the cel now shows `img` at the cel's current position (the top-left if it was empty).
 pub(super) fn set_cel_image(ctx: &Rc<Ctx>, layer: usize, frame: usize, img: &ImageH) -> LuaResult<()> {
-    let at = cel_bbox(ctx.sprite(), layer, frame).map_or((0, 0), |b| (b.0 as i64, b.1 as i64));
+    let at = cel_bbox(ctx.sprite(), layer, frame).map_or((0, 0), |b| (b.0, b.1));
     place_cel(ctx, layer, frame, Some(img), at)
 }
 
-/// Replaces the cel with `img` (or an empty cel) at canvas position `at`.
+/// Replaces the cel with `img` (or an empty cel) at canvas position `at`, which may be beyond the canvas.
 pub(super) fn place_cel(
     ctx: &Rc<Ctx>,
     layer: usize,
@@ -340,34 +399,33 @@ pub(super) fn place_cel(
         return Err(Error::runtime("this layer cannot be drawn on (a group, or a locked reference layer)"));
     }
     if w > 0 {
-        blit(s, layer, frame, &data, w, h, at.0, at.1)?;
+        blit_ex(s, layer, frame, &data, w, h, at.0, at.1, true)?;
     } else {
         s.flush_links();
     }
     Ok(())
 }
 
-/// `cel.position = p`: moves the cel's pixels; whatever leaves the canvas is lost.
+/// `cel.position = p`: moves the cel's content. What leaves the canvas is kept and comes back when
+/// the cel is moved back.
 pub(super) fn set_cel_position(ctx: &Rc<Ctx>, layer: usize, frame: usize, p: PointV) -> LuaResult<()> {
     let s = ctx.sprite();
     if s.layers[layer].kind == crate::document::tilemap::KIND_TILEMAP {
         return Err(Error::runtime("a tilemap cel cannot be moved; use layer:setTile"));
     }
-    let Some((x, y, w, h)) = cel_bbox(s, layer, frame) else { return Ok(()) };
-    if p.x == x as i64 && p.y == y as i64 {
+    let Some((x, y, _, _)) = cel_bbox(s, layer, frame) else { return Ok(()) };
+    if p.x == x && p.y == y {
         return Ok(());
     }
-    let cw = s.width as usize;
-    let ch = s.height as usize;
+    let (dx, dy) = (p.x.checked_sub(x), p.y.checked_sub(y));
+    let (Some(dx), Some(dy)) = (dx.and_then(|v| i32::try_from(v).ok()), dy.and_then(|v| i32::try_from(v).ok())) else {
+        return Err(Error::runtime("the position is too far from the canvas"));
+    };
+    let (cw, ch) = (s.width as usize, s.height as usize);
     let Some(cel) = s.cel_mut(layer, frame) else {
         return Err(Error::runtime("this layer cannot be drawn on (a group, or a locked reference layer)"));
     };
-    let mut region = vec![0u8; w * h * 4];
-    for r in 0..h {
-        region[r * w * 4..(r + 1) * w * 4].copy_from_slice(&cel.pixels[((y + r) * cw + x) * 4..][..w * 4]);
-    }
-    cel.pixels.fill(0);
-    copy_clipped(&mut cel.pixels, cw, ch, &region, w, h, p.x, p.y);
+    cel.translate(cw, ch, dx, dy).map_err(|_| Error::runtime("the position is too far from the canvas"))?;
     s.flush_links();
     Ok(())
 }
@@ -392,7 +450,14 @@ fn load_png(path: &str) -> LuaResult<(usize, usize, Vec<u8>)> {
     let mut bytes = Vec::with_capacity(meta.len() as usize);
     file.take(MAX_PNG_FILE_BYTES + 1).read_to_end(&mut bytes).map_err(fail)?;
     if !bytes.starts_with(&PNG_SIGNATURE) {
-        return Err(Error::runtime(format!("{path} is not a PNG file (only PNG can be loaded)")));
+        // Other image formats load through the general reader (the first frame); a file named .png must be a PNG.
+        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+            return Err(Error::runtime(format!("{path} is not a PNG file")));
+        }
+        let s = crate::formats::raster::read_any(&bytes, path)
+            .map_err(|e| Error::runtime(format!("{path} is not a PNG file or another supported image: {e}")))?;
+        let (w, h) = (s.width as usize, s.height as usize);
+        return Ok((w, h, s.render(0)));
     }
     crate::formats::import::decode_png(&bytes).map_err(|e| Error::runtime(format!("{path}: {e}")))
 }
@@ -414,7 +479,7 @@ pub(super) fn image_of(v: &Value) -> Option<ImageH> {
 }
 
 fn mode_value(v: &Value) -> i64 {
-    int_of(v).filter(|m| (0..=3).contains(m)).unwrap_or(0)
+    int_of(v).filter(|m| (0..=4).contains(m)).unwrap_or(0)
 }
 
 fn image_ctor(ctx: &Rc<Ctx>, mut a: MultiValue) -> LuaResult<ImageH> {
@@ -430,7 +495,12 @@ fn image_ctor(ctx: &Rc<Ctx>, mut a: MultiValue) -> LuaResult<ImageH> {
         }
         Some(Value::Table(t)) => {
             if let Ok(Value::String(path)) = t.raw_get::<Value>("fromFile") {
-                let (w, h, px) = load_png(&path.to_str()?)?;
+                let path = path.to_str()?;
+                // Reading a file asks first (docs/LUA_HOST_API.md); relative paths are refused below.
+                if std::path::Path::new(&*path).is_absolute() {
+                    super::access::check(ctx, &path, super::access::Access::Read)?;
+                }
+                let (w, h, px) = load_png(&path)?;
                 return ImageH::own(ctx, w, h, Some(px), 0);
             }
             let named = |k: &str| t.raw_get::<Value>(k).ok().as_ref().and_then(int_of);
@@ -561,11 +631,14 @@ impl UserData for ImageH {
             let (color, rect) = match a.front() {
                 None | Some(Value::Nil) => ([0u8; 4], None),
                 Some(Value::Integer(_) | Value::Number(_)) if a.len() < 4 => {
-                    (color_arg(a.pop_front().as_ref().and_then(int_of).unwrap_or(0))?, None)
+                    (t.arg(&a.pop_front().unwrap_or(Value::Nil))?, None)
+                }
+                Some(Value::UserData(u)) if u.borrow::<color::ColorH>().is_ok() => {
+                    (t.arg(&a.pop_front().unwrap_or(Value::Nil))?, None)
                 }
                 Some(_) => {
                     let r = take_rect(&mut a, "clear")?;
-                    (a.pop_front().as_ref().and_then(int_of).map_or(Ok([0u8; 4]), color_arg)?, Some(r))
+                    (a.pop_front().map_or(Ok([0u8; 4]), |c| t.arg(&c))?, Some(r))
                 }
             };
             t.modify(|p, w, h| {
@@ -577,15 +650,18 @@ impl UserData for ImageH {
                 }
             })
         });
-        m.add_method("getPixel", |_, t, (x, y): (i64, i64)| Ok(pack(&t.get(x, y)?)));
-        m.add_method("putPixel", |_, t, (x, y, c): (i64, i64, i64)| t.put(x, y, color_arg(c)?, false));
-        m.add_method("drawPixel", |_, t, (x, y, c): (i64, i64, i64)| t.put(x, y, color_arg(c)?, true));
+        // Pixel values are Aseprite's (see `color.rs`): RGB images 0xAABBGGRR, grayscale gray | alpha << 8, indexed
+        // images the palette index. putPixel / drawPixel / clear / isPlain also take a Color.
+        m.add_method("getPixel", |_, t, (x, y): (i64, i64)| Ok(t.value_of(t.get(x, y)?)));
+        m.add_method("putPixel", |_, t, (x, y, c): (i64, i64, Value)| t.put(x, y, t.arg(&c)?, false));
+        m.add_method("drawPixel", |_, t, (x, y, c): (i64, i64, Value)| t.put(x, y, t.arg(&c)?, true));
         // drawImage(image, position [, opacity [, blendMode]]) or drawImage(image, x, y [, opacity [, blendMode]])
         m.add_method("drawImage", |_, t, mut a: MultiValue| {
             let src = image_arg(&a.pop_front().unwrap_or(Value::Nil), "drawImage")?;
             let at = if a.is_empty() { PointV::default() } else { take_point(&mut a, "drawImage")? };
             let opacity = take_opt_int(&mut a, "drawImage opacity")?.unwrap_or(255).clamp(0, 255) as u32;
-            let mode = take_opt_int(&mut a, "drawImage blend mode")?.unwrap_or(0).clamp(0, 18) as u16;
+            let mode =
+                super::commands::blend_from_aseprite(take_opt_int(&mut a, "drawImage blend mode")?.unwrap_or(0))?;
             let (sw, sh) = src.size()?;
             let data = src.snapshot()?;
             t.modify(|p, w, h| composite(p, w, h, &data, sw, sh, (at.x, at.y), opacity, mode))
@@ -619,8 +695,8 @@ impl UserData for ImageH {
             t.read(|p, _, _| p == other.as_slice())
         });
         m.add_method("isEmpty", |_, t, ()| t.read(|p, _, _| p.chunks_exact(4).all(|c| c[3] == 0)));
-        m.add_method("isPlain", |_, t, c: i64| {
-            let c = color_arg(c)?;
+        m.add_method("isPlain", |_, t, c: Value| {
+            let c = t.arg(&c)?;
             t.read(|p, _, _| p.chunks_exact(4).all(|px| px == c))
         });
         m.add_method("resize", |_, t, mut a: MultiValue| {
@@ -693,8 +769,62 @@ impl UserData for ImageH {
                 Ok(Value::UserData(it.clone()))
             })
         });
-        m.add_method("saveAs", |_, _, _: MultiValue| -> LuaResult<()> {
-            Err(Error::runtime("Image:saveAs is not available: scripts cannot write files"))
+        // saveAs(path): any image format Pixmith writes (permission: write).
+        m.add_method("saveAs", |_, t, path: String| {
+            let (w, h) = t.size()?;
+            super::sprites::save_image(&t.0.ctx, &path, t.snapshot()?, w, h)
+        });
+        // flip([FlipType]): in place; FlipType.HORIZONTAL (the default) or FlipType.VERTICAL.
+        m.add_method("flip", |_, t, how: Option<i64>| {
+            let vertical = match how.unwrap_or(0) {
+                0 => false,
+                1 => true,
+                other => return Err(Error::runtime(format!("flip: {other} is not a FlipType"))),
+            };
+            t.modify(|p, w, h| {
+                if vertical {
+                    for y in 0..h / 2 {
+                        let (top, bottom) = (y * w * 4, (h - 1 - y) * w * 4);
+                        for i in 0..w * 4 {
+                            p.swap(top + i, bottom + i);
+                        }
+                    }
+                } else {
+                    for row in p.chunks_exact_mut(w * 4) {
+                        for x in 0..w / 2 {
+                            for k in 0..4 {
+                                row.swap(x * 4 + k, (w - 1 - x) * 4 + k);
+                            }
+                        }
+                    }
+                }
+            })
+        });
+        // shrinkBounds([refColor]) -> Rectangle: the box around everything that is not the reference color
+        // (default: fully transparent pixels; with a color: pixels different from it).
+        m.add_method("shrinkBounds", |_, t, c: Option<Value>| {
+            let reference = c.filter(|v| !matches!(v, Value::Nil)).map(|v| t.arg(&v)).transpose()?;
+            let skip = |px: &[u8]| match reference {
+                Some(r) => px == r,
+                None => px[3] == 0,
+            };
+            t.read(|p, w, h| {
+                let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+                for (y, row) in p.chunks_exact(w * 4).enumerate() {
+                    if let Some(first) = row.chunks_exact(4).position(|px| !skip(px)) {
+                        let last = row.chunks_exact(4).rposition(|px| !skip(px)).unwrap_or(first);
+                        x0 = x0.min(first);
+                        x1 = x1.max(last + 1);
+                        y0 = y0.min(y);
+                        y1 = y1.max(y + 1);
+                    }
+                }
+                if x1 > x0 && y1 > y0 {
+                    RectV::new(x0 as i64, y0 as i64, (x1 - x0) as i64, (y1 - y0) as i64)
+                } else {
+                    RectV::default()
+                }
+            })
         });
     }
 }
@@ -714,12 +844,12 @@ impl UserData for PixelIt {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
-        m.add_meta_method(mlua::MetaMethod::Call, |_, t, v: Option<i64>| {
+        m.add_meta_method(mlua::MetaMethod::Call, |_, t, v: Option<Value>| {
             let (x, y) = t.pos.get();
             match v {
-                None => Ok(Some(pack(&t.img.get(x, y)?))),
+                None => Ok(Some(t.img.value_of(t.img.get(x, y)?))),
                 Some(c) => {
-                    t.img.put(x, y, color_arg(c)?, false)?;
+                    t.img.put(x, y, t.img.arg(&c)?, false)?;
                     Ok(None)
                 }
             }
@@ -757,6 +887,15 @@ mod tests {
             let dir = std::env::temp_dir().join(format!("pixmith-lua-image-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
+            // These tests read files of their own directory: allow it on this thread.
+            let prefix = dir.clone();
+            crate::scripting::access::set_thread_permission_handler(Some(std::sync::Arc::new(move |r| {
+                if std::path::Path::new(&r.path).starts_with(&prefix) {
+                    crate::scripting::access::Permission::AllowOnce
+                } else {
+                    crate::scripting::access::Permission::Deny
+                }
+            })));
             TempDir(dir)
         }
 
@@ -790,8 +929,15 @@ mod tests {
             assert(img.colorMode == ColorMode.RGB and img.rowStride == 16 and img.bytesPerPixel == 4)
             assert(img:isEmpty() and img:getPixel(0, 0) == 0 and img:getPixel(99, 0) == 0)
             img:putPixel(1, 2, 0xFF0000FF)
-            img:drawPixel(0, 0, 0x00FF0080)
-            assert(img:getPixel(1, 2) == 0xFF0000FF and img:getPixel(0, 0) == 0x00FF0080)
+            img:drawPixel(0, 0, 0x8000FF00)                  -- Aseprite pixel values: 0xAABBGGRR
+            assert(img:getPixel(1, 2) == 0xFF0000FF and img:getPixel(0, 0) == 0x8000FF00)
+            img:putPixel(2, 2, Color(1, 2, 3))               -- a Color works too
+            assert(img:getPixel(2, 2) == app.pixelColor.rgba(1, 2, 3, 255))
+            img:putPixel(2, 2, app.pixelColor.rgba(9, 8, 7, 6))
+            local px = img:getPixel(2, 2)
+            assert(app.pixelColor.rgbaR(px) == 9 and app.pixelColor.rgbaG(px) == 8)
+            assert(app.pixelColor.rgbaB(px) == 7 and app.pixelColor.rgbaA(px) == 6)
+            img:putPixel(2, 2, 0)
             img:putPixel(-1, 0, 0xFFFFFFFF)                  -- outside: ignored
             local c = img:clone()
             c:putPixel(1, 2, 0)
@@ -802,16 +948,16 @@ mod tests {
             assert(Image{ width = 3, height = 3, colorMode = ColorMode.INDEXED }.colorMode == ColorMode.INDEXED)
             assert(img.spec.width == 4 and img.spec.height == 3)
             local plain = Image(2, 2)
-            plain:clear(0x112233FF)
-            assert(plain:isPlain(0x112233FF))
+            plain:clear(0xFF332211)
+            assert(plain:isPlain(0xFF332211) and plain:isPlain(Color(0x11, 0x22, 0x33)))
             plain:clear(Rectangle(0, 0, 1, 1))
-            assert(plain:getPixel(0, 0) == 0 and plain:getPixel(1, 1) == 0x112233FF)
+            assert(plain:getPixel(0, 0) == 0 and plain:getPixel(1, 1) == 0xFF332211)
             plain:clear()
             assert(plain:isEmpty())
             assert(not pcall(Image, 0, 5) and not pcall(Image) and not pcall(Image, "x"))
             assert(not pcall(Image, 1 << 20, 1 << 20))
-            local ok, err = pcall(function() img:saveAs("/tmp/x.png") end)
-            assert(not ok and err:find("cannot write"))
+            local ok, err = pcall(function() img:saveAs("/tmp/pixmith-never-written.png") end)
+            assert(not ok and err:find("permission denied"), err)
         "#,
         );
     }
@@ -850,8 +996,8 @@ mod tests {
             r#"
             local img = Image(2, 2)
             img.bytes = "\xff\x00\x00\xff" .. "\x00\xff\x00\xff" .. "\x00\x00\xff\xff" .. "\x01\x02\x03\x04"
-            assert(img:getPixel(0, 0) == 0xFF0000FF and img:getPixel(1, 0) == 0x00FF00FF)
-            assert(img:getPixel(0, 1) == 0x0000FFFF and img:getPixel(1, 1) == 0x01020304)
+            assert(img:getPixel(0, 0) == 0xFF0000FF and img:getPixel(1, 0) == 0xFF00FF00)
+            assert(img:getPixel(0, 1) == 0xFFFF0000 and img:getPixel(1, 1) == 0x04030201)
             assert(#img.bytes == 16 and img.bytes:byte(13) == 1 and img.bytes:byte(16) == 4)
             local ok, err = pcall(function() img.bytes = "short" end)
             assert(not ok and err:find("needs 16 bytes"), err)
@@ -884,13 +1030,14 @@ mod tests {
             local half = Image(1, 1)
             half:drawImage(src, Point(0, 0), 128)
             local c = half:getPixel(0, 0)
-            assert(c >> 8 == 0xFF0000 and (c & 0xFF) == 128, c)
+            assert(app.pixelColor.rgbaR(c) == 255 and app.pixelColor.rgbaA(c) == 128, c)
             -- drawing over opaque pixels blends
-            local base = Image(1, 1) base:clear(0x0000FFFF)
-            local top = Image(1, 1) top:clear(0xFF000080)
+            local base = Image(1, 1) base:clear(0xFFFF0000)
+            local top = Image(1, 1) top:clear(0x800000FF)
             base:drawImage(top)
             local b = base:getPixel(0, 0)
-            assert(b & 0xFF == 255 and (b >> 24) > 100 and ((b >> 8) & 0xFF) > 100, b)
+            local P = app.pixelColor
+            assert(P.rgbaA(b) == 255 and P.rgbaR(b) > 100 and P.rgbaB(b) > 100, b)
             dst:drawImage(dst, Point(0, 0))                   -- onto itself is fine
             assert(not pcall(function() dst:drawImage("nope", Point(0, 0)) end))
         "#,
@@ -904,11 +1051,11 @@ mod tests {
             &mut e,
             r#"
             local img = Image(2, 1)
-            img:putPixel(0, 0, 0xFF0000FF) img:putPixel(1, 0, 0x00FF00FF)
+            img:putPixel(0, 0, 0xFF0000FF) img:putPixel(1, 0, 0xFF00FF00)
             img:resize(4, 2)
             assert(img.width == 4 and img.height == 2)
             assert(img:getPixel(0, 1) == 0xFF0000FF and img:getPixel(1, 0) == 0xFF0000FF)
-            assert(img:getPixel(2, 0) == 0x00FF00FF and img:getPixel(3, 1) == 0x00FF00FF)
+            assert(img:getPixel(2, 0) == 0xFF00FF00 and img:getPixel(3, 1) == 0xFF00FF00)
             img:resize(Size(1, 1))
             assert(img.width == 1 and img:getPixel(0, 0) == 0xFF0000FF)
             assert(not pcall(function() img:resize(0, 1) end))
@@ -935,17 +1082,17 @@ mod tests {
 
             local img = cel.image
             assert(img.width == 3 and img.height == 2 and img:getPixel(0, 0) == 0xFF0000FF)
-            assert(img.cel.layer == 2)
+            assert(img.cel.layer.stackIndex == 2 and img.cel.frame.frameNumber == 1 and img.cel.frameNumber == 1)
             -- the image is a live view: drawing on it draws on the cel
-            img:putPixel(1, 1, 0x00FF00FF)
+            img:putPixel(1, 1, 0xFF00FF00)
             assert(sprite:getPixel(3, 4, 2, 1) == 0x00FF00FF)
             sprite:setPixel(2, 3, 0x0000FFFF, 2, 1)
-            assert(img:getPixel(0, 0) == 0x0000FFFF)
+            assert(img:getPixel(0, 0) == 0xFFFF0000)
             img:drawImage(src, Point(0, 0))
             assert(sprite:getPixel(2, 3, 2, 1) == 0xFF0000FF)
 
             -- replace the cel's image
-            local big = Image(2, 2) big:clear(0x00FFFFFF)
+            local big = Image(2, 2) big:clear(0xFFFFFF00)
             cel.image = big
             assert(cel.bounds == Rectangle(2, 3, 2, 2) and sprite:getPixel(4, 3, 2, 1) == 0)
             assert(sprite:getPixel(2, 3, 2, 1) == 0x00FFFFFF)
@@ -953,14 +1100,19 @@ mod tests {
             -- move the cel
             cel.position = Point(0, 0)
             assert(cel.bounds == Rectangle(0, 0, 2, 2) and sprite:getPixel(2, 3, 2, 1) == 0)
-            cel.position = Point(7, 7)                          -- clipped at the canvas edge
-            assert(cel.bounds == Rectangle(7, 7, 1, 1))
+            cel.position = Point(7, 7)                          -- sticks out of the canvas, nothing is lost
+            assert(cel.bounds == Rectangle(7, 7, 2, 2))
+            cel.position = Point(0, 0)
+            assert(cel.bounds == Rectangle(0, 0, 2, 2) and sprite:getPixel(0, 0, 2, 1) == 0x00FFFFFF)
 
             -- frames, handles, replacing and errors
             sprite:newFrame()
             local c2 = sprite:newCel(layer, sprite.frames[2], src)
-            assert(c2.frame == 2 and c2.position == Point(0, 0))
-            sprite:newCel(1, 2, src, Point(100, 100))                         -- fully clipped: an empty cel
+            assert(c2.frame.frameNumber == 2 and c2.frame == sprite.frames[2] and c2.position == Point(0, 0))
+            sprite:newCel(1, 2, src, Point(100, 100))                         -- entirely beyond the canvas: kept
+            assert(not sprite:cel(1, 2).isEmpty and sprite:cel(1, 2).bounds == Rectangle(100, 100, 3, 2))
+            assert(sprite:cel(1, 2).image.width == 3)
+            sprite:newCel(1, 2)
             assert(sprite:cel(1, 2).isEmpty and sprite:cel(1, 2).image == nil)
             assert(layer:cel(1).opacity == 255)
             assert(not pcall(sprite.newCel, sprite, 99, 1, src))
@@ -1004,7 +1156,7 @@ mod tests {
             local bytes = ("\xff\x00\x00\xff"):rep(16)
             sprite:setPixels(1, 1, bytes)
             assert(sprite:getPixel(0, 0) == 0xFF0000FF and sprite:getPixel(3, 3) == 0xFF0000FF)
-            local img = Image(2, 2) img:clear(0x00FF00FF)
+            local img = Image(2, 2) img:clear(0xFF00FF00)
             sprite:setPixels(1, 1, img, 1, 1)                     -- at (1, 1), the image's size
             assert(sprite:getPixel(1, 1) == 0x00FF00FF and sprite:getPixel(2, 2) == 0x00FF00FF)
             assert(sprite:getPixel(0, 0) == 0xFF0000FF and sprite:getPixel(3, 3) == 0xFF0000FF)
@@ -1035,7 +1187,7 @@ mod tests {
                 r#"
             local img = Image{{ fromFile = {png} }}
             assert(img.width == 5 and img.height == 4)
-            assert(img:getPixel(0, 0) == 0x0A141EFF and img:getPixel(4, 3) == 0x0A141EFF)
+            assert(img:getPixel(0, 0) == 0xFF1E140A and img:getPixel(4, 3) == 0xFF1E140A)
             local cel = sprite:newCel(sprite.layers[1], 1, img, Point(1, 1))
             assert(cel.bounds == Rectangle(1, 1, 5, 4))
             sprite:setPixels(1, 1, Image{{ fromFile = {png} }}, 0, 0)
@@ -1135,7 +1287,7 @@ mod tests {
         ok(
             &mut e,
             r#"
-            local img = Image(1, 1) img:clear(0xFEFEFEFF)
+            local img = Image(1, 1) img:clear(0xFFFEFEFE)
             sprite:newCel(sprite.layers[1], 1, img)
             assert(sprite:getPixel(0, 0) == 0xFFFFFFFF, sprite:getPixel(0, 0))
         "#,
@@ -1208,7 +1360,7 @@ mod tests {
             -- draw an image into another
             local canvas = Image(spr.width, spr.height)
             canvas:drawImage(cel.image, cel.position)
-            assert(canvas:getPixel(4, 5) == 0xFF8000FF and canvas:getPixel(3, 5) == 0)
+            assert(canvas:getPixel(4, 5) == 0xFF0080FF and canvas:getPixel(3, 5) == 0)
             print(spr.width .. "x" .. spr.height, tostring(cel.bounds))
         "#
             ),

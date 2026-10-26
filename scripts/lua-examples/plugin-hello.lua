@@ -30,7 +30,7 @@ function init(plugin)
 
   -- Events: report the active layer and frame whenever the site changes.
   app.events:on("sitechange", function(ev)
-    print("site: layer " .. app.activeLayer .. ", frame " .. app.activeFrame)
+    print("site: layer " .. app.activeLayer.stackIndex .. ", frame " .. app.activeFrame.frameNumber)
   end)
 end
 

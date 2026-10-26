@@ -15,7 +15,7 @@
 
 use crate::document::slices::UserData;
 use crate::document::tilemap::TileGrid;
-use crate::document::{Cel, Sprite};
+use crate::document::{Cel, OffCanvas, Sprite};
 use crate::paint::selection::Selection;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -180,6 +180,8 @@ struct CelDelta {
     tiles: GridChange,
     pixels: RegionDelta,
     indices: HintChange,
+    /// The older cel's off-canvas part (an `Arc`, so keeping it is cheap).
+    outside: Option<Arc<OffCanvas>>,
 }
 
 #[derive(Clone, Debug)]
@@ -329,7 +331,8 @@ impl Compact {
     /// Writes the older values of a delta into `cel` (a cel only the caller owns) and returns the
     /// delta that restores the values it had.
     fn patch_in_place(cel: &mut Cel, d: CelDelta, width: usize) -> CelDelta {
-        let CelDelta { opacity, z_index, user_data, tiles, pixels, indices } = d;
+        let CelDelta { opacity, z_index, user_data, tiles, pixels, indices, outside } = d;
+        let inverse_outside = std::mem::replace(&mut cel.outside, outside);
         let inverse_pixels = pixels.capture_from(&cel.pixels, width);
         pixels.apply(&mut cel.pixels, width);
         let inverse_opacity = std::mem::replace(&mut cel.opacity, opacity);
@@ -360,6 +363,7 @@ impl Compact {
             tiles: inverse_tiles,
             pixels: inverse_pixels,
             indices: inverse_hints,
+            outside: inverse_outside,
         }
     }
 
@@ -385,7 +389,7 @@ impl Compact {
 
     /// Builds the older cel from a delta by copying the newer cel.
     fn rebuild(d: CelDelta, newer: Option<&Cel>, width: usize) -> Cel {
-        let CelDelta { opacity, z_index, user_data, tiles, pixels, indices } = d;
+        let CelDelta { opacity, z_index, user_data, tiles, pixels, indices, outside } = d;
         let mut px = newer.map(|n| n.pixels.clone()).unwrap_or_default();
         pixels.apply(&mut px, width);
         let grid = match tiles {
@@ -402,7 +406,7 @@ impl Compact {
                 Arc::new(v)
             }),
         };
-        Cel { opacity, pixels: px, tiles: grid, user_data, indices: hints, z_index }
+        Cel { opacity, pixels: px, tiles: grid, user_data, indices: hints, z_index, outside }
     }
 
     /// Calls `f(address, bytes)` for the memory this entry holds: its own delta data and every
@@ -411,10 +415,15 @@ impl Compact {
         f(self as *const Compact as usize, self.bytes);
         for slot in self.cels.iter().flatten() {
             match slot {
-                Slot::Full(a) => f(Arc::as_ptr(a) as usize, a.pixels.len()),
+                Slot::Full(a) => {
+                    f(Arc::as_ptr(a) as usize, a.pixels.len() + a.outside.as_ref().map_or(0, |o| o.rgba.len()))
+                }
                 Slot::Delta(d) => {
                     if let HintChange::Full(a) = &d.indices {
                         f(Arc::as_ptr(a) as usize, a.len());
+                    }
+                    if let Some(o) = &d.outside {
+                        f(Arc::as_ptr(o) as usize, o.rgba.len());
                     }
                 }
                 _ => {}
@@ -498,7 +507,7 @@ fn slot_for(
     // pixel count) the buffer is kept whole.
     let Some(n) = n.filter(|n| same_canvas && n.pixels.len() == arc.pixels.len()) else { return Slot::Full(arc) };
     // Exhaustive on purpose: a new `Cel` field must be handled here before this compiles.
-    let Cel { opacity, pixels, tiles, user_data, indices, z_index } = &*arc;
+    let Cel { opacity, pixels, tiles, user_data, indices, z_index, outside } = &*arc;
     let pixel_delta = RegionDelta::diff(pixels, &n.pixels, 4, width).unwrap_or_else(|| RegionDelta::empty(4));
     *bytes += pixel_delta.bytes() + std::mem::size_of::<CelDelta>();
     let grid = if *tiles == n.tiles {
@@ -525,6 +534,7 @@ fn slot_for(
         tiles: grid,
         pixels: pixel_delta,
         indices: hints,
+        outside: outside.clone(),
     }));
     // The old buffer is now described by the delta; if nothing else holds it, its memory serves
     // the next copy-on-write of a cel this size.

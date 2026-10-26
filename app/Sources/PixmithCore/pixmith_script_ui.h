@@ -46,3 +46,30 @@ void pixmith_script_stop(uint64_t session);
 
 // Number of live sessions.
 uint32_t pixmith_script_count(void);
+
+// File and command permissions, and documents created by scripts: docs/LUA_HOST_API.md.
+
+// access: 1 = read, 2 = write, 4 = execute. Returns 0 deny, 1 allow once, 2 always for this script.
+// Called on the script's thread; may block. `script` and `path` are valid only during the call.
+typedef uint32_t (*pixmith_script_permission_fn)(void *ctx, const char *script, const char *path, uint32_t access);
+
+// Installs (or, with fn == NULL, removes) the handler. Without one every file or command request is denied.
+void pixmith_script_set_permission_handler(pixmith_script_permission_fn fn, void *ctx);
+
+// Forgets every "always allow" answer given for any script.
+void pixmith_script_reset_grants(void);
+
+// Replaces the process-wide pre-allowed prefixes (read and write). count may be 0.
+void pixmith_script_set_allowed_paths(const char *const *paths, uint32_t count);
+
+// Registers the file of the document the front end calls `doc_tag` (sprite.filename). path == NULL forgets it.
+void pixmith_script_set_doc_path(uint64_t doc_tag, const char *path);
+
+// Ownership of a new document that a script created or opened passes to the caller (release with pixmith_free, or
+// keep it as a tab). NULL if unknown, already taken or dropped. session = 0, txn = 0 selects the last synchronous
+// run on this thread.
+PixmithDoc *pixmith_script_take_doc(uint64_t session, uint64_t txn, uint32_t index);
+
+// JSON of the documents of the last synchronous run on this thread (session = 0, txn = 0), "{}" when it used none.
+// Free with pixmith_string_free.
+char *pixmith_script_outcome(uint64_t session, uint64_t txn);

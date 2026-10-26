@@ -20,6 +20,39 @@ impl PartialEq for PendingLinks {
     }
 }
 
+/// Merge down for cels with content beyond the canvas: composites `src` (layer opacity `opacity`,
+/// blend `mode`) over `dst` in full coordinates, so nothing beyond the edges is lost. `None` when the
+/// area they span is too large (the caller then merges the canvas only).
+fn merge_full(src: &Cel, dst: Option<&Cel>, (w, h): (usize, usize), opacity: u32, mode: u16) -> Option<Cel> {
+    use crate::document::offcanvas::{union_rect, MAX_OFFCANVAS_PIXELS};
+    let mut rect = (0, 0, w, h);
+    for o in src.outside.iter().chain(dst.and_then(|d| d.outside.as_ref())) {
+        rect = union_rect(rect, o.rect());
+    }
+    if rect.2.checked_mul(rect.3)? > MAX_OFFCANVAS_PIXELS {
+        return None;
+    }
+    let mut buf = match dst {
+        Some(d) => {
+            let mut px = d.read_region(w, h, rect);
+            if d.opacity != 255 {
+                for p in px.chunks_exact_mut(4) {
+                    p[3] = (p[3] as u32 * d.opacity as u32 / 255) as u8;
+                }
+            }
+            px
+        }
+        None => vec![0; rect.2 * rect.3 * 4],
+    };
+    let op = opacity * src.opacity as u32 / 255;
+    for (d, s) in buf.chunks_exact_mut(4).zip(src.read_region(w, h, rect).chunks_exact(4)) {
+        blend_pixel(d, s, op, mode);
+    }
+    let mut cel = Cel { opacity: 255, ..Default::default() };
+    cel.set_full(w, h, rect, &buf).ok()?;
+    Some(cel)
+}
+
 /// A copy of a cel that shares no buffer with the original.
 pub fn independent_cel(c: &Option<Arc<Cel>>) -> Option<Arc<Cel>> {
     c.as_ref().map(|c| Arc::new((**c).clone()))
@@ -623,6 +656,14 @@ impl Sprite {
                 continue;
             };
             let dst_user_data = dst.as_ref().map(|d| d.user_data.clone()).unwrap_or_default();
+            if src.outside.is_some() || dst.as_ref().is_some_and(|d| d.outside.is_some()) {
+                if let Some(cel) =
+                    merge_full(&src, dst.as_deref(), (self.width as usize, self.height as usize), opacity, mode)
+                {
+                    self.cels[f][i - 1] = Some(Arc::new(Cel { user_data: dst_user_data, ..cel }));
+                    continue;
+                }
+            }
             let mut pixels = match dst {
                 Some(d) => {
                     let mut px = d.pixels.clone();
@@ -924,7 +965,7 @@ impl Sprite {
         for l in 0..self.layers.len() {
             for f in 0..nf {
                 let Some(c) = &self.cels[f][l] else { continue };
-                let content = c.pixels.chunks_exact(4).any(|p| p[3] != 0);
+                let content = c.outside.is_some() || c.pixels.chunks_exact(4).any(|p| p[3] != 0);
                 let linked = (0..nf).any(|g| g != f && matches!(&self.cels[g][l], Some(o) if Arc::ptr_eq(o, c)));
                 out[l * nf + f] = 1 | (content as u8) << 1 | (linked as u8) << 2;
             }

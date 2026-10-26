@@ -9,6 +9,7 @@ mod inspector;
 mod menus;
 pub mod projects;
 mod retouch;
+pub mod script_access;
 pub mod script_ui;
 mod selection;
 mod spritedata;
@@ -16,5 +17,6 @@ mod tilemap;
 mod timeline;
 mod tools;
 
+pub(crate) use files::same_file;
 pub use menus::FilterRegion;
 pub use tilemap::SliceInfo;

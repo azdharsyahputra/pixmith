@@ -637,13 +637,20 @@ fn plain_script_runs_have_no_ui_and_dialogs_return_at_once() {
         print(tostring(app.isUIAvailable), x.n, x.e, tostring(x.c), x.k, tostring(x.ok))
         print(app.alert{ text = "hi", buttons = { "A", "B" } })
         app.events:on("sitechange", function() end)
-        print(tostring(app.sprite == sprite), app.fgColor, app.bgColor, app.apiVersion)
+        print(tostring(app.sprite == sprite), tostring(app.fgColor), tostring(app.bgColor), app.apiVersion)
         "#,
         (0, 0),
         super::Limits::default(),
     );
     assert_eq!(o.error, None);
-    assert_eq!(o.messages, ["false\t2.5\thi\tfalse\ta\tfalse", "0", "true\t255\t4294967295\t4"]);
+    assert_eq!(
+        o.messages,
+        [
+            "false\t2.5\thi\tfalse\ta\tfalse",
+            "0",
+            "true\tColor{ r=0, g=0, b=0, a=255 }\tColor{ r=255, g=255, b=255, a=255 }\t21"
+        ]
+    );
 }
 
 #[test]
@@ -817,4 +824,130 @@ fn plugin_example_loads_and_runs_its_command() {
     let saved = json::parse(&std::fs::read_to_string(&prefs).unwrap()).unwrap();
     assert_eq!(saved.get("uses").and_then(J::as_f64), Some(1.0));
     let _ = std::fs::remove_dir_all(std::path::Path::new(&prefs).parent().unwrap());
+}
+
+// MARK: Permissions and documents (docs/LUA_HOST_API.md)
+
+static HANDLER_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+unsafe extern "C" fn test_permission_handler(
+    ctx: *mut std::ffi::c_void,
+    script: *const std::ffi::c_char,
+    path: *const std::ffi::c_char,
+    access: u32,
+) -> u32 {
+    let calls = &*(ctx as *const std::sync::atomic::AtomicU32);
+    let (script, path) = (
+        std::ffi::CStr::from_ptr(script).to_str().unwrap().to_string(),
+        std::ffi::CStr::from_ptr(path).to_str().unwrap().to_string(),
+    );
+    // Tests running at the same time ask too (and are denied); count only this test's scripts.
+    if script.starts_with("host-") {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    match (script.as_str(), access) {
+        ("host-ok", 2) if path.contains("pixmith-host-docs") => 1,
+        ("host-always", 2) => 2,
+        _ => 0,
+    }
+}
+
+fn msgs_of(txn: &J) -> Vec<String> {
+    txn.get("messages").unwrap().as_array().unwrap().iter().map(|m| m.as_str().unwrap_or("").to_string()).collect()
+}
+
+#[test]
+fn sessions_ask_the_c_handler_and_report_documents() {
+    let dir = std::env::temp_dir().join(format!("pixmith-host-docs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lua_path = |name: &str| format!("{:?}", dir.join(name).to_string_lossy());
+    unsafe {
+        super::access::pixmith_script_set_permission_handler(
+            Some(test_permission_handler),
+            &HANDLER_CALLS as *const _ as *mut std::ffi::c_void,
+        );
+    }
+    let start = |fe: &Fe, name: &str, src: &str| {
+        fe.host.start(Spec::Script { source: src.into(), name: name.into() }, Some(fe.snap())).unwrap()
+    };
+
+    // An allowed script creates and saves a sprite, writes a file and edits the document.
+    let mut fe = Fe::new();
+    let src = format!(
+        r#"
+        local s = Sprite(3, 3)
+        s:saveAs({a})
+        local f = assert(io.open({b}, "w")) f:write("x") f:close()
+        sprite:setPixel(0, 0, 0xFF0000FF)
+        local extra = Sprite(2, 2)
+        app.activeSprite = s
+        "#,
+        a = lua_path("made.aseprite"),
+        b = lua_path("note.txt"),
+    );
+    let session = start(&fe, "host-ok", &src);
+    let txn = fe.of_type("txn");
+    assert_eq!(txn.get("ok"), Some(&J::Bool(true)), "{}", json::to_string(&txn));
+    assert_eq!(txn.get("commit"), Some(&J::Bool(true)));
+    let docs = txn.get("docs").expect("a docs object").clone();
+    let new = docs.get("new").unwrap().as_array().unwrap();
+    assert_eq!(new.len(), 2, "{}", json::to_string(&docs));
+    assert_eq!(new[0].get("path").and_then(J::as_str), Some(dir.join("made.aseprite").to_str().unwrap()));
+    assert_eq!(new[0].get("modified"), Some(&J::Bool(false)));
+    assert_eq!(new[1].get("path"), Some(&J::Null));
+    assert_eq!(new[1].get("modified"), Some(&J::Bool(true)));
+    assert_eq!(docs.get("active").and_then(J::as_f64), Some(0.0));
+    assert_eq!(docs.get("closeOriginal"), Some(&J::Bool(false)));
+    assert_eq!(docs.get("originalPath"), Some(&J::Null));
+    assert_eq!(fe.apply(&txn), 1, "the original document's edit is its own commit");
+    assert_eq!(fe.pixel(0, 0), [255, 0, 0, 255]);
+    let (s, t) = (num(&txn, "session"), num(&txn, "txn"));
+    assert_eq!(s, session);
+    let made = fe.host.take_doc(s, t, 0).expect("document 0");
+    assert_eq!((made.sprite.width, made.sprite.height), (3, 3));
+    assert!(fe.host.take_doc(s, t, 0).is_none(), "taken once");
+    assert_eq!(fe.host.take_doc(s, t, 1).map(|e| e.sprite.width), Some(2));
+    assert!(fe.host.take_doc(s, t, 2).is_none());
+    assert!(fe.host.take_doc(s, t + 100, 0).is_none());
+    assert!(dir.join("made.aseprite").is_file() && dir.join("note.txt").is_file());
+    assert!(HANDLER_CALLS.load(std::sync::atomic::Ordering::SeqCst) >= 2, "one question per file");
+    fe.of_type("session.end");
+
+    // A script the handler denies gets a Lua error; an "always" answer is remembered for the script.
+    let mut fe = Fe::new();
+    start(&fe, "host-denied", &format!("print(pcall(io.open, {}, 'w'))", lua_path("denied.txt")));
+    let t = fe.of_type("txn");
+    let m = msgs_of(&t).remove(0);
+    assert!(m.starts_with("false\t") && m.contains("permission denied"), "{m}");
+    assert!(!dir.join("denied.txt").exists());
+    assert!(t.get("docs").is_none(), "no documents, no docs object");
+    let before = HANDLER_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    let src =
+        format!("io.open({}, 'w'):close() io.open({}, 'w'):close()", lua_path("always1.txt"), lua_path("always2.txt"));
+    start(&fe, "host-always", &src);
+    assert_eq!(fe.of_type("txn").get("ok"), Some(&J::Bool(true)));
+    assert_eq!(
+        HANDLER_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1,
+        "the second file needed no question"
+    );
+    super::access::reset_script_grants("host-always");
+
+    // The document's file, as registered by the front end, is sprite.filename.
+    super::host::set_doc_path(TAG, Some(std::path::PathBuf::from("/work/doc.aseprite")));
+    start(&fe, "named", "print(sprite.filename)");
+    assert_eq!(msgs_of(&fe.of_type("txn")), ["/work/doc.aseprite"]);
+    super::host::set_doc_path(TAG, None);
+    start(&fe, "named", "print(sprite.filename)");
+    assert_eq!(msgs_of(&fe.of_type("txn")), [""]);
+
+    // Closing the document is reported, and nothing of it is committed.
+    start(&fe, "host-closer", "sprite:setPixel(1, 1, 1) sprite:close()");
+    let t = fe.of_type("txn");
+    assert_eq!(t.get("commit"), Some(&J::Bool(false)));
+    assert_eq!(t.get("docs").unwrap().get("closeOriginal"), Some(&J::Bool(true)));
+
+    unsafe { super::access::pixmith_script_set_permission_handler(None, std::ptr::null_mut()) };
+    let _ = std::fs::remove_dir_all(&dir);
 }

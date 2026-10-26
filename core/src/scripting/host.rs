@@ -9,6 +9,7 @@
 use super::dialog::{self, Dlg, Reaction};
 use super::events::{event_bit, EventsH, Listener};
 use super::plugins::{self, Command, Prefs};
+use super::sprites::{self, ActiveDoc, NewDocument};
 use super::{clean_error, conform_changed_cels, new_sandbox, Ctx, Limits, SpriteH, MARKER};
 use crate::document::{Editor, Sprite};
 use crate::formats::json::{self, Value as J};
@@ -16,9 +17,11 @@ use crate::paint::selection::Selection;
 use mlua::chunk::ChunkMode;
 use mlua::{AnyUserData, Error, Function, IntoLuaMulti, Lua, Result as LuaResult, Table, Value, VmState};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -42,9 +45,11 @@ pub struct DocSnap {
     tag: u64,
     layer: usize,
     frame: usize,
+    path: Option<PathBuf>,
 }
 
 impl DocSnap {
+    /// A snapshot of `e`; the document's file is the path registered for `tag` with [`set_doc_path`].
     pub fn of(e: &Editor, tag: u64, layer: u32, frame: u32) -> DocSnap {
         DocSnap {
             sprite: e.sprite.clone(),
@@ -52,6 +57,26 @@ impl DocSnap {
             tag,
             layer: layer as usize,
             frame: frame as usize,
+            path: doc_paths().get(&tag).cloned(),
+        }
+    }
+}
+
+fn doc_paths() -> std::sync::MutexGuard<'static, HashMap<u64, PathBuf>> {
+    static PATHS: OnceLock<Mutex<HashMap<u64, PathBuf>>> = OnceLock::new();
+    PATHS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Registers the file of the document the front end calls `doc_tag` (`sprite.filename`, `app.open` of that path,
+/// `sprite:saveAs`). Call it when a document is opened, saved as, renamed or closed (`None`).
+pub fn set_doc_path(doc_tag: u64, path: Option<PathBuf>) {
+    let mut m = doc_paths();
+    match path {
+        Some(p) => {
+            m.insert(doc_tag, p);
+        }
+        None => {
+            m.remove(&doc_tag);
         }
     }
 }
@@ -84,6 +109,8 @@ struct Inner {
     /// Finished transactions waiting for the front end to apply them, by (session, txn). They outlive the
     /// session: its `txn` and `session.end` messages usually arrive in the same poll.
     commits: Mutex<VecDeque<((u64, u64), Commit)>>,
+    /// Documents a transaction created or opened, waiting for the front end to take them.
+    new_docs: Mutex<VecDeque<((u64, u64), Vec<Option<NewDocument>>)>>,
     /// `fg << 32 | bg`
     colors: AtomicU64,
     /// Budgets of one transaction.
@@ -148,6 +175,7 @@ impl Host {
             queue: Mutex::new(VecDeque::new()),
             cv: Condvar::new(),
             commits: Mutex::new(VecDeque::new()),
+            new_docs: Mutex::new(VecDeque::new()),
             colors: AtomicU64::new(0x000000FF_FFFFFFFF),
         }))
     }
@@ -274,6 +302,14 @@ impl Host {
         1
     }
 
+    /// Takes document `index` that transaction `txn` of `session` created or opened (once; `None` if unknown,
+    /// already taken or dropped).
+    pub fn take_doc(&self, session: u64, txn: u64, index: u32) -> Option<Editor> {
+        let mut d = self.0.new_docs.lock().unwrap_or_else(|p| p.into_inner());
+        let docs = &mut d.iter_mut().find(|(k, _)| *k == (session, txn))?.1;
+        docs.get_mut(index as usize)?.take().map(|n| Editor::new(n.sprite))
+    }
+
     /// Interrupts a session; it runs `exit`, closes its dialogs and ends.
     pub fn stop(&self, session: u64) {
         if let Some(s) = self.0.session(session) {
@@ -354,6 +390,11 @@ impl Rt {
             self.state.set(s);
             self.emit("state", vec![("state", J::Str(s.into()))]);
         }
+    }
+
+    /// Time spent waiting for the front end does not count toward the transaction's time limit.
+    pub fn add_wait(&self, d: Duration) {
+        self.budget.waited.set(self.budget.waited.get() + d);
     }
 
     pub fn colors(&self) -> (u32, u32) {
@@ -554,6 +595,7 @@ impl Rt {
         let ed = ctx.editor();
         let (has_doc, tag) = (doc.is_some(), doc.as_ref().map_or(0, |d| d.tag));
         let base_mask;
+        let doc_path = doc.as_ref().and_then(|d| d.path.clone());
         match doc {
             Some(d) => {
                 ed.sprite = d.sprite;
@@ -573,6 +615,11 @@ impl Rt {
         let old_mask = base_mask.clone().filter(|m| m.w == w && m.h == h);
         *ctx.mask.borrow_mut() = old_mask.clone();
         ctx.has_doc.set(has_doc);
+        ctx.shared.reset_run();
+        *ctx.doc.path.borrow_mut() = doc_path;
+        *ctx.doc.saved.borrow_mut() = None;
+        ctx.doc.closed.set(false);
+        ctx.undo.reset(before.clone(), old_mask.clone());
         ctx.messages.borrow_mut().clear();
         *ctx.label.borrow_mut() = None;
         ctx.selected.set(false);
@@ -586,10 +633,7 @@ impl Rt {
         } else {
             Value::Nil
         };
-        let _ = lua.globals().set("sprite", sprite_value.clone());
-        if let Ok(app) = lua.globals().get::<Table>("app") {
-            let _ = app.raw_set("sprite", sprite_value);
-        }
+        let _ = lua.globals().set("sprite", sprite_value);
         self.in_txn.set(true);
         let result = catch_unwind(AssertUnwindSafe(|| {
             body()?;
@@ -613,12 +657,16 @@ impl Rt {
             (l, ctx.frame.get().min(s.frame_count() - 1))
         });
         let mut fatal = false;
+        let mut docs = sprites::Docs::default();
         let (ok, error, commit) = match result {
             Ok(Ok(())) => {
                 let mut changed = false;
                 if has_doc {
                     conform_changed_cels(&mut ed.sprite, &before);
                     ed.sprite.flush_links();
+                }
+                docs = sprites::finish(&ctx, true);
+                if has_doc && !docs.close_original {
                     changed = ed.sprite != before || new_mask != old_mask;
                 }
                 if changed {
@@ -637,8 +685,12 @@ impl Rt {
                 }
                 (true, None, changed)
             }
-            Ok(Err(e)) => (false, Some(clean_error(&e)), false),
+            Ok(Err(e)) => {
+                sprites::finish(&ctx, false);
+                (false, Some(clean_error(&e)), false)
+            }
             Err(p) => {
+                sprites::finish(&ctx, false);
                 fatal = true;
                 let text = p
                     .downcast_ref::<&str>()
@@ -660,6 +712,18 @@ impl Rt {
         if commit {
             fields.push(("label", J::Str(label.unwrap_or_else(|| "Script".into()))));
         }
+        if ok {
+            if let Some(j) = docs_json(&docs) {
+                fields.push(("docs", j));
+            }
+            if !docs.new_documents.is_empty() {
+                let mut d = self.host.new_docs.lock().unwrap_or_else(|p| p.into_inner());
+                d.push_back(((self.id(), txn), docs.new_documents.into_iter().map(Some).collect()));
+                while d.len() > MAX_COMMITS {
+                    d.pop_front();
+                }
+            }
+        }
         if let (Some((l, f)), true) = (select, ok) {
             fields.push((
                 "select",
@@ -669,6 +733,39 @@ impl Rt {
         self.emit("txn", fields);
         Report { fatal: fatal || (error.is_some() && self.stopping.get()), ok }
     }
+}
+
+/// The `docs` object of a `txn` message / the sync outcome (docs/LUA_HOST_API.md); `None` when the run used no
+/// documents.
+pub(super) fn docs_json(d: &sprites::Docs) -> Option<J> {
+    if d.new_documents.is_empty() && d.active == ActiveDoc::Unchanged && !d.close_original && d.original_path.is_none()
+    {
+        return None;
+    }
+    let new: Vec<J> = d
+        .new_documents
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            J::Obj(vec![
+                ("index".into(), J::Num(i as f64)),
+                ("path".into(), n.path.as_ref().map_or(J::Null, |p| J::Str(p.to_string_lossy().into_owned()))),
+                ("modified".into(), J::Bool(n.modified)),
+            ])
+        })
+        .collect();
+    let active = match d.active {
+        ActiveDoc::Unchanged => J::Null,
+        ActiveDoc::Original => J::Str("original".into()),
+        ActiveDoc::New(i) => J::Num(i as f64),
+    };
+    Some(J::Obj(vec![
+        ("new".into(), J::Arr(new)),
+        ("active".into(), active),
+        ("closeOriginal".into(), J::Bool(d.close_original)),
+        ("originalPath".into(), d.original_path.as_ref().map_or(J::Null, |p| J::Str(p.to_string_lossy().into_owned()))),
+        ("originalSaved".into(), J::Bool(d.original_saved)),
+    ]))
 }
 
 fn cancelled() -> Error {
@@ -699,7 +796,7 @@ pub(super) fn install(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
     let app: Table = g.get("app")?;
     app.set("events", lua.create_userdata(EventsH { ctx: ctx.clone(), scope: "app" })?)?;
     app.set("isUIAvailable", ctx.rt.borrow().as_ref().is_some_and(|r| r.ui_available()))?;
-    app.set("apiVersion", 4)?;
+    app.set("apiVersion", super::commands::API_VERSION)?;
     lua.load(
         r#"
         local alert0 = app.alert
@@ -734,6 +831,8 @@ fn worker(inner: &Arc<Inner>, shared: &Arc<Shared>, rx: Receiver<Cmd>, spec: Spe
         Spec::Plugin { source, name, dir, prefs_path } => (source, name, true, dir, prefs_path),
     };
     let ctx = Rc::new(Ctx::new(&mut editor));
+    *ctx.shared.original.borrow_mut() = Rc::downgrade(&ctx);
+    *ctx.shared.access.script.borrow_mut() = name.clone();
     let limits = inner.limits;
     let budget = Rc::new(Budget {
         executed: Cell::new(0),
@@ -925,6 +1024,72 @@ pub unsafe extern "C" fn pixmith_plugin_load(
                 0
             }
         }
+    })
+}
+
+thread_local! {
+    /// The documents of the last synchronous run (`pixmith_run_script*`) on this thread, and their JSON.
+    static SYNC_DOCS: std::cell::RefCell<(String, Vec<Option<NewDocument>>)> =
+        const { std::cell::RefCell::new((String::new(), Vec::new())) };
+}
+
+pub(super) fn clear_sync_docs() {
+    SYNC_DOCS.with(|s| *s.borrow_mut() = (String::new(), Vec::new()));
+}
+
+/// Keeps the documents of a finished synchronous run for `pixmith_script_outcome(0, 0)` and
+/// `pixmith_script_take_doc(0, 0, i)`.
+pub(super) fn store_sync_docs(o: &mut super::Outcome) {
+    let docs = sprites::Docs {
+        new_documents: std::mem::take(&mut o.new_documents),
+        active: o.active,
+        close_original: o.close_original,
+        original_path: o.original_path.clone(),
+        original_saved: o.original_saved,
+    };
+    let text = docs_json(&docs).map_or_else(|| "{}".to_string(), |j| json::to_string(&j));
+    SYNC_DOCS.with(|s| *s.borrow_mut() = (text, docs.new_documents.into_iter().map(Some).collect()));
+}
+
+/// The documents of the last synchronous run on this thread, as JSON (`session` and `txn` must be 0), or `{}`.
+/// Free with `pixmith_string_free`.
+#[no_mangle]
+pub extern "C" fn pixmith_script_outcome(session: u64, txn: u64) -> *mut c_char {
+    crate::ffi::guarded("pixmith_script_outcome", std::ptr::null_mut(), || {
+        let text = if (session, txn) == (0, 0) { SYNC_DOCS.with(|s| s.borrow().0.clone()) } else { String::new() };
+        let text = if text.is_empty() { "{}".to_string() } else { text };
+        CString::new(text.replace('\0', "")).map_or(std::ptr::null_mut(), CString::into_raw)
+    })
+}
+
+/// Takes document `index` that a script created or opened: of transaction `txn` of `session`, or (with `session` and
+/// `txn` 0) of the last synchronous run on this thread. The caller owns the document (release with `pixmith_free`).
+/// NULL if unknown or already taken.
+#[no_mangle]
+pub extern "C" fn pixmith_script_take_doc(session: u64, txn: u64, index: u32) -> *mut Editor {
+    crate::ffi::guarded("pixmith_script_take_doc", std::ptr::null_mut(), || {
+        let ed = if (session, txn) == (0, 0) {
+            SYNC_DOCS.with(|s| {
+                s.borrow_mut().1.get_mut(index as usize).and_then(Option::take).map(|n| Editor::new(n.sprite))
+            })
+        } else {
+            global().take_doc(session, txn, index)
+        };
+        ed.map_or(std::ptr::null_mut(), |e| Box::into_raw(Box::new(e)))
+    })
+}
+
+/// Registers the file of the document the front end calls `doc_tag` (NULL forgets it); see `docs/LUA_HOST_API.md`.
+///
+/// # Safety
+/// `path` is NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_script_set_doc_path(doc_tag: u64, path: *const c_char) {
+    crate::ffi::guarded("pixmith_script_set_doc_path", std::ptr::null_mut(), || {
+        set_doc_path(
+            doc_tag,
+            (!path.is_null()).then(|| PathBuf::from(CStr::from_ptr(path).to_string_lossy().into_owned())),
+        );
     })
 }
 

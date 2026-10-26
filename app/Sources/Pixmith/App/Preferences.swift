@@ -1,4 +1,5 @@
 import AppKit
+import PixmithCore
 import SwiftUI
 
 /// User preferences persisted in UserDefaults. Colors are 0xRRGGBBAA.
@@ -183,6 +184,15 @@ struct GeneralPrefsView: View {
                 Toggle("Allow AI agents to control Pixmith (Live mode)", isOn: $liveEnabled)
                     .onChange(of: liveEnabled) { _ in LiveServer.shared.applyPreference() }
                 Text("Lets tools on this computer, such as the Pixmith MCP server, edit the open documents. Each edit is an undo step.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Scripts: file access") {
+                HStack {
+                    Text("Scripts ask before they read, write or run anything.")
+                    Spacer()
+                    Button("Forget Allowed Scripts") { pixmith_script_reset_grants() }
+                }
+                Text("Clears every “Always Allow for This Script” answer; those scripts ask again.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {

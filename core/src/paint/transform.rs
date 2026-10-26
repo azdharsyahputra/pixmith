@@ -381,16 +381,29 @@ pub fn begin(e: &mut Editor, layer: usize, frame: usize, rotsprite: bool) -> boo
     let (bx, by, bw, bh) = sel.as_ref().and_then(|s| s.bounds()).unwrap_or((0, 0, w as i32, h as i32));
     e.checkpoint();
     let mut base = cel_pixels(&e.sprite, layer, frame);
+    // A whole cel with content beyond the canvas is lifted as a whole, so the box covers the canvas
+    // and that content (see `document::offcanvas`).
+    let beyond = sel.is_none().then(|| e.sprite.cels[frame][layer].as_ref().and_then(|c| c.outside.clone())).flatten();
+    let ext = beyond.as_ref().map(|o| crate::document::offcanvas::union_rect((0, 0, w as usize, h as usize), o.rect()));
+    let ext = ext.filter(|r| r.2.saturating_mul(r.3) <= crate::document::offcanvas::MAX_OFFCANVAS_PIXELS);
+    let (bx, by, bw, bh) = ext.map_or((bx, by, bw, bh), |(x, y, ww, hh)| (x, y, ww as i32, hh as i32));
     let (bwu, bhu) = (bw as usize, bh as usize);
     let mut lift = vec![0u8; bwu * bhu * 4];
     let mut lmask = vec![false; bwu * bhu];
-    for y in 0..bh {
-        for x in 0..bw {
-            if sel.as_ref().is_none_or(|s| s.get(bx + x, by + y)) {
-                let (i, c) = ((y * bw + x) as usize, px_index(w, bx + x, by + y));
-                lmask[i] = true;
-                lift[i * 4..i * 4 + 4].copy_from_slice(&base[c..c + 4]);
-                base[c..c + 4].fill(0);
+    if let Some(rect) = ext {
+        let cel = e.sprite.cels[frame][layer].as_ref().expect("checked above");
+        lift = cel.read_region(w as usize, h as usize, rect);
+        lmask.fill(true);
+        base.fill(0);
+    } else {
+        for y in 0..bh {
+            for x in 0..bw {
+                if sel.as_ref().is_none_or(|s| s.get(bx + x, by + y)) {
+                    let (i, c) = ((y * bw + x) as usize, px_index(w, bx + x, by + y));
+                    lmask[i] = true;
+                    lift[i * 4..i * 4 + 4].copy_from_slice(&base[c..c + 4]);
+                    base[c..c + 4].fill(0);
+                }
             }
         }
     }
@@ -492,7 +505,7 @@ pub fn drag(e: &mut Editor, kind: Drag, start: P2, p: P2) {
 // MARK: Rendering
 
 /// Result pixel for destination pixel (x, y): color and whether it belongs to the selection.
-fn sample_nearest(s: &Session, inv: &Xform, x: usize, y: usize) -> ([u8; 4], bool) {
+fn sample_nearest(s: &Session, inv: &Xform, x: i64, y: i64) -> ([u8; 4], bool) {
     let Some(u) = inv.inverse((x as f64 + 0.5, y as f64 + 0.5)) else { return ([0; 4], false) };
     let (sx, sy) = ((u.0 - s.xf.src.0).floor(), (u.1 - s.xf.src.1).floor());
     if sx < 0.0 || sy < 0.0 || sx >= s.bw as f64 || sy >= s.bh as f64 {
@@ -505,7 +518,7 @@ fn sample_nearest(s: &Session, inv: &Xform, x: usize, y: usize) -> ([u8; 4], boo
     (s.lift[i * 4..i * 4 + 4].try_into().unwrap(), true)
 }
 
-fn sample_rotsprite(s: &Session, up: &[u32], x: usize, y: usize) -> ([u8; 4], bool) {
+fn sample_rotsprite(s: &Session, up: &[u32], x: i64, y: i64) -> ([u8; 4], bool) {
     let (uw, uh) = (s.bw * 8, s.bh * 8);
     let mut votes = [0u32; 64];
     let mut in_mask = 0;
@@ -544,8 +557,10 @@ fn render(e: &mut Editor) {
         // The canvas changed under the session (inside a transaction): it can no longer be previewed.
         return;
     }
-    let mut px = s.base.clone();
-    let mut sel = Selection::new(w as u32, h as u32, false);
+    // A whole-cel transform may carry the content beyond the canvas edges (kept in the cel's
+    // off-canvas part); a transform of a selection stays on the canvas.
+    let tilemap = e.sprite.layers.get(s.layer).is_some_and(|l| l.kind == crate::document::tilemap::KIND_TILEMAP);
+    let whole = !s.had_selection && !tilemap;
     let rotated = s.xf.angle != 0.0 || s.xf.kx != 0.0 || s.xf.ky != 0.0;
     let use_rotsprite = s.rotsprite && rotated && s.bw * s.bh <= ROTSPRITE_MAX_AREA;
     if use_rotsprite && s.up8.is_none() {
@@ -553,26 +568,60 @@ fn render(e: &mut Editor) {
             (0..s.bw * s.bh).map(|i| if s.lmask[i] { pack(&s.lift[i * 4..i * 4 + 4]) } else { 0 }).collect();
         s.up8 = Some(upscale8(&packed, s.bw, s.bh));
     }
-    if s.xf.inverse(s.xf.dp).is_some() {
+    // Destination pixels (x0..x1, y0..y1) that can be touched, and the buffer rectangle holding them.
+    let (mut x0, mut y0, mut x1, mut y1) = (0i64, 0i64, 0i64, 0i64);
+    let invertible = s.xf.inverse(s.xf.dp).is_some();
+    if invertible {
         let (bx0, by0, bx1, by1) = s.xf.bbox();
-        let (x0, y0) = ((bx0.floor().max(0.0)) as usize, (by0.floor().max(0.0)) as usize);
-        let (x1, y1) = ((bx1.ceil().min(w as f64)).max(0.0) as usize, (by1.ceil().min(h as f64)).max(0.0) as usize);
+        if whole {
+            // The preview follows the content up to half a canvas beyond each edge.
+            let m = (w.max(h) / 2).max(32) as f64;
+            let clamp = |v: f64, lo: f64, hi: f64| if v.is_finite() { v.clamp(lo, hi) } else { lo };
+            (x0, y0) = (clamp(bx0.floor(), -m, w as f64 + m) as i64, clamp(by0.floor(), -m, h as f64 + m) as i64);
+            (x1, y1) = (clamp(bx1.ceil(), -m, w as f64 + m) as i64, clamp(by1.ceil(), -m, h as f64 + m) as i64);
+        } else {
+            (x0, y0) = ((bx0.floor().max(0.0)) as i64, (by0.floor().max(0.0)) as i64);
+            (x1, y1) = ((bx1.ceil().min(w as f64)).max(0.0) as i64, (by1.ceil().min(h as f64)).max(0.0) as i64);
+        }
+    }
+    let (rx, ry, rw, rh) = if whole && x1 > x0 && y1 > y0 {
+        crate::document::offcanvas::union_rect(
+            (0, 0, w, h),
+            (x0 as i32, y0 as i32, (x1 - x0) as usize, (y1 - y0) as usize),
+        )
+    } else {
+        (0, 0, w, h)
+    };
+    let mut px = vec![0u8; rw * rh * 4];
+    for y in 0..h {
+        let d = (((y as i64 - ry as i64) as usize) * rw + (0 - rx as i64) as usize) * 4;
+        px[d..d + w * 4].copy_from_slice(&s.base[y * w * 4..(y + 1) * w * 4]);
+    }
+    let mut sel = Selection::new(w as u32, h as u32, false);
+    if invertible {
         for y in y0..y1 {
             for x in x0..x1 {
                 let (c, inside) = match (&s.up8, use_rotsprite) {
                     (Some(up), true) => sample_rotsprite(&s, up, x, y),
                     _ => sample_nearest(&s, &s.xf, x, y),
                 };
-                let i = y * w + x;
+                let i = (y - ry as i64) as usize * rw + (x - rx as i64) as usize;
                 if c[3] > 0 {
                     blend_over(&mut px[i * 4..i * 4 + 4], &c, 255);
                 }
-                sel.bits[i] = inside;
+                if !whole {
+                    sel.bits[i] = inside;
+                }
             }
         }
     }
     if let Some(cel) = e.sprite.cel_mut(s.layer, s.frame) {
-        cel.pixels = px;
+        if whole {
+            // Fails only for content that would lie too far away for the file format; the cel then keeps its last state.
+            let _ = cel.set_full(w, h, (rx, ry, rw, rh), &px);
+        } else {
+            cel.pixels = px;
+        }
     }
     crate::document::color_mode::conform_cel(&mut e.sprite, s.layer, s.frame);
     if s.had_selection {

@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Prefs.applyAppearance()
         LiveServer.shared.applyPreference()
+        // Scripts that touch files or run commands ask first.
+        ScriptPermissions.install()
         // Scripts that enabled extensions contribute load as plugins.
         PluginHost.shared.syncExtensions()
         launched = true

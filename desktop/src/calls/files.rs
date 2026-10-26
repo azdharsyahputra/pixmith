@@ -103,7 +103,7 @@ fn initial_zoom(width: u32, height: u32) -> f32 {
 }
 
 /// Two paths name the same file (symlinks resolved when the file exists).
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
@@ -184,7 +184,7 @@ impl PixmithApp {
     }
 
     /// A tab for `doc`, with a revision no other tab or earlier document of this slot has used.
-    fn new_tab(&mut self, doc: Doc) -> DocTab {
+    pub(crate) fn new_tab(&mut self, doc: Doc) -> DocTab {
         let mut tab = DocTab::new(doc);
         tab.zoom = initial_zoom(tab.doc.width(), tab.doc.height());
         self.files.next_revision += 1_000_000;

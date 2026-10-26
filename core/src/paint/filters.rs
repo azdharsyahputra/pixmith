@@ -504,6 +504,8 @@ pub fn apply(
                 tiles: cel.tiles.clone(),
                 user_data: cel.user_data.clone(),
                 z_index: cel.z_index,
+                // Filters work on the canvas; what lies beyond it stays as it is.
+                outside: cel.outside.clone(),
                 ..Default::default()
             });
             handled.insert(Arc::as_ptr(&new));
@@ -603,14 +605,18 @@ pub fn scale_sprite(sprite: &mut Sprite, new_w: u32, new_h: u32) -> bool {
                 px[d..d + 4].copy_from_slice(&cel.pixels[s..s + 4]);
             }
         }
-        let scaled = Arc::new(Cel {
+        let mut scaled = Cel {
             opacity: cel.opacity,
             pixels: px,
             tiles: cel.tiles.clone(),
             user_data: cel.user_data.clone(),
             z_index: cel.z_index,
             ..Default::default()
-        });
+        };
+        if let Some(full) = cel.outside.as_ref().and_then(|_| cel.full_image(w, h)) {
+            scale_beyond_canvas(&mut scaled, &full, (w, h), (nw, nh));
+        }
+        let scaled = Arc::new(scaled);
         done.insert(key, scaled.clone());
         *cel = scaled;
     }
@@ -618,6 +624,53 @@ pub fn scale_sprite(sprite: &mut Sprite, new_w: u32, new_h: u32) -> bool {
     sprite.width = new_w;
     sprite.height = new_h;
     true
+}
+
+/// Scales the full content `full` of a cel (which has pixels beyond the canvas) from a canvas of
+/// `from` to one of `to`, with the same nearest-neighbor sampling as the canvas itself, and stores the
+/// result in `dst`. Content that would end up too far away for the file format is dropped.
+fn scale_beyond_canvas(
+    dst: &mut Cel,
+    full: &crate::document::offcanvas::FullImage,
+    (w, h): (usize, usize),
+    (nw, nh): (usize, usize),
+) {
+    // Destination pixel d samples source floor((2d + 1) * w / (2 nw)); find the destination range
+    // whose samples fall inside the source box.
+    let range = |lo: i64, len: i64, from: i64, to: i64| -> (i64, i64) {
+        let first = (lo * to).div_euclid(from) - 1;
+        let last = ((lo + len) * to).div_euclid(from) + 2;
+        let src = |d: i64| ((2 * d + 1) * from).div_euclid(2 * to);
+        let a = (first..=last).find(|&d| src(d) >= lo).unwrap_or(last);
+        let b = (first..=last).rev().find(|&d| src(d) < lo + len).unwrap_or(first - 1);
+        (a, b + 1)
+    };
+    let (x0, x1) = range(full.x as i64, full.w as i64, w as i64, nw as i64);
+    let (y0, y1) = range(full.y as i64, full.h as i64, h as i64, nh as i64);
+    if x1 <= x0 || y1 <= y0 || x0 < i32::MIN as i64 / 2 || y0 < i32::MIN as i64 / 2 {
+        return;
+    }
+    let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if rw.saturating_mul(rh) > crate::document::offcanvas::MAX_OFFCANVAS_PIXELS {
+        return;
+    }
+    let sample = |d: i64, from: i64, to: i64| ((2 * d + 1) * from).div_euclid(2 * to);
+    let mut out = vec![0u8; rw * rh * 4];
+    for dy in 0..rh {
+        let sy = sample(y0 + dy as i64, h as i64, nh as i64) - full.y as i64;
+        if sy < 0 || sy >= full.h as i64 {
+            continue;
+        }
+        for dx in 0..rw {
+            let sx = sample(x0 + dx as i64, w as i64, nw as i64) - full.x as i64;
+            if sx < 0 || sx >= full.w as i64 {
+                continue;
+            }
+            let s = (sy as usize * full.w + sx as usize) * 4;
+            out[(dy * rw + dx) * 4..][..4].copy_from_slice(&full.rgba[s..s + 4]);
+        }
+    }
+    let _ = dst.set_full(nw, nh, (x0 as i32, y0 as i32, rw, rh), &out);
 }
 
 // ---- C ABI -------------------------------------------------------------------------------

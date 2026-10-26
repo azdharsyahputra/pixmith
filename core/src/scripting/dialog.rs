@@ -204,7 +204,8 @@ impl Widget {
             Kind::Number if self.decimals == 0 => Value::Integer(self.value.round() as i64),
             Kind::Number => Value::Number(self.value),
             Kind::Slider => Value::Integer(self.value as i64),
-            Kind::Color => Value::Integer(self.color as i64),
+            // A Color object, as in Aseprite (`dlg.data.color.red`); assigning an integer or a Color to it works.
+            Kind::Color => Value::UserData(super::color::new_color(lua, self.color.to_be_bytes())?),
             Kind::Combo => match &self.option {
                 Some(o) => Value::String(lua.create_string(o)?),
                 None => Value::Nil,
@@ -389,6 +390,11 @@ fn number_arg(key: &str, v: &Value) -> LuaResult<f64> {
 }
 
 fn color_arg(key: &str, v: &Value) -> LuaResult<u32> {
+    if let Value::UserData(_) = v {
+        return super::color::arg(v)
+            .map(u32::from_be_bytes)
+            .map_err(|_| Error::runtime(format!("'{key}' must be a color (a Color or 0xRRGGBBAA)")));
+    }
     let n = match v {
         Value::Integer(i) => Some(*i),
         Value::Number(n) if n.fract() == 0.0 => Some(*n as i64),

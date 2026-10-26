@@ -13,6 +13,7 @@
 //!
 //! The only code that talks to the core is `calls::script_ui`.
 
+mod access;
 pub mod model;
 pub mod render;
 
@@ -27,6 +28,7 @@ use model::{Dialog, Event};
 use pixmith_core::formats::json::{self, Value};
 use render::View;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// A script that has been running this long without a modal dialog gets a progress sheet with Cancel.
@@ -101,6 +103,8 @@ struct Seen {
     /// The revision of each document (by tag) when its scripts last heard about it.
     revisions: BTreeMap<u64, u64>,
     undone: BTreeMap<u64, u32>,
+    /// The file of each document (by tag) as last registered with the core.
+    paths: BTreeMap<u64, Option<PathBuf>>,
 }
 
 /// Everything the Lua side keeps in the app; one field of `GamedevState`.
@@ -117,6 +121,10 @@ pub struct LuaState {
     from_undo: bool,
     /// Notices produced while the app was borrowed, shown by the next `show`.
     notices: Vec<Notice>,
+    /// Which file and command requests of scripts this app answers.
+    permissions: access::Mode,
+    /// Requests waiting for the user; the first is on screen.
+    asking: Vec<crate::calls::script_access::Pending>,
 }
 
 impl Default for LuaState {
@@ -137,6 +145,8 @@ impl LuaState {
             last_refresh: Instant::now(),
             from_undo: false,
             notices: Vec::new(),
+            permissions: access::Mode::Off,
+            asking: Vec::new(),
         }
     }
 
@@ -144,6 +154,23 @@ impl LuaState {
     /// the core directly (the extension loader).
     pub fn start(&mut self) {
         self.host = Box::new(CoreHost::default());
+    }
+
+    /// Makes this app answer the file and command requests of scripts with a dialog. `all` takes every request of
+    /// the process (the real app); otherwise only those of scripts this app runs (tests that run apps side by
+    /// side). The handler itself comes from `calls::script_access::install`.
+    pub fn enable_permission_dialogs(&mut self, all: bool) {
+        self.permissions = if all { access::Mode::All } else { access::Mode::Sessions };
+    }
+
+    /// A permission question is on screen.
+    pub fn asking(&self) -> bool {
+        !self.asking.is_empty()
+    }
+
+    /// The question on screen: `(script, path, access)`.
+    pub fn question(&self) -> Option<(String, String, pixmith_core::scripting::access::Access)> {
+        self.asking.first().map(|p| (p.request.script_name.clone(), p.request.path.clone(), p.request.access))
     }
 
     /// Replaces the host (tests use a `FakeHost`).
@@ -198,6 +225,9 @@ impl LuaState {
 
     /// Stops every session (quit) and gives plugins a moment to run their `exit`.
     pub fn stop_all(&mut self) {
+        // Dropping the questions denies them, so no script thread keeps waiting for an answer.
+        self.asking.clear();
+        drop(self.take_requests());
         let ids: Vec<u64> = self.sessions.keys().copied().collect();
         for id in &ids {
             self.host.stop(*id);
@@ -215,6 +245,30 @@ impl LuaState {
     fn notice(&mut self, title: String, text: String, warning: bool) {
         self.notices.push(Notice { title, text, warning });
     }
+}
+
+/// What to call a script in the UI: the file name of a script given by its path.
+pub(crate) fn short_name(name: &str) -> String {
+    Path::new(name).file_name().map_or_else(|| name.to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+fn tag_of(tab: &crate::app::DocTab) -> u64 {
+    tab.doc.raw() as usize as u64
+}
+
+/// Tells the core which file each open document has (`sprite.filename`, `app.open` of the document's own path).
+fn sync_doc_paths(app: &mut PixmithApp) {
+    let now: BTreeMap<u64, Option<PathBuf>> = app.tabs.iter().map(|t| (tag_of(t), t.doc.path.clone())).collect();
+    let lua = &mut app.gamedev.lua;
+    for (tag, path) in &now {
+        if lua.seen.paths.get(tag) != Some(path) {
+            lua.host.set_doc_path(*tag, path.as_deref());
+        }
+    }
+    for tag in lua.seen.paths.keys().filter(|t| !now.contains_key(t)) {
+        lua.host.set_doc_path(*tag, None);
+    }
+    lua.seen.paths = now;
 }
 
 fn tab_by_tag(app: &PixmithApp, tag: u64) -> Option<usize> {
@@ -240,6 +294,7 @@ impl PixmithApp {
     /// Starts `source` as a script session on the active document (File > Scripts, Run Script...). The result
     /// arrives as messages: dialogs, then a transaction that is applied as one undo step.
     pub fn lua_start_script(&mut self, name: &str, source: &str) -> bool {
+        sync_doc_paths(self);
         let tab = &mut self.tabs[self.active];
         tab.playing = false;
         let (tag, layer, frame) = (tab.doc.raw() as usize as u64, tab.layer, tab.frame);
@@ -287,6 +342,7 @@ impl PixmithApp {
         if !cmd.enabled || self.job_running() {
             return;
         }
+        sync_doc_paths(self);
         let event =
             Value::Obj(vec![("type".into(), Value::Str("command".into())), ("id".into(), Value::Str(cmd.id.clone()))]);
         if let Some(s) = self.gamedev.lua.sessions.get_mut(&cmd.session) {
@@ -439,7 +495,7 @@ fn handle_txn(app: &mut PixmithApp, session: u64, msg: &Value) {
         .iter()
         .filter_map(|m| m.as_str().map(str::to_string))
         .collect();
-    let name = app.gamedev.lua.sessions.get(&session).map_or_else(|| "script".to_string(), |s| s.name.clone());
+    let name = app.gamedev.lua.sessions.get(&session).map_or_else(|| "script".to_string(), |s| short_name(&s.name));
     let index = tab_by_tag(app, tag);
     let mut conflict = false;
     let mut applied = false;
@@ -467,6 +523,9 @@ fn handle_txn(app: &mut PixmithApp, session: u64, msg: &Value) {
             app.gamedev.lua.seen.revisions.insert(tag, tab.revision);
         }
     }
+    if let Some(docs) = msg.get("docs") {
+        take_documents(app, session, txn, tag, docs, !conflict);
+    }
     let lua = &mut app.gamedev.lua;
     let cancelled = error.as_deref() == Some("script cancelled");
     if conflict {
@@ -480,6 +539,73 @@ fn handle_txn(app: &mut PixmithApp, session: u64, msg: &Value) {
         lua.notice(format!("Script error in {name}"), parts.join("\n\n"), true);
     } else if ok && !messages.is_empty() {
         lua.notice(name, messages.join("\n"), false);
+    }
+}
+
+/// The documents a script created, opened, saved or closed (the `docs` object of a `txn` message,
+/// `docs/LUA_HOST_API.md` section 2): new ones open as tabs, the reported one becomes active, the original may close
+/// without a question or take the path the script saved it to. `current` is false when the script's result for the
+/// original was discarded (a conflict): the file the script saved is then not what the tab shows.
+fn take_documents(app: &mut PixmithApp, session: u64, txn: u64, tag: u64, docs: &Value, current: bool) {
+    let original = tab_by_tag(app, tag).map(|i| app.tabs[i].doc.uid());
+    let entries = docs.get("new").and_then(Value::as_array).unwrap_or_default();
+    // The tab (by document uid) of each entry, in order.
+    let mut tabs: Vec<Option<u64>> = Vec::new();
+    for entry in entries {
+        let index = num_of(entry, "index").map_or(0, |n| n as u32);
+        let path = entry.get("path").and_then(Value::as_str).map(PathBuf::from);
+        let modified = flag_of(entry, "modified", true);
+        let taken = app.gamedev.lua.host.take_doc(session, txn, index);
+        let open_already = path.as_deref().filter(|_| !modified).and_then(|p| {
+            app.tabs
+                .iter()
+                .find(|t| t.doc.path.as_deref().is_some_and(|q| crate::calls::same_file(q, p)))
+                .map(|t| t.doc.uid())
+        });
+        if open_already.is_some() {
+            tabs.push(open_already);
+            continue;
+        }
+        let Some(mut doc) = taken else {
+            tabs.push(None);
+            continue;
+        };
+        doc.path = path;
+        if modified {
+            doc.touch();
+        }
+        let tab = app.new_tab(doc);
+        tabs.push(Some(tab.doc.uid()));
+        app.tabs.push(tab);
+    }
+    if !entries.is_empty() {
+        app.show_editor();
+        app.sync_untitled();
+    }
+    let target = match docs.get("active") {
+        Some(Value::Str(s)) if s == "original" => original,
+        Some(v) => v.as_f64().and_then(|n| tabs.get(n as usize).copied().flatten()),
+        None => None,
+    };
+    if let Some(i) = target.and_then(|uid| app.tabs.iter().position(|t| t.doc.uid() == uid)) {
+        app.active = i;
+    }
+    let Some(i) = tab_by_tag(app, tag) else { return };
+    if flag_of(docs, "closeOriginal", false) {
+        app.close_tab(i, None);
+        return;
+    }
+    if let Some(path) = docs.get("originalPath").and_then(Value::as_str).map(PathBuf::from) {
+        let tab = &mut app.tabs[i];
+        let renamed = tab.doc.path.as_ref() != Some(&path);
+        tab.doc.path = Some(path);
+        if current && flag_of(docs, "originalSaved", false) {
+            tab.doc.mark_saved();
+        }
+        app.sync_untitled();
+        if renamed {
+            note_file_renamed(app);
+        }
     }
 }
 
@@ -606,6 +732,7 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
     if !lua.available() && lua.sessions.is_empty() {
         return;
     }
+    sync_doc_paths(app);
     let mut got = pump(app);
     send_app_events(app);
     refresh_plugins(app, ctx);
@@ -616,6 +743,7 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
         got = true;
     }
     progress_sheet(app, ctx);
+    access::show(app, ctx);
     show_notices(app, ctx);
     if got {
         ctx.request_repaint();
@@ -673,7 +801,8 @@ type Outgoing = Vec<(u64, String, Event)>;
 fn render_dialogs(app: &mut PixmithApp, ctx: &egui::Context) -> Outgoing {
     let mut outgoing = Outgoing::new();
     let mut dialogs = std::mem::take(&mut app.gamedev.lua.dialogs);
-    let top_modal = dialogs.iter().rposition(|o| o.dialog.modal);
+    // A permission question on top owns Return and Escape.
+    let top_modal = dialogs.iter().rposition(|o| o.dialog.modal).filter(|_| !app.gamedev.lua.asking());
     let mut windows = 0;
     for (i, open) in dialogs.iter_mut().enumerate() {
         let mut events = Vec::new();
@@ -790,9 +919,10 @@ fn progress_sheet(app: &mut PixmithApp, ctx: &egui::Context) {
             s.locking
                 && s.state == SessionState::Running
                 && !lua.has_modal_of(**id)
+                && !lua.asking()
                 && s.since.elapsed() >= PROGRESS_AFTER
         })
-        .map(|(id, s)| (*id, s.name.clone(), s.cancelling))
+        .map(|(id, s)| (*id, short_name(&s.name), s.cancelling))
         .next();
     let Some((id, name, cancelling)) = shown else { return };
     let c = Colors::of(ctx);
