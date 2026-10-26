@@ -10,6 +10,7 @@ use pixmith_core::scripting::access::{Access, reset_script_grants};
 use pixmith_desktop::PixmithApp;
 use pixmith_desktop::script_access;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// An app that answers the permission questions of its own scripts with the real dialog.
 fn setup() -> Harness<'static, PixmithApp> {
@@ -43,6 +44,25 @@ fn finished(app: &PixmithApp) -> bool {
     app.gamedev.lua.sessions().next().is_none() && !app.gamedev.lua.asking()
 }
 
+/// Waits for the question and presses a button of it. A click that arrives while the dialog is still being laid out
+/// (its first frame only measures it) hits nothing, so it is repeated until the question is gone.
+fn press(h: &mut Harness<'static, PixmithApp>, label: &str) {
+    common::settle(h, asking);
+    let start = Instant::now();
+    loop {
+        h.run_ok();
+        if !asking(h.state()) {
+            return;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "the {label:?} button never answered the question");
+        if let Some(button) = h.query_by_label(label) {
+            button.click();
+        }
+        h.run_ok();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
 /// Waits until the script is over and its notice (output or error) is on screen, if it has one.
 fn finish(h: &mut Harness<'static, PixmithApp>) {
     common::settle(h, finished);
@@ -62,7 +82,7 @@ fn reading_a_file_asks_and_deny_is_a_script_error() {
     assert_eq!(Path::new(&path), file.as_path());
     h.get_by_label("Allow Once");
     h.get_by_label("Always Allow for This Script");
-    h.get_by_label("Deny").click();
+    press(&mut h, "Deny");
     finish(&mut h);
     let notice = h.state().gamedev.notice.clone().expect("the script failed");
     assert!(notice.title.contains("Script error") && notice.warning, "{notice:?}");
@@ -93,7 +113,7 @@ fn allow_once_lets_the_script_read_and_asks_again_next_run() {
     let source = format!("local f = assert(io.open({}, 'r')); print(f:read('a')); f:close()", lua(&file));
     run(&mut h, "host-once.lua", &source);
     common::settle(&mut h, asking);
-    h.get_by_label("Allow Once").click();
+    press(&mut h, "Allow Once");
     finish(&mut h);
     let notice = h.state().gamedev.notice.clone().expect("the script printed");
     assert_eq!(notice.text, "contents of the file");
@@ -103,7 +123,7 @@ fn allow_once_lets_the_script_read_and_asks_again_next_run() {
     // "Once" does not outlive the run.
     run(&mut h, "host-once.lua", &source);
     common::settle(&mut h, asking);
-    h.get_by_label("Deny").click();
+    press(&mut h, "Deny");
     finish(&mut h);
 }
 
@@ -117,7 +137,7 @@ fn always_allow_is_remembered_for_the_script() {
     let source = format!("local f = assert(io.open({}, 'r')); print(f:read('a')); f:close()", lua(&file));
     run(&mut h, "host-always.lua", &source);
     common::settle(&mut h, asking);
-    h.get_by_label("Always Allow for This Script").click();
+    press(&mut h, "Always Allow for This Script");
     finish(&mut h);
     assert_eq!(h.state().gamedev.notice.clone().unwrap().text, "kept");
     h.state_mut().gamedev.notice = None;
@@ -138,7 +158,7 @@ fn writing_asks_for_write_access() {
     run(&mut h, "host-write.lua", &format!("local f = assert(io.open({}, 'w')); f:write('hi'); f:close()", lua(&file)));
     common::settle(&mut h, asking);
     assert_eq!(h.state().gamedev.lua.question().unwrap().2, Access::Write);
-    h.get_by_label("Allow Once").click();
+    press(&mut h, "Allow Once");
     finish(&mut h);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "hi");
 }
@@ -170,7 +190,7 @@ fn save_as_writes_the_file_and_the_tab_shows_its_name() {
     common::settle(&mut h, asking);
     let (_, path, access) = h.state().gamedev.lua.question().unwrap();
     assert_eq!((access, Path::new(&path)), (Access::Write, file.as_path()));
-    h.get_by_label("Allow Once").click();
+    press(&mut h, "Allow Once");
     finish(&mut h);
     assert!(file.exists());
     let app = h.state();
@@ -187,7 +207,7 @@ fn saving_the_open_document_adopts_the_path_and_is_clean() {
     let mut h = setup();
     run(&mut h, "host-original.lua", &format!("app.activeSprite:saveAs({})", lua(&file)));
     common::settle(&mut h, asking);
-    h.get_by_label("Allow Once").click();
+    press(&mut h, "Allow Once");
     finish(&mut h);
     let app = h.state();
     assert!(file.exists());

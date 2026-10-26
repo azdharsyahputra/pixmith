@@ -284,7 +284,7 @@ fn files_are_denied_without_a_handler_and_allowed_under_allowed_paths() {
     // The same calls work inside allowed_paths, with no handler.
     let src = format!(
         r#"
-        local f = assert(io.open({p}, "w"))
+        local f = assert(io.open({p}, "wb"))                    -- binary: no CRLF translation on Windows
         f:write("hello\nworld")
         f:close()
         local r = assert(io.open({p}, "r"))
@@ -347,7 +347,7 @@ fn the_handler_is_asked_once_per_path_tree_and_always_remembers_the_script() {
         "{reqs:?}"
     );
     assert!(reqs.iter().all(|r| r.script_name == "asking-script"));
-    assert_eq!(reqs[0].path, dir.path("t/u").to_string_lossy());
+    assert_eq!(reqs[0].path, dir.path("t").join("u").to_string_lossy());
     assert_eq!(reqs[3].path, "echo nope");
     assert!(dir.path("t/u/a.txt").is_file() && dir.path("other.txt").is_file());
 
@@ -412,7 +412,9 @@ fn os_tmpname_files_need_no_question_and_dangerous_os_calls_are_gone() {
         local t = os.tmpname()
         local f = assert(io.open(t, "w"))
         f:write("scratch") f:close()
-        assert(io.open(t, "r"):read("a") == "scratch")
+        local r = assert(io.open(t, "r"))
+        assert(r:read("a") == "scratch")
+        r:close()                                                 -- Windows cannot remove an open file
         assert(os.remove(t))
         assert(os.exit and not pcall(os.exit))
         assert(os.setlocale == nil and io.stdin == nil)
@@ -427,11 +429,12 @@ fn os_tmpname_files_need_no_question_and_dangerous_os_calls_are_gone() {
 #[test]
 fn app_fs_path_functions() {
     let dir = Dir::new("fs");
+    let separator = format!("{:?}", std::path::MAIN_SEPARATOR.to_string());
     let mut e = editor(2, 2);
     let src = format!(
         r#"
         local fs = app.fs
-        assert(fs.pathSeparator == "/")
+        assert(fs.pathSeparator == {sep})
         assert(fs.filePath("/a/b/c.png") == "/a/b" and fs.fileName("/a/b/c.png") == "c.png")
         assert(fs.fileExtension("/a/b/c.png") == "png" and fs.fileTitle("/a/b/c.png") == "c")
         assert(fs.filePathAndTitle("/a/b/c.png") == "/a/b/c" and fs.filePath("c.png") == "")
@@ -455,6 +458,7 @@ fn app_fs_path_functions() {
         assert(not fs.isDirectory(d))
         "#,
         sub = dir.lua("sub"),
+        sep = separator,
     );
     good(&mut e, &src, &cfg(&dir));
 }

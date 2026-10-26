@@ -439,6 +439,10 @@ fn load_png(path: &str) -> LuaResult<(usize, usize, Vec<u8>)> {
         return Err(Error::runtime(format!("Image{{ fromFile }} needs an absolute path, got \"{path}\"")));
     }
     let fail = |e: std::io::Error| Error::runtime(format!("cannot read {path}: {e}"));
+    // Windows cannot open a directory as a file, so ask before opening to give the same answer everywhere.
+    if !std::fs::metadata(p).map_err(fail)?.is_file() {
+        return Err(Error::runtime(format!("{path} is not a file")));
+    }
     let file = std::fs::File::open(p).map_err(fail)?;
     let meta = file.metadata().map_err(fail)?;
     if !meta.is_file() {
