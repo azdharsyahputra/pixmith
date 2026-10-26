@@ -55,6 +55,13 @@ final class ViewSettings: ObservableObject {
     @Published var customGridH = 16 { didSet { persist() } }
     @Published var customGridX = 0 { didSet { persist() } }
     @Published var customGridY = 0 { didSet { persist() } }
+    /// Rectangular cells (`customGridW` x `customGridH`), or isometric diamonds (`isoGridW` x `isoGridH`, even, at least 4).
+    /// Both types share the offset's meaning, the color and the opacity.
+    @Published var customGridType: GridType = .rectangular { didSet { persist() } }
+    @Published var isoGridW = 32 { didSet { if isoGridW != IsoGrid.size(isoGridW) { isoGridW = IsoGrid.size(isoGridW) } else { persist() } } }
+    @Published var isoGridH = 16 { didSet { if isoGridH != IsoGrid.size(isoGridH) { isoGridH = IsoGrid.size(isoGridH) } else { persist() } } }
+    @Published var isoGridX = 0 { didSet { persist() } }
+    @Published var isoGridY = 0 { didSet { persist() } }
     @Published var customGridColor = Color(red: 0.1, green: 0.5, blue: 1) { didSet { persist() } }
     @Published var customGridOpacity = 0.6 { didSet { persist() } }
 
@@ -83,6 +90,8 @@ final class ViewSettings: ObservableObject {
         var gridMinZoom: Int?
         var customGrid: Bool?
         var customGridW, customGridH, customGridX, customGridY: Int?
+        var customGridType: String?
+        var isoGridW, isoGridH, isoGridX, isoGridY: Int?
         var customGridColor: UInt32?
         var customGridOpacity: Double?
     }
@@ -95,14 +104,19 @@ final class ViewSettings: ObservableObject {
             onionPast: onionPast, onionFuture: onionFuture, onionOpacity: onionOpacity, onionFalloff: onionFalloff,
             onionTint: onionTint, tiled: tiled.rawValue, gridOpacity: gridOpacity, gridMinZoom: gridMinZoom,
             customGrid: customGrid, customGridW: customGridW, customGridH: customGridH, customGridX: customGridX,
-            customGridY: customGridY, customGridColor: Self.rgba(customGridColor), customGridOpacity: customGridOpacity)
+            customGridY: customGridY, customGridType: customGridType.rawValue, isoGridW: isoGridW, isoGridH: isoGridH,
+            isoGridX: isoGridX, isoGridY: isoGridY, customGridColor: Self.rgba(customGridColor),
+            customGridOpacity: customGridOpacity)
         // The grid color follows the Preferences default until the user picks another one.
         let color = Self.rgba(gridColor)
         if color != Self.rgba(Color(cgColor: Prefs.gridColor)) { snap.gridColor = color }
         if let data = try? JSONEncoder().encode(snap) { UserDefaults.standard.set(data, forKey: Self.defaultsKey) }
     }
 
-    private init() {
+    private init() { reloadFromDefaults() }
+
+    /// Loads the saved settings (at launch; the QA runner uses it to check what was saved).
+    func reloadFromDefaults() {
         guard let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
               let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
         loading = true
@@ -121,6 +135,11 @@ final class ViewSettings: ObservableObject {
         customGridH = s.customGridH ?? customGridH
         customGridX = s.customGridX ?? customGridX
         customGridY = s.customGridY ?? customGridY
+        customGridType = s.customGridType.flatMap(GridType.init(rawValue:)) ?? customGridType
+        isoGridW = IsoGrid.size(s.isoGridW ?? isoGridW)
+        isoGridH = IsoGrid.size(s.isoGridH ?? isoGridH)
+        isoGridX = s.isoGridX ?? isoGridX
+        isoGridY = s.isoGridY ?? isoGridY
         if let c = s.customGridColor { customGridColor = Color(cgColor: c.cgColor) }
         customGridOpacity = s.customGridOpacity ?? customGridOpacity
     }
@@ -163,6 +182,21 @@ final class ViewSettings: ObservableObject {
     }
 
     func actualSize(_ m: SpriteModel) { m.zoom = 1 }
+
+    // MARK: Isometric grid
+
+    /// View > Isometric Grid: the custom grid shown as isometric diamonds. Turning it off hides the custom grid.
+    var isometricGrid: Bool {
+        get { customGrid && customGridType == .isometric }
+        set {
+            if newValue {
+                customGridType = .isometric
+                customGrid = true
+            } else if customGridType == .isometric {
+                customGrid = false
+            }
+        }
+    }
 
     // MARK: Reference image
 
@@ -213,6 +247,7 @@ struct ViewCommands: Commands {
                 ForEach(TiledMode.allCases) { Text($0.title).tag($0) }
             }
             Toggle("Show Reference Image", isOn: $settings.showReference).disabled(settings.referenceImage == nil)
+            Toggle("Isometric Grid", isOn: Binding(get: { settings.isometricGrid }, set: { settings.isometricGrid = $0 }))
             Button("Load Reference Image…") { settings.chooseReference() }
             ReferenceLayerViewMenu(model: model)
             Button("History") { HistoryController.shared.toggle(model: model) }

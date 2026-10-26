@@ -472,6 +472,7 @@ struct SelectionCommands: Commands {
                 Button("Border…") { model.modifySelection(2) }
             }
             Button("Select by Color") { model.selectByColor() }.keyboardShortcut("b", modifiers: [.command, .option])
+            Button("Isometric Tile") { model.selectIsometricTile() }
         }
     }
 }

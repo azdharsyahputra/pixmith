@@ -143,6 +143,13 @@ func fresh(_ w: Int = 16, _ h: Int = 16) -> SpriteModel {
     s.onionPast = 1
     s.onionFuture = 0
     s.customGrid = false
+    s.customGridType = .rectangular
+    s.isoGridW = 32
+    s.isoGridH = 16
+    s.isoGridX = 0
+    s.isoGridY = 0
+    IsoGrid.lastClick = nil
+    StatusInfo.shared.cursor = nil
     return m
 }
 

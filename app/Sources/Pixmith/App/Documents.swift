@@ -40,6 +40,9 @@ final class DocumentSlot: Identifiable {
     var liveRevision = 1
     var liveSeen: LiveStamp?
     var liveDocPtr: OpaquePointer?
+    /// Created or opened by a Live request (`documents.new`, `documents.open`): never reused as a blank tab by a
+    /// later request, so two quick `documents.new` give two documents.
+    var liveCreated = false
 
     init(doc: OpaquePointer, fileURL: URL? = nil) {
         self.doc = doc

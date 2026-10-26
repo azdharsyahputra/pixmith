@@ -3,6 +3,7 @@
 
 use crate::app::PixmithApp;
 use crate::doc::Doc;
+use crate::ui::tools::view::GridType;
 use crate::ui::{selection, tilemap, tools, transform};
 use eframe::egui;
 use std::path::PathBuf;
@@ -59,6 +60,25 @@ pub fn modify_selection(app: &mut PixmithApp, kind: u32) {
 
 pub fn select_by_color(app: &mut PixmithApp) {
     selection::select_by_color(app);
+}
+
+/// Select > Isometric Tile
+pub fn select_iso_tile(app: &mut PixmithApp) {
+    selection::select_iso_tile(app);
+}
+
+/// Whether the custom grid is on and isometric (the check mark of View > Isometric Grid).
+pub fn iso_grid_shown(app: &PixmithApp) -> bool {
+    let s = &app.canvas.tools.settings;
+    s.custom_grid && s.custom_grid_type == GridType::Isometric
+}
+
+/// View > Isometric Grid: shows the isometric grid, or hides the custom grid when it is already showing.
+pub fn toggle_iso_grid(app: &mut PixmithApp) {
+    let on = iso_grid_shown(app);
+    let s = &mut app.canvas.tools.settings;
+    s.custom_grid = !on;
+    s.custom_grid_type = GridType::Isometric;
 }
 
 /// Sprite > Crop to Selection

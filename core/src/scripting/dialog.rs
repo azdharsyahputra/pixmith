@@ -629,28 +629,24 @@ impl UserData for DialogH {
             d.patch(all, None);
             Ok(())
         });
-        f.add_field_method_get("bounds", |lua, d| {
-            let st = d.state.borrow();
-            match st.bounds {
-                Some((x, y, w, h)) => {
-                    let t = lua.create_table()?;
-                    for (k, v) in [("x", x), ("y", y), ("width", w), ("height", h), ("w", w), ("h", h)] {
-                        t.set(k, v)?;
-                    }
-                    Ok(Value::Table(t))
-                }
-                None => Ok(Value::Nil),
-            }
+        f.add_field_method_get("bounds", |_, d| {
+            Ok(d.state.borrow().bounds.map(|(x, y, w, h)| super::geometry::RectV::new(x, y, w, h)))
         });
-        f.add_field_method_set("bounds", |_, d, t: Option<Table>| {
-            d.state.borrow_mut().bounds = match t {
-                Some(t) => Some((
+        // A Rectangle, or a table with any of x, y, width/w, height/h (missing ones are 0), or nil.
+        f.add_field_method_set("bounds", |_, d, v: Value| {
+            d.state.borrow_mut().bounds = match v {
+                Value::Nil => None,
+                Value::Table(t) => Some((
                     t.get::<Option<i64>>("x")?.unwrap_or(0),
                     t.get::<Option<i64>>("y")?.unwrap_or(0),
                     t.get::<Option<i64>>("width").or_else(|_| t.get::<Option<i64>>("w"))?.unwrap_or(0),
                     t.get::<Option<i64>>("height").or_else(|_| t.get::<Option<i64>>("h"))?.unwrap_or(0),
                 )),
-                None => None,
+                other => {
+                    let r = super::geometry::rect_of(&other)
+                        .ok_or_else(|| mlua::Error::runtime("bounds must be a Rectangle, a table or nil"))?;
+                    Some((r.x, r.y, r.w, r.h))
+                }
             };
             Ok(())
         });

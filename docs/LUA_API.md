@@ -31,16 +31,27 @@ addressed by position too, and tile indices shift when a tile is deleted.
 
 Errors raised by API calls can be caught with `pcall`; the error value is a string.
 
+Aseprite scripts run largely unchanged: `Point`, `Size`, `Rectangle`, `Image`, `sprite:newCel`,
+`sprite:newSlice(Rectangle)` and the rest of the Aseprite names exist; see [Geometry](#geometry-point-size-rectangle),
+[Images](#images) and [Aseprite compatibility](#aseprite-compatibility).
+
 ## Sandbox
 
 Available: the base functions, `table`, `string`, `utf8`, `math`, `coroutine`. Not available:
 `os`, `io`, `package`, `require`, `debug`, `dofile`, `loadfile`. `load` accepts text chunks only
 (no bytecode). A run is stopped with an error after 300 million VM instructions, 10 seconds or
-128 MB of Lua memory, whichever comes first. One very expensive `string.find`/`gsub` pattern is a
-single VM instruction and cannot be interrupted, so avoid catastrophic patterns.
+128 MB of Lua memory, whichever comes first (hosts can raise these, see [Limits](#limits-for-embedders)).
+One very expensive `string.find`/`gsub` pattern is a single VM instruction and cannot be interrupted,
+so avoid catastrophic patterns.
+
+**File access.** Scripts cannot read or write files, with one exception: `Image{ fromFile = "/absolute/path.png" }`
+reads a PNG file. The path must be absolute; the file must be a regular file of at most 256 MB that starts
+with the PNG signature and decodes to at most 8192 x 8192 pixels. Nothing else can be read, nothing can be
+written (`Image:saveAs` raises an error), and the decoded pixels only ever end up in an `Image`.
 
 Scripts cannot grow the document without bound either: at most 1024 layers, 4096 frames, 4096
-tags, 4096 slices and 64 MB of tile pixels per tileset.
+tags, 4096 slices and 64 MB of tile pixels per tileset. Free-standing `Image`s (kept outside the Lua
+heap) are limited to 67,108,864 pixels (the largest canvas) each and 512 MB alive at once.
 
 ## `sprite`
 
@@ -52,20 +63,31 @@ tags, 4096 slices and 64 MB of tile pixels per tileset.
 | `layerCount`, `frameCount`, `paletteSize` | counts |
 | `colorMode` | `"rgba"`, `"grayscale"` or `"indexed"` |
 | `activeLayer`, `activeFrame` | 1-based, as chosen in the editor when the script started |
+| `bounds`, `size` | `Rectangle(0, 0, width, height)` and `Size(width, height)` |
 | `layers`, `frames`, `tags` | lists of handles, snapshots taken at access time |
+| `cels` | every cel that has an image (frame by frame, bottom layer first) |
 | `selection` | selection handle, see below |
 
 ### Pixels
 
-- `sprite:getPixel(x, y [, layer [, frame]])` returns a color; `0` outside the canvas or for empty cels.
-- `sprite:setPixel(x, y, color [, layer [, frame]])` replaces a pixel (a transparent color erases).
-  Out-of-canvas coordinates are ignored. The color is snapped to the sprite's color mode.
-- `sprite:getPixels(layer, frame [, x, y, w, h])` returns a flat, row-major table of colors, 1-based
-  (`px[(row * w) + col + 1]`). The rectangle defaults to the whole canvas.
-- `sprite:setPixels(layer, frame, pixels [, x, y, w, h])` writes such a table back (replacing, not
-  blending). The table must hold exactly `w * h` colors. This is the fast path for whole-cel work.
-  Both calls move at most 4,194,304 pixels (2048 x 2048) at once and raise an error beyond that
-  or when the rectangle leaves the canvas.
+- `sprite:getPixel(x, y [, layer [, frame]])` or `sprite:getPixel(point [, layer [, frame]])` returns a
+  color; `0` outside the canvas or for empty cels.
+- `sprite:setPixel(x, y, color [, layer [, frame]])` or `sprite:setPixel(point, color [, ...])` replaces a
+  pixel (a transparent color erases). Out-of-canvas coordinates are ignored. The color is snapped to the
+  sprite's color mode.
+- `sprite:getPixels(layer, frame [, x, y, w, h])` (or `getPixels(layer, frame, rectangle)`) returns a flat,
+  row-major table of colors, 1-based (`px[(row * w) + col + 1]`). The rectangle defaults to the whole canvas.
+- `sprite:setPixels(layer, frame, pixels [, x, y, w, h])` (or `..., pixels, rectangle`) writes pixels back
+  (replacing, not blending). `pixels` is
+  - a flat table of exactly `w * h` colors (at most 4,194,304 pixels = 2048 x 2048 per call, and this
+    form costs one VM step per pixel), or
+  - **an `Image`** (the rectangle defaults to `0, 0` and the image's size), or
+  - **a string of raw RGBA bytes**, row-major, exactly `w * h * 4` long (the rectangle defaults to the
+    whole canvas).
+  The Image and string forms run in Rust: a 1024 x 1024 canvas is a few VM instructions and a few
+  milliseconds, and they may fill a canvas of any size.
+  `layer` and `frame` may be numbers or layer / frame handles in all of these calls.
+  An error is raised when the rectangle leaves the canvas or the sizes do not match.
 - `sprite:fillSelection(color [, layer [, frame]])` fills the selected pixels of a cel and returns how
   many were filled (0 when nothing is selected).
 
@@ -124,12 +146,26 @@ read-only.
 
 ### Cels
 
-- `sprite:cel(layer, frame)` returns a cel handle (groups have no cels).
+- `sprite:cel(layer, frame)` returns a cel handle (groups have no cels); `layer` and `frame` may be numbers or
+  handles. `layer:cel(frame)` is the Aseprite form and returns `nil` when the layer has no image in that frame;
+  `layer.cels` lists the layer's cels.
 - `sprite:clearCel(layer, frame)` removes the image of a cel; returns whether anything was removed.
+  `sprite:deleteCel(cel)` / `sprite:deleteCel(layer, frame)` is the Aseprite spelling.
+- `sprite:newCel(layer, frame [, image [, position]])` makes (or replaces) the cel of `layer`/`frame` and returns
+  it. With an `Image` the cel shows that image with its top-left at `position` (a `Point`, default `0, 0`),
+  clipped to the canvas, in one call; without one the cel is empty. See [Images](#images).
 
 Cel handle: `opacity` (0-255, read/write, the cel must not be empty), `zIndex` (-32768..32767, read/write, the cel must not be empty: the cel draws as if its layer sat that many places higher, or lower when negative; the order is layer index plus z-index and ties go to the lower layer; linked cels share it), `isEmpty` (no cel or fully
 transparent), `linked` (shares its image with other frames), `linkedFrames` (list of the other
-frame numbers that share it), `layer`, `frame`, and `cel:unlink()` which gives the cel its own copy.
+frame numbers that share it), `layer`, `frame` (numbers; `frameNumber` is the same as `frame`),
+and `cel:unlink()` which gives the cel its own copy. Aseprite's cel geometry:
+
+- `cel.bounds` (read-only `Rectangle`) and `cel.position` (`Point`, read/write): Pixmith cels are canvas-sized
+  buffers, so these describe the box around the cel's non-transparent pixels (`0,0,0,0` / `Point(0, 0)` for an
+  empty cel). Assigning `cel.position` moves the pixels; whatever leaves the canvas is lost.
+- `cel.image` (read/write): a **live view** of that box as an `Image` (`nil` for an empty cel): drawing on it
+  draws on the cel. Assigning an `Image` replaces the cel's pixels with it, keeping the cel's position
+  (`0, 0` for an empty cel).
 
 Linked frames are one image. A script that processes every frame of a linked cel would process
 that image several times; use `linkedFrames` to handle it only from its first frame (see
@@ -157,15 +193,21 @@ clears the cell. The layer must be a tilemap layer. The diagonal flip only appli
 
 ### Slices
 
-- `sprite.slices` lists the slices (1-based); `sprite:newSlice(name, x, y, w, h)` adds one;
-  `sprite:deleteSlice(i)` or `slice:delete()` removes one.
-- Fields: `name` (read/write), `index`, `hasCenter`, `hasPivot`, `userData`.
+- `sprite.slices` lists the slices (1-based). `sprite:newSlice(rectangle)` is the Aseprite form: the slice is
+  named "Slice 1", "Slice 2", ... (assign `slice.name` to rename it); `sprite:newSlice()` covers the whole canvas.
+  The Pixmith forms `sprite:newSlice(name, x, y, w, h)`, `sprite:newSlice(name, rectangle)` and
+  `sprite:newSlice(x, y, w, h)` work too. `sprite:deleteSlice(i)` or `slice:delete()` removes one.
+- Fields: `name` (read/write), `index`, `hasCenter`, `hasPivot`, `userData`, and as in Aseprite
+  `bounds` (a `Rectangle`), `center` (a `Rectangle` relative to `bounds`, or `nil` for no 9-patch) and
+  `pivot` (a `Point`, or `nil`), all read/write. These three are the values of the first frame; assign `nil`
+  to `center` / `pivot` to remove them.
 - Geometry is per frame: a value set on frame N applies from N until the next one set. `frame`
-  defaults to the active frame.
-  - `slice:getBounds([frame])` returns `{x=, y=, w=, h=}`; `slice:setBounds(x, y, w, h [, frame])`.
-  - `slice:getCenter([frame])` (the 9-patch center, `nil` without one), `slice:setCenter(x, y, w, h [, frame])`,
+  defaults to the active frame, and may be a number or a frame handle.
+  - `slice:getBounds([frame])` returns a `Rectangle`; `slice:setBounds(rectangle [, frame])` or
+    `slice:setBounds(x, y, w, h [, frame])`.
+  - `slice:getCenter([frame])` (the 9-patch center, `nil` without one), `slice:setCenter(rectangle | x, y, w, h [, frame])`,
     `slice:clearCenter()`.
-  - `slice:getPivot([frame])` returns `x, y` (`nil, nil` without a pivot), `slice:setPivot(x, y [, frame])`,
+  - `slice:getPivot([frame])` returns `x, y` (`nil, nil` without a pivot), `slice:setPivot(point | x, y [, frame])`,
     `slice:clearPivot()`.
 
 ### User data
@@ -180,10 +222,14 @@ Writing user data to an empty cel creates the cel.
 `sprite.selection` is a handle to the document's selection. Changes become part of the script's
 undo step.
 
-- `isEmpty`, `bounds` (`{x=, y=, w=, h=}` or `nil`) are read-only.
-- `selection:contains(x, y)`.
-- `selection:selectRect(x, y, w, h [, mode])` where `mode` is `"replace"` (default), `"add"` or
-  `"subtract"` (0, 1, 2 also work). The rectangle is clipped to the canvas.
+- `isEmpty` and `bounds` (a `Rectangle`, or `nil` when empty) are read-only.
+- `selection.origin`: the top-left of the selection as a `Point` (`Point(0, 0)` when empty). Assigning a
+  `Point` moves the selection (pixels pushed off the canvas are dropped).
+- `selection:contains(x, y)` or `selection:contains(point)`.
+- `selection:selectRect(x, y, w, h [, mode])` or `selection:selectRect(rectangle [, mode])` where `mode` is
+  `"replace"` (default), `"add"` or `"subtract"` (0, 1, 2 also work). The rectangle is clipped to the canvas.
+- Aseprite's names for the same thing: `selection:select(rectangle)` (replace), `selection:add(rectangle)`,
+  `selection:subtract(rectangle)` and `selection:intersect(rectangle)`.
 - `selection:selectAll()`, `selection:deselect()`, `selection:invert()`.
 
 ### Palette
@@ -203,7 +249,8 @@ undo step.
   see Events.
 - `app.undoLabel(text)` names the undo step (default "Script").
 - `app.version` is Pixmith's version string; `app.apiVersion` is a number that grows with the API
-  (this reference describes version 3), for scripts that need a feature check.
+  (this reference describes version 4: `Point` / `Size` / `Rectangle` / `Image` arrived in 4), for scripts that
+  need a feature check.
 - `app.activeLayer` and `app.activeFrame` (1-based) read the current defaults of the pixel calls.
   Assigning one changes those defaults immediately and selects that layer or frame in the editor
   when the script ends (a successful run only). A group cannot be assigned as the active layer.
@@ -304,6 +351,148 @@ function exit(plugin) end                                            -- optional
 
 Rust hosts use `scripting::host::Host::{load_plugin, run_command, stop, poll, send, broadcast, apply}`; the
 C ABI is `pixmith_plugin_load` and `pixmith_script_*` ([LUA_DIALOG.md](LUA_DIALOG.md) section 4).
+
+## Geometry: `Point`, `Size`, `Rectangle`
+
+Value types as in Aseprite. They are copies: changing a field of one never changes the object it was built from.
+
+| Constructor | Fields |
+| --- | --- |
+| `Point(x, y)`, `Point{x=, y=}`, `Point{x, y}`, `Point(otherPoint)`, `Point()` | `x`, `y` (read/write) |
+| `Size(w, h)`, `Size{width=, height=}` (or `w=`, `h=`), `Size(otherSize)`, `Size()` | `width`, `height`, `w`, `h` |
+| `Rectangle(x, y, w, h)`, `Rectangle{x=, y=, width=, height=}` (or `w=`, `h=`), `Rectangle{x, y, w, h}`, `Rectangle(otherRect)`, `Rectangle(point, size)`, `Rectangle()` | `x`, `y`, `width`, `height`, `w`, `h`, `origin` (Point), `size` (Size), `isEmpty` |
+
+Numbers are integers (fractions are dropped). All three compare with `==` (by value; they are never equal to
+another type) and convert with `tostring` (`Point{ x=1, y=2 }`, `Size{ width=3, height=4 }`,
+`Rectangle{ x=1, y=2, width=3, height=4 }`). Points add, subtract and negate (`Point(1, 2) + Point(3, 4)`).
+
+Rectangle methods (each argument may be a `Rectangle`, a plain table, or loose numbers):
+
+- `rect:contains(point | rectangle | x, y | x, y, w, h)`: a point inside, or a whole rectangle inside.
+- `rect:intersects(rectangle)`, `rect:intersect(rectangle)` (the overlap; an empty `Rectangle(0, 0, 0, 0)`
+  when there is none), `rect:union(rectangle)` (the smallest rectangle holding both; empty ones are ignored).
+- `Size:union(size)` is the larger width and height.
+
+A rectangle is empty when its width or height is 0 or less.
+
+**Everywhere a point or rectangle is taken, one of these objects works**, and so does a plain table
+(`{x=, y=}`, `{x=, y=, w=, h=}`, `{width=, height=}`, or `{x, y}` / `{x, y, w, h}`) and the loose numbers older
+scripts use: `getPixel` / `setPixel` (point), `getPixels` / `setPixels` (rectangle), `getTile` / `setTile`
+(point), `newSlice`, `slice:setBounds` / `setCenter` / `setPivot`, `selection:selectRect` / `contains` /
+`select` / `add` / `subtract` / `intersect`, `newCel` and `drawImage` (point), `cel.position`, `dlg.bounds`.
+**Everywhere one is returned, it is now a `Rectangle` or `Point`** (`selection.bounds`, `slice:getBounds()`,
+`slice:getCenter()`, `dlg.bounds`, `sprite.bounds`, `cel.bounds`, `image.bounds`); they still have the `x`, `y`, `w`,
+`h` fields the earlier plain tables had, but `pairs()` / `#` on them no longer behave like on a table.
+
+## Images
+
+`Image` is Aseprite's image object: a width x height grid of RGBA pixels.
+
+```lua
+local img = Image(64, 64)                         -- transparent; Image(w, h, ColorMode.RGB)
+local art = Image{ fromFile = "/Users/me/art/hero.png" }   -- a PNG, absolute path only
+local copy = Image(art)                           -- Image(image) clones; Image(spec), Image(Size(w, h)) too
+sprite:newCel(sprite.layers[1], 1, art, Point(8, 8))      -- the whole image becomes the cel, in Rust
+```
+
+Constructors: `Image(width, height [, colorMode])`, `Image{ width=, height=, colorMode= }` / `Image(ImageSpec{...})`,
+`Image(size)`, `Image(otherImage)` (a copy) and `Image{ fromFile = path }`. `fromFile` follows the rules in
+[Sandbox](#sandbox): absolute path, PNG only (any bit depth or color type; palette PNGs are expanded), at most
+8192 x 8192. Images are **always RGBA in memory**; the `colorMode` given to `Image` (`ColorMode.RGB` 0,
+`GRAY` / `GRAYSCALE` 1, `INDEXED` 2, `TILEMAP` 3) is only remembered, and pixel values are `0xRRGGBBAA` colors,
+exactly as with `sprite:getPixel`. Writing an image into a cel of an Indexed or Grayscale sprite snaps its
+colors to the palette or to gray.
+
+Fields: `width`, `height`, `bounds` (Rectangle), `size` (Size), `colorMode`, `rowStride` (`width * 4`),
+`bytesPerPixel` (4), `spec`, `cel` (the cel a `cel.image` view belongs to, else `nil`), and
+**`bytes`** (read/write): the raw pixels as a Lua string, row-major, 4 bytes (R, G, B, A) per pixel. Assigning
+checks the length (`width * height * 4` bytes exactly) and replaces every pixel in one native copy:
+
+```lua
+local img = Image(1024, 1024)
+img.bytes = string.rep("\xff\x00\x00\xff", 1024 * 1024)   -- opaque red; a couple of VM instructions
+```
+
+Reading `img.bytes` creates a Lua string of that size, which counts toward the Lua memory limit.
+
+Methods: `getPixel(x, y)` (`0` outside), `putPixel(x, y, color)` (replace), `drawPixel(x, y, color)` (alpha-blend),
+`clear([color | rectangle])`, `clone()`, `isEqual(image)`, `isEmpty()`, `isPlain(color)`,
+`drawImage(image, point [, opacity [, blendMode]])` (also `drawImage(image, x, y, ...)`; alpha-composites with the
+image's top-left at `point`, clipped; opacity 0-255; `blendMode` as in `app.blend`),
+`drawSprite(sprite, frame [, point])` (draws the composited frame), `resize(w, h)` / `resize(size)` (nearest
+neighbour; not on `cel.image` views) and `pixels([rectangle])`:
+
+```lua
+for it in img:pixels() do      -- `it` is one object advanced in place, as in Aseprite
+  if it() == 0xFF0000FF then it(0x00FF00FF) end     -- it() reads, it(color) writes; it.x, it.y
+end
+```
+
+`img:saveAs(path)` raises an error: scripts cannot write files.
+
+All bulk operations (`bytes`, `drawImage`, `clear`, `clone`, `newCel`, `cel.image = img`,
+`sprite:setPixels(layer, frame, img)`) are done in Rust, so a whole 1024 x 1024 image costs a handful of VM
+instructions. Only the per-pixel calls (`putPixel`, `pixels()`) cost one call each.
+
+## Limits for embedders
+
+Scripts run with `scripting::Limits { instructions, time, memory }`; the default is 300,000,000 VM
+instructions, 10 seconds and 128 MiB of Lua memory. The type is public and can be built with
+`Limits::default().with_time(Duration::from_secs(120))`, `.with_instructions(n)`, `.with_memory(bytes)` or
+`Limits::new(instructions, time, memory)`. Entry points that take it:
+
+- `scripting::run_with_limits(editor: &mut Editor, source: &str, limits: Limits) -> Outcome` (the top
+  drawable layer and frame 1 are the defaults for the pixel calls);
+- `scripting::run(editor, source, active: (layer, frame), limits)` and
+  `scripting::run_with(editor, source, active, limits, cancel: &'static AtomicBool)`;
+- `scripting::host::Host::with_limits(limits)` for sessions (dialogs, events, plugins): the limits apply to each
+  transaction;
+- the C ABI `pixmith_run_script_limits(doc, source, layer, frame, instructions, time_ms, memory_mb, out_messages)`
+  where `0` for a budget means its default.
+
+Work done natively (PNG decoding, `bytes`, `drawImage`, `newCel`) is not interruptible and not counted by the
+instruction budget, but it is bounded by the image size caps above.
+
+## Aseprite compatibility
+
+Pixmith opens `.aseprite` files, and the scripting API follows Aseprite's names and semantics where Pixmith has
+the concept, so a typical Aseprite script works unchanged.
+
+**Supported (Aseprite spelling and meaning):** `Point`, `Size`, `Rectangle` (all constructors, fields,
+`contains` / `intersects` / `intersect` / `union`, `==`, `tostring`); `Image` (`Image(w, h [, colorMode])`,
+`Image{ fromFile }`, `bytes`, `getPixel`, `putPixel`, `drawPixel`, `drawImage`, `drawSprite`, `clear`, `clone`,
+`isEqual`, `isEmpty`, `isPlain`, `pixels`, `resize`, `width` / `height` / `bounds` / `colorMode` / `rowStride` /
+`bytesPerPixel` / `spec`, `ImageSpec`, `ColorMode`); `sprite:newCel(layer, frame, image, position)`,
+`sprite:deleteCel`, `layer:cel(frame)`, `layer.cels`, `sprite.cels`, `cel.image` (get and set), `cel.position`,
+`cel.bounds`, `cel.frameNumber`; `sprite:newSlice(rectangle)`, `slice.bounds` / `center` / `pivot`;
+`sprite.bounds`; `selection:select` / `add` / `subtract` / `intersect` / `contains(point)` / `origin` / `bounds`;
+layers, groups, frames (`duration`), tags, tilesets and tilemaps, user data, palette, `Dialog` (see
+[LUA_DIALOG.md](LUA_DIALOG.md)), `app.events`, plugins (`init` / `exit`, `newCommand`), `app.alert`, `app.fgColor`.
+
+**Known differences:**
+
+- **Colors** are plain integers `0xRRGGBBAA`. There is no `Color` object and no `app.pixelColor`; Aseprite's
+  `app.pixelColor.rgba()` packs `0xAABBGGRR` instead. Use `color.rgba(r, g, b, a)` / `color.split(c)`.
+- **Images are always RGBA.** `Image(w, h, ColorMode.INDEXED)` gives an RGBA image that only remembers the
+  mode; its pixel values are colors, not palette indices.
+- **Cels are canvas-sized.** `cel.position` / `cel.bounds` describe the box around the non-transparent pixels, so a
+  cel whose pixels touch the canvas edge or are moved off it loses the clipped part; images larger than the canvas
+  are clipped when placed. `cel.image` is a view of that box, sized when you read it.
+- `sprite:cel(layer, frame)` always returns a handle (Aseprite returns nothing for an empty cel; `layer:cel(frame)`
+  does return `nil`). `cel.layer` and `cel.frame` are numbers (1-based), not objects.
+- `slice.bounds`, `.center` and `.pivot` read and write the first frame's key; `newSlice()` without a rectangle
+  covers the whole canvas.
+- **Layers, frames and tags are indices or lightweight handles**, with the stale-handle rule above; there are no
+  `app.activeSprite` / `app.open` / `Sprite{...}` constructors, `sprite:flatten`, `app.command`, `app.fs` or `app.clipboard`;
+  the one document is the global `sprite` (also `app.sprite`).
+- **No file writing and no other file reading**: `Image:saveAs`, `Sprite:saveAs`, `io`, `os` raise errors or do not
+  exist. `Image{ fromFile }` accepts absolute paths to PNG files only (not `.aseprite`, `.gif`, relative paths or
+  `app.fs.joinPath(...)`).
+- `BlendMode` constants are `app.blend.*` (Pixmith numbers, which differ from Aseprite's enum values); `drawImage`
+  takes those.
+- `Image:flip`, `Image:shrink`, `Image:setPalette` and `Image:saveAs` do not exist (the last raises an explicit error).
+- `Point` supports `+`, `-`, unary `-` and `==`; `Size` and `Rectangle` only `==` and `tostring` (no `Point * n` or `Size + Size`).
+
 
 ## `color`
 

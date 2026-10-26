@@ -7,6 +7,7 @@ pub mod extensions;
 pub mod gamedev;
 pub mod image_formats;
 pub mod inspector;
+pub mod iso;
 pub mod lua_dialog;
 pub mod menus;
 pub mod projects;

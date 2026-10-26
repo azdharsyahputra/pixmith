@@ -369,6 +369,30 @@ func registerLive() {
         expectEq(m.slots.count, count - 2)
     }
 
+    scenario("live/parallel-documents-new-keep-both") {
+        let m = resetTabs()
+        defer { LiveServer.shared.stop(); resetTabs() }
+        guard let c = liveConnect() else { return expect(false, "no server") }
+        expectEq(m.slots.count, 1)
+        // Two requests back to back, before either answer is read: the second must not reuse the first's tab.
+        c.post("documents.new", ["width": 10, "height": 6, "name": "one"])
+        c.post("documents.new", ["width": 7, "height": 5, "name": "two"])
+        let a = doc((c.readLine() ?? [:])["result"] as? [String: Any] ?? [:])
+        let b = doc((c.readLine() ?? [:])["result"] as? [String: Any] ?? [:])
+        expect((a["id"] as? String) != nil && (a["id"] as? String) != (b["id"] as? String), "two different documents")
+        expectEq(a["width"] as? Int, 10)
+        expectEq(b["width"] as? Int, 7)
+        expectEq(m.slots.count, 2, "both documents stay open (the app's blank tab was reused once)")
+        let list = docs(c.ok("documents.list"))
+        expectEq(list.compactMap { $0["id"] as? String }.sorted(), [a["id"] as? String ?? "", b["id"] as? String ?? ""].sorted())
+        expectEq(Set(list.compactMap { $0["name"] as? String }), ["one", "two"])
+        expectEq(list.first { $0["id"] as? String == b["id"] as? String }?["active"] as? Bool, true)
+        // Still never reused, even though both are blank and never edited.
+        let third = doc(c.ok("documents.new", ["width": 4, "height": 4]))
+        expectEq(m.slots.count, 3)
+        expect((third["id"] as? String) != (b["id"] as? String), "third is its own document")
+    }
+
     scenario("live/view-set") {
         let m = resetTabs()
         defer { LiveServer.shared.stop(); resetTabs() }

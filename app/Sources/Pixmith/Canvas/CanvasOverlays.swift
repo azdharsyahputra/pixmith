@@ -177,12 +177,16 @@ enum CanvasOverlays {
             strokeGrid(ctx, in: r, dirty: dirty, stepX: m.zoom, stepY: m.zoom, offsetX: 0, offsetY: 0,
                        color: NSColor(s.gridColor).withAlphaComponent(s.gridOpacity).cgColor, width: hairline)
         }
-        if s.customGrid, s.customGridW > 0, s.customGridH > 0 {
-            strokeGrid(ctx, in: r, dirty: dirty, stepX: CGFloat(s.customGridW) * m.zoom,
-                       stepY: CGFloat(s.customGridH) * m.zoom,
-                       offsetX: CGFloat(s.customGridX) * m.zoom, offsetY: CGFloat(s.customGridY) * m.zoom,
-                       color: NSColor(s.customGridColor).withAlphaComponent(s.customGridOpacity).cgColor,
-                       width: max(hairline, 1))
+        if s.customGrid {
+            let color = NSColor(s.customGridColor).withAlphaComponent(s.customGridOpacity).cgColor
+            if s.customGridType == .isometric {
+                IsoGrid.current.stroke(ctx, in: r, dirty: dirty, zoom: m.zoom, color: color)
+            } else if s.customGridW > 0, s.customGridH > 0 {
+                strokeGrid(ctx, in: r, dirty: dirty, stepX: CGFloat(s.customGridW) * m.zoom,
+                           stepY: CGFloat(s.customGridH) * m.zoom,
+                           offsetX: CGFloat(s.customGridX) * m.zoom, offsetY: CGFloat(s.customGridY) * m.zoom,
+                           color: color, width: max(hairline, 1))
+            }
         }
     }
 

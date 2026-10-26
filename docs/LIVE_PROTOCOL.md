@@ -67,7 +67,7 @@ changed it.
 | `documents.apply` | `{"id", "base_revision", "pxmt": "<base64>", "label", "layer"?, "frame"?, "selection"?}` | `{"document": Doc}` |
 | `documents.undo` | `{"id", "steps"?: 1}` | `{"document": Doc, "steps": n}`, `n` being the steps actually undone (0 when there is nothing to undo) |
 | `documents.redo` | `{"id", "steps"?: 1}` | `{"document": Doc, "steps": n}`, likewise |
-| `documents.new` | `{"width", "height", "name"?}` | `{"document": Doc}`, opened in a new tab and made active (a blank, never edited untitled tab is reused, like opening a file does) |
+| `documents.new` | `{"width", "height", "name"?}` | `{"document": Doc}`, opened in a new tab and made active (a blank, never edited untitled tab that the app opened itself is reused, like opening a file does; tabs made by Live requests are never reused) |
 | `documents.open` | `{"path"}` | `{"document": Doc}`, or the already open tab of that file; `path` must be absolute |
 | `documents.save` | `{"id", "path"?}` | `{"document": Doc}`, saved to `path` (absolute) or to its own file; `.pxmt` or `.aseprite` / `.ase` by extension, anything else is `-32602` |
 | `documents.activate` | `{"id"}` | `{"document": Doc}` |

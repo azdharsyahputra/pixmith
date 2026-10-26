@@ -69,6 +69,7 @@ pub enum Cmd {
     InvertSelection,
     ModifySelection(u32),
     SelectByColor,
+    SelectIsoTile,
     // Sprite
     SpriteProperties,
     CanvasSize,
@@ -132,6 +133,7 @@ pub enum Cmd {
     ActualSize,
     OnionSkin,
     Grid,
+    IsoGrid,
     Preview,
     TiledMode(usize),
     ShowReference,
@@ -279,6 +281,7 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
             Sep,
             sub("Modify", (0..3).map(|k| Item(Cmd::ModifySelection(k))).collect()),
             Item(Cmd::SelectByColor),
+            Item(Cmd::SelectIsoTile),
         ],
         "Sprite" => vec![
             Item(Cmd::SpriteProperties),
@@ -404,6 +407,7 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
             Sep,
             Item(Cmd::OnionSkin),
             Item(Cmd::Grid),
+            Item(Cmd::IsoGrid),
             Sep,
             Item(Cmd::Preview),
             sub("Tiled Mode", (0..4).map(|i| Item(Cmd::TiledMode(i))).collect()),
@@ -500,6 +504,7 @@ impl Cmd {
             Cmd::InvertSelection => t("Invert Selection"),
             Cmd::ModifySelection(k) => t(MODIFY[k.min(2) as usize]),
             Cmd::SelectByColor => t("Select by Color"),
+            Cmd::SelectIsoTile => t("Isometric Tile"),
             Cmd::SpriteProperties => t("Sprite Properties\u{2026}"),
             Cmd::CanvasSize => t("Canvas Size\u{2026}"),
             Cmd::CropToSelection => t("Crop to Selection"),
@@ -556,6 +561,7 @@ impl Cmd {
             Cmd::ActualSize => t("Actual Size"),
             Cmd::OnionSkin => t("Onion Skin"),
             Cmd::Grid => t("Grid"),
+            Cmd::IsoGrid => t("Isometric Grid"),
             Cmd::Preview => t("Preview"),
             Cmd::TiledMode(i) => t(TILED_MODES[i.min(3)]),
             Cmd::ShowReference => t("Show Reference Image"),
@@ -679,6 +685,7 @@ impl Cmd {
             Cmd::TileStamp => hooks::tile_stamp(app),
             Cmd::OnionSkin => app.timeline.onion_skin,
             Cmd::Grid => app.timeline.show_grid,
+            Cmd::IsoGrid => hooks::iso_grid_shown(app),
             Cmd::PluginCommand(i) => match app.lua_command(i) {
                 Some(c) if c.checked => true,
                 _ => return None,
@@ -775,6 +782,7 @@ impl Cmd {
             Cmd::InvertSelection => hooks::invert_selection(app),
             Cmd::ModifySelection(k) => hooks::modify_selection(app, k),
             Cmd::SelectByColor => hooks::select_by_color(app),
+            Cmd::SelectIsoTile => hooks::select_iso_tile(app),
             Cmd::SpriteProperties => app.menus.sprite_props = true,
             Cmd::CanvasSize => app.menus.open_canvas_size(app.tab().doc.width(), app.tab().doc.height()),
             Cmd::CropToSelection => hooks::crop_to_selection(app),
@@ -918,6 +926,7 @@ impl Cmd {
             }
             Cmd::OnionSkin => app.timeline.onion_skin ^= true,
             Cmd::Grid => app.timeline.show_grid ^= true,
+            Cmd::IsoGrid => hooks::toggle_iso_grid(app),
             Cmd::Preview => hooks::toggle_preview(app),
             Cmd::TiledMode(i) => hooks::set_tiled_mode(app, i),
             Cmd::ShowReference => {

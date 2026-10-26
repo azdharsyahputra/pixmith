@@ -17,7 +17,8 @@
 //! sprite:getPixel(x, y [, layer [, frame]])   -- color, 0 outside the canvas
 //! sprite:setPixel(x, y, color [, layer [, frame]])
 //! sprite:getPixels(layer, frame [, x, y, w, h])           -- flat row-major table of colors
-//! sprite:setPixels(layer, frame, pixels [, x, y, w, h])   -- same layout; at most 4194304 pixels
+//! sprite:setPixels(layer, frame, pixels [, x, y, w, h])   -- same layout; at most 4194304 pixels; pixels may also be
+//!                                                         -- an Image or a string of raw RGBA bytes (whole canvas)
 //! sprite:fillSelection(color [, layer [, frame]]) -> count
 //!
 //! -- Layers
@@ -42,13 +43,18 @@
 //! -- Slices
 //! sprite.slices[i] -> { name, index, hasCenter, hasPivot, getBounds([frame]), setBounds(x, y, w, h [, frame]),
 //!                       getCenter / setCenter / clearCenter, getPivot / setPivot / clearPivot, delete() }
-//! sprite:newSlice(name, x, y, w, h), sprite:deleteSlice(i)
+//! sprite:newSlice(rect | name, x, y, w, h), sprite:deleteSlice(i)    -- slice.bounds / center / pivot too
 //!
 //! -- User data: { text, color } on sprite.userData, layer.userData, cel.userData, tag.userData, slice.userData
 //!
 //! -- Cels
 //! sprite:cel(layer, frame) -> { opacity, zIndex, isEmpty, linked, linkedFrames, unlink(), userData }
-//! sprite:clearCel(layer, frame)
+//! sprite:clearCel(layer, frame), sprite:deleteCel(cel | layer, frame)
+//! sprite:newCel(layer, frame [, image [, position]]), layer:cel(frame), cel.image / cel.position / cel.bounds
+//!
+//! -- Geometry and images (Aseprite compatible; see `geometry.rs` and `image.rs`)
+//! Point(x, y), Size(w, h), Rectangle(x, y, w, h)     -- every call taking a point or rectangle accepts these
+//! Image(w, h [, colorMode]), Image{ fromFile = "/absolute/path.png" }, image.bytes (raw RGBA), image:drawImage ...
 //!
 //! -- Selection (scripts only look at it through these calls)
 //! sprite.selection -> { isEmpty, bounds, contains(x, y), selectRect(x, y, w, h [, mode]),
@@ -66,7 +72,7 @@
 //! document untouched. In Indexed and Grayscale sprites every cel the script changed is snapped
 //! to the color mode when the run ends. The sandbox has only the base, table, string, utf8, math
 //! and coroutine libraries (no `os`, `io`, `package`, `debug`, `dofile`, `loadfile`; `load`
-//! accepts text only). An instruction budget, a wall-clock limit and a memory limit stop runaway
+//! accepts text only; the one file access is `Image{ fromFile = }`, which reads a PNG by absolute path). An instruction budget, a wall-clock limit and a memory limit stop runaway
 //! scripts. A single pathological string pattern match is one VM instruction and cannot be
 //! interrupted.
 
@@ -75,7 +81,9 @@ use crate::document::{Editor, Sprite};
 use crate::paint::selection::Selection;
 mod dialog;
 mod events;
+mod geometry;
 pub mod host;
+mod image;
 mod plugins;
 #[cfg(test)]
 mod session_tests;
@@ -107,6 +115,29 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits { instructions: 300_000_000, time: Duration::from_secs(10), memory: 128 << 20 }
+    }
+}
+
+impl Limits {
+    /// Limits with these budgets (the defaults are 300 million instructions, 10 seconds, 128 MiB).
+    pub const fn new(instructions: u64, time: Duration, memory: usize) -> Limits {
+        Limits { instructions, time, memory }
+    }
+
+    /// The same limits with another wall-clock budget (the instruction budget still applies).
+    pub const fn with_time(mut self, time: Duration) -> Limits {
+        self.time = time;
+        self
+    }
+
+    pub const fn with_instructions(mut self, instructions: u64) -> Limits {
+        self.instructions = instructions;
+        self
+    }
+
+    pub const fn with_memory(mut self, bytes: usize) -> Limits {
+        self.memory = bytes;
+        self
     }
 }
 
@@ -160,6 +191,8 @@ struct Ctx {
     rt: RefCell<Option<Rc<host::Rt>>>,
     /// False in a session transaction that has no document (plugin `init`/`exit`).
     has_doc: Cell<bool>,
+    /// Bytes held by free-standing script images (see `image.rs`); they live outside the Lua heap.
+    image_bytes: Cell<usize>,
 }
 
 impl Ctx {
@@ -176,6 +209,7 @@ impl Ctx {
             mask: RefCell::new(None),
             rt: RefCell::new(None),
             has_doc: Cell::new(true),
+            image_bytes: Cell::new(0),
         }
     }
 
@@ -207,6 +241,31 @@ impl Ctx {
             None => Ok(self.frame.get().min(n - 1)),
             Some(i) if i >= 1 && i as usize <= n => Ok(i as usize - 1),
             Some(i) => Err(Error::runtime(format!("frame {i} does not exist (1..{n})"))),
+        }
+    }
+
+    /// A layer given as a 1-based number or as a layer handle (0-based result).
+    fn layer_of(&self, v: &Value) -> LuaResult<usize> {
+        if let Value::UserData(u) = v {
+            let h = u.borrow::<LayerH>().map_err(|_| Error::runtime("expected a layer or a layer number"))?;
+            h.get()?;
+            return Ok(h.1);
+        }
+        match geometry::int_of(v) {
+            Some(i) => self.layer_index(Some(i)),
+            None => Err(Error::runtime("expected a layer or a layer number")),
+        }
+    }
+
+    /// A frame given as a 1-based number or as a frame handle (0-based result).
+    fn frame_of(&self, v: &Value) -> LuaResult<usize> {
+        if let Value::UserData(u) = v {
+            let h = u.borrow::<FrameH>().map_err(|_| Error::runtime("expected a frame or a frame number"))?;
+            return h.check();
+        }
+        match geometry::int_of(v) {
+            Some(i) => self.frame_index(Some(i)),
+            None => Err(Error::runtime("expected a frame or a frame number")),
         }
     }
 
@@ -274,16 +333,66 @@ fn rect_args(
     s: &Sprite,
     r: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
 ) -> LuaResult<(usize, usize, usize, usize)> {
+    rect_args_cap(s, r, MAX_BULK_PIXELS)
+}
+
+/// `rect_args` with a different pixel cap (buffers and images may fill the whole canvas).
+fn rect_args_cap(
+    s: &Sprite,
+    r: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
+    cap: usize,
+) -> LuaResult<(usize, usize, usize, usize)> {
     let (cw, ch) = (s.width as i64, s.height as i64);
     let (x, y) = (r.0.unwrap_or(0), r.1.unwrap_or(0));
     let (w, h) = (r.2.unwrap_or(cw - x), r.3.unwrap_or(ch - y));
     if w < 0 || h < 0 || x < 0 || y < 0 || x + w > cw || y + h > ch {
         return Err(Error::runtime(format!("rectangle {x},{y} {w}x{h} does not fit the {cw}x{ch} canvas")));
     }
-    if (w as usize).saturating_mul(h as usize) > MAX_BULK_PIXELS {
-        return Err(Error::runtime(format!("at most {MAX_BULK_PIXELS} pixels per call")));
+    if (w as usize).saturating_mul(h as usize) > cap {
+        return Err(Error::runtime(format!("at most {cap} pixels per call")));
     }
     Ok((x as usize, y as usize, w as usize, h as usize))
+}
+
+/// An optional layer/frame argument (number or handle) taken off `a`; the active one when absent (or nil).
+/// With `required`, a missing argument is an error instead.
+fn take_layer(ctx: &Ctx, a: &mut MultiValue, required: bool) -> LuaResult<usize> {
+    match a.pop_front() {
+        None if required => Err(Error::runtime("a layer is required")),
+        None | Some(Value::Nil) => ctx.layer_index(None),
+        Some(v) => ctx.layer_of(&v),
+    }
+}
+
+fn take_frame_idx(ctx: &Ctx, a: &mut MultiValue, required: bool) -> LuaResult<usize> {
+    match a.pop_front() {
+        None if required => Err(Error::runtime("a frame is required")),
+        None | Some(Value::Nil) => ctx.frame_index(None),
+        Some(v) => ctx.frame_of(&v),
+    }
+}
+
+/// `[layer [, frame]]`, both optional.
+fn take_site(ctx: &Ctx, a: &mut MultiValue) -> LuaResult<(usize, usize)> {
+    Ok((take_layer(ctx, a, false)?, take_frame_idx(ctx, a, false)?))
+}
+
+/// `[x, y, w, h]` (each optional) or one Rectangle, as the optional bounds of the bulk pixel calls.
+fn take_rect_opts(a: &mut MultiValue) -> LuaResult<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> {
+    match a.front() {
+        None | Some(Value::Nil) => Ok((None, None, None, None)),
+        Some(Value::Integer(_) | Value::Number(_)) => {
+            let mut v = [None; 4];
+            for slot in v.iter_mut() {
+                *slot = geometry::take_opt_int(a, "rectangle")?;
+            }
+            Ok((v[0], v[1], v[2], v[3]))
+        }
+        Some(_) => {
+            let r = geometry::take_rect(a, "rectangle")?;
+            Ok((Some(r.x), Some(r.y), Some(r.w), Some(r.h)))
+        }
+    }
 }
 
 /// Maps colors to the sprite's color mode, remembering earlier answers.
@@ -419,84 +528,137 @@ impl UserData for SpriteH {
             lua.create_sequence_from((0..n).map(|i| SliceH::new(&t.0, i)))
         });
         f.add_field_method_get("userData", |_, t| Ok(UserDataH::new(&t.0, 0, 0, 0)));
+        f.add_field_method_get("bounds", |_, t| {
+            let s = t.0.sprite();
+            Ok(geometry::RectV::new(0, 0, s.width as i64, s.height as i64))
+        });
+        f.add_field_method_get("size", |_, t| {
+            let s = t.0.sprite();
+            Ok(geometry::SizeV { w: s.width as i64, h: s.height as i64 })
+        });
+        // Every cel that has an image, frame by frame, bottom layer first within a frame.
+        f.add_field_method_get("cels", |lua, t| {
+            let s = t.0.sprite();
+            let mut out = Vec::new();
+            for f in 0..s.frame_count() {
+                for l in 0..s.layers.len() {
+                    if s.cels[f][l].is_some() {
+                        out.push(CelH(t.0.clone(), l, f, t.0.epoch.get()));
+                    }
+                }
+            }
+            lua.create_sequence_from(out)
+        });
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
         // MARK: Pixels
-        m.add_method("getPixel", |_, t, (x, y, layer, frame): (i64, i64, Option<i64>, Option<i64>)| {
-            let (l, f) = (t.0.layer_index(layer)?, t.0.frame_index(frame)?);
+        // getPixel(x, y [, layer [, frame]]) or getPixel(point [, layer [, frame]])
+        m.add_method("getPixel", |_, t, mut a: MultiValue| {
+            let p = geometry::take_point(&mut a, "getPixel")?;
+            let (l, f) = take_site(&t.0, &mut a)?;
             let s = t.0.sprite();
-            if x < 0 || y < 0 || x >= s.width as i64 || y >= s.height as i64 {
+            if p.x < 0 || p.y < 0 || p.x >= s.width as i64 || p.y >= s.height as i64 {
                 return Ok(0i64);
             }
-            let i = (y as usize * s.width as usize + x as usize) * 4;
+            let i = (p.y as usize * s.width as usize + p.x as usize) * 4;
             Ok(s.cels[f][l].as_ref().map_or(0, |c| pack(&c.pixels[i..i + 4])))
         });
-        m.add_method("setPixel", |_, t, (x, y, color, layer, frame): (i64, i64, i64, Option<i64>, Option<i64>)| {
-            let (l, f) = (t.0.layer_index(layer)?, t.0.frame_index(frame)?);
+        // setPixel(x, y, color [, layer [, frame]]) or setPixel(point, color [, layer [, frame]])
+        m.add_method("setPixel", |_, t, mut a: MultiValue| {
+            let p = geometry::take_point(&mut a, "setPixel")?;
+            let color = geometry::take_opt_int(&mut a, "setPixel color")?
+                .ok_or_else(|| Error::runtime("setPixel needs a color"))?;
+            let (l, f) = take_site(&t.0, &mut a)?;
             let c = color_arg(color)?;
             let s = t.0.sprite();
             if s.layers[l].is_group() {
                 return Err(Error::runtime("cannot draw on a group layer"));
             }
-            if x < 0 || y < 0 || x >= s.width as i64 || y >= s.height as i64 {
+            if p.x < 0 || p.y < 0 || p.x >= s.width as i64 || p.y >= s.height as i64 {
                 return Ok(());
             }
             let c = color_mode::snap_color(s, c);
-            s.draw_line(l, f, x as i32, y as i32, x as i32, y as i32, c, 1);
+            s.draw_line(l, f, p.x as i32, p.y as i32, p.x as i32, p.y as i32, c, 1);
             s.flush_links(); // an edit shows in every frame that shares the cel right away
             Ok(())
         });
-        m.add_method(
-            "getPixels",
-            |lua, t, (layer, frame, x, y, w, h): (i64, i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)| {
-                let (l, f) = (t.0.layer_index(Some(layer))?, t.0.frame_index(Some(frame))?);
-                let s = t.0.sprite();
-                let (x0, y0, w, h) = rect_args(s, (x, y, w, h))?;
-                let cw = s.width as usize;
-                let cel = s.cels[f][l].as_ref();
-                lua.create_sequence_from((0..w * h).map(|i| {
-                    cel.map_or(0, |c| {
-                        let (px, py) = (x0 + i % w, y0 + i / w);
-                        pack(&c.pixels[(py * cw + px) * 4..][..4])
-                    })
-                }))
-            },
-        );
-        m.add_method(
-            "setPixels",
-            |_,
-             t,
-             (layer, frame, pixels, x, y, w, h): (
-                i64,
-                i64,
-                Table,
-                Option<i64>,
-                Option<i64>,
-                Option<i64>,
-                Option<i64>,
-            )| {
-                let l = t.0.drawable_layer(Some(layer))?;
-                let f = t.0.frame_index(Some(frame))?;
-                let s = t.0.sprite();
-                let rect = rect_args(s, (x, y, w, h))?;
-                let count = pixels.raw_len();
-                if count != rect.2 * rect.3 {
+        // getPixels(layer, frame [, x, y, w, h]) or getPixels(layer, frame, rectangle)
+        m.add_method("getPixels", |lua, t, mut a: MultiValue| {
+            let (l, f) = (take_layer(&t.0, &mut a, true)?, take_frame_idx(&t.0, &mut a, true)?);
+            let s = t.0.sprite();
+            let (x0, y0, w, h) = rect_args(s, take_rect_opts(&mut a)?)?;
+            let cw = s.width as usize;
+            let cel = s.cels[f][l].as_ref();
+            lua.create_sequence_from((0..w * h).map(|i| {
+                cel.map_or(0, |c| {
+                    let (px, py) = (x0 + i % w, y0 + i / w);
+                    pack(&c.pixels[(py * cw + px) * 4..][..4])
+                })
+            }))
+        });
+        // setPixels(layer, frame, pixels [, x, y, w, h]) or setPixels(layer, frame, pixels, rectangle).
+        // pixels: a flat table of colors (at most MAX_BULK_PIXELS), or an Image / a string of raw RGBA bytes
+        // (row-major, 4 bytes per pixel; up to the whole canvas), written in Rust.
+        m.add_method("setPixels", |_, t, mut a: MultiValue| {
+            let layer = take_layer(&t.0, &mut a, true)?;
+            if t.0.sprite().layers[layer].is_group() {
+                return Err(Error::runtime("groups have no pixels"));
+            }
+            let f = take_frame_idx(&t.0, &mut a, true)?;
+            let pixels = a.pop_front().unwrap_or(Value::Nil);
+            let s = t.0.sprite();
+            let bulk = match &pixels {
+                Value::String(b) => Some((b.as_bytes().to_vec(), None)),
+                other => image::image_of(other).map(|img| (Vec::new(), Some(img))),
+            };
+            let (x, y, w, h) = take_rect_opts(&mut a)?;
+            if let Some((bytes, img)) = bulk {
+                let (data, iw, ih) = match img {
+                    Some(img) => {
+                        let (iw, ih) = img.size()?;
+                        (img.snapshot()?, Some(iw), Some(ih))
+                    }
+                    None => (bytes, None, None),
+                };
+                let (w, h) = (w.or(iw.map(|v| v as i64)), h.or(ih.map(|v| v as i64)));
+                let rect = rect_args_cap(s, (x, y, w, h), usize::MAX)?;
+                if data.len() != rect.2 * rect.3 * 4 || iw.is_some_and(|v| v != rect.2) {
                     return Err(Error::runtime(format!(
-                        "setPixels needs {} colors for a {}x{} rectangle, got {count}",
-                        rect.2 * rect.3,
+                        "setPixels needs {} bytes (RGBA) for a {}x{} rectangle, got {}",
+                        rect.2 * rect.3 * 4,
                         rect.2,
-                        rect.3
+                        rect.3,
+                        data.len()
                     )));
                 }
-                let mut colors = Vec::with_capacity(count);
-                for v in pixels.sequence_values::<i64>() {
-                    colors.push(color_arg(v?)?);
+                if rect.2 > 0 && rect.3 > 0 {
+                    image::blit(s, layer, f, &data, rect.2, rect.3, rect.0 as i64, rect.1 as i64)?;
                 }
-                write_rect(s, l, f, rect, &mut colors.into_iter());
-                Ok(())
-            },
-        );
+                return Ok(());
+            }
+            let Value::Table(pixels) = pixels else {
+                return Err(Error::runtime(
+                    "setPixels: pixels must be a table of colors, an Image or a string of RGBA bytes",
+                ));
+            };
+            let rect = rect_args(s, (x, y, w, h))?;
+            let count = pixels.raw_len();
+            if count != rect.2 * rect.3 {
+                return Err(Error::runtime(format!(
+                    "setPixels needs {} colors for a {}x{} rectangle, got {count}",
+                    rect.2 * rect.3,
+                    rect.2,
+                    rect.3
+                )));
+            }
+            let mut colors = Vec::with_capacity(count);
+            for v in pixels.sequence_values::<i64>() {
+                colors.push(color_arg(v?)?);
+            }
+            write_rect(s, layer, f, rect, &mut colors.into_iter());
+            Ok(())
+        });
         m.add_method("fillSelection", |_, t, (color, layer, frame): (i64, Option<i64>, Option<i64>)| {
             let c = color_arg(color)?;
             let l = t.0.drawable_layer(layer)?;
@@ -632,12 +794,34 @@ impl UserData for SpriteH {
             s.tags[i].name = name;
             Ok(TagH::new(&t.0, i))
         });
-        m.add_method("newSlice", |_, t, (name, x, y, w, h): (String, i64, i64, i64, i64)| {
-            let r = slice_rect(x, y, w, h)?;
+        // newSlice(rectangle), newSlice(x, y, w, h) as in Aseprite (the slice gets the name "Slice N"), or
+        // newSlice(name [, rectangle]) / newSlice(name, x, y, w, h). Without bounds the slice covers the canvas.
+        m.add_method("newSlice", |_, t, mut a: MultiValue| {
+            let name = match a.front() {
+                Some(Value::String(n)) => {
+                    let n = n.to_string_lossy();
+                    a.pop_front();
+                    Some(n)
+                }
+                _ => None,
+            };
             let s = t.0.sprite();
+            let r = if a.is_empty() || matches!(a.front(), Some(Value::Nil)) {
+                geometry::RectV::new(0, 0, s.width as i64, s.height as i64)
+            } else {
+                geometry::take_rect(&mut a, "newSlice")?
+            };
+            let r = slice_rect(r.x, r.y, r.w, r.h)?;
             if s.extra.slices.len() >= MAX_SCRIPT_SLICES {
                 return Err(Error::runtime(format!("too many slices (at most {MAX_SCRIPT_SLICES})")));
             }
+            let name = name.unwrap_or_else(|| {
+                let mut n = s.extra.slices.len() + 1;
+                while s.extra.slices.iter().any(|x| x.name == format!("Slice {n}")) {
+                    n += 1;
+                }
+                format!("Slice {n}")
+            });
             let key = crate::document::slices::SliceKey { bounds: r, ..Default::default() };
             s.extra.slices.push(crate::document::slices::Slice { name, keys: vec![key], ..Default::default() });
             Ok(SliceH::new(&t.0, s.extra.slices.len() - 1))
@@ -660,17 +844,62 @@ impl UserData for SpriteH {
         });
 
         // MARK: Cels
-        m.add_method("cel", |_, t, (layer, frame): (i64, i64)| {
-            let (l, f) = (t.0.layer_index(Some(layer))?, t.0.frame_index(Some(frame))?);
+        m.add_method("cel", |_, t, (layer, frame): (Value, Value)| {
+            let (l, f) = (t.0.layer_of(&layer)?, t.0.frame_of(&frame)?);
             if t.0.sprite().layers[l].is_group() {
                 return Err(Error::runtime("groups have no cels"));
             }
             Ok(CelH(t.0.clone(), l, f, t.0.epoch.get()))
         });
-        m.add_method("clearCel", |_, t, (layer, frame): (i64, i64)| {
-            let l = t.0.drawable_layer(Some(layer))?;
-            let f = t.0.frame_index(Some(frame))?;
+        m.add_method("clearCel", |_, t, (layer, frame): (Value, Value)| {
+            let l = t.0.layer_of(&layer)?;
+            if t.0.sprite().layers[l].is_group() {
+                return Err(Error::runtime("groups have no pixels"));
+            }
+            let f = t.0.frame_of(&frame)?;
             Ok(t.0.sprite().clear_cels((l, l), (f, f)))
+        });
+        // deleteCel(cel) or deleteCel(layer, frame), as in Aseprite.
+        m.add_method("deleteCel", |_, t, (layer, frame): (Value, Option<Value>)| {
+            let (l, f) = match (&layer, frame) {
+                (Value::UserData(u), None) => {
+                    let c =
+                        u.borrow::<CelH>().map_err(|_| Error::runtime("deleteCel expects a cel or (layer, frame)"))?;
+                    c.check()?;
+                    (c.1, c.2)
+                }
+                (_, Some(frame)) => (t.0.layer_of(&layer)?, t.0.frame_of(&frame)?),
+                _ => return Err(Error::runtime("deleteCel expects a cel or (layer, frame)")),
+            };
+            if t.0.sprite().layers[l].is_group() {
+                return Err(Error::runtime("groups have no cels"));
+            }
+            t.0.sprite().clear_cels((l, l), (f, f));
+            Ok(())
+        });
+        // newCel(layer, frame [, image [, position]]): puts the image (RGBA, copied; clipped to the canvas) into
+        // the cel with its top-left at `position` (default 0,0), replacing the cel, in one call. Without an
+        // image the cel is empty. `layer` and `frame` are numbers or handles.
+        m.add_method("newCel", |_, t, (layer, frame, img, pos): (Value, Value, Option<Value>, Option<Value>)| {
+            let l = t.0.layer_of(&layer)?;
+            if t.0.sprite().layers[l].is_group() {
+                return Err(Error::runtime("groups have no cels"));
+            }
+            let f = t.0.frame_of(&frame)?;
+            let img = match img {
+                None | Some(Value::Nil) => None,
+                Some(v) => Some(
+                    image::image_of(&v).ok_or_else(|| Error::runtime("newCel: the third argument must be an Image"))?,
+                ),
+            };
+            let at = match pos {
+                None | Some(Value::Nil) => (0, 0),
+                Some(v) => {
+                    geometry::point_of(&v).ok_or_else(|| Error::runtime("newCel: the position must be a Point"))?
+                }
+            };
+            image::place_cel(&t.0, l, f, img.as_ref(), at)?;
+            Ok(CelH(t.0.clone(), l, f, t.0.epoch.get()))
         });
 
         // MARK: Palette
@@ -711,6 +940,16 @@ impl UserData for SpriteH {
 
 impl UserData for LayerH {
     fn add_fields<F: UserDataFields<Self>>(f: &mut F) {
+        f.add_field_method_get("cels", |lua, t| {
+            t.get()?;
+            let s = t.0.sprite();
+            let out: Vec<CelH> = (0..s.frame_count())
+                .filter(|&f| s.cels[f][t.1].is_some())
+                .map(|f| CelH(t.0.clone(), t.1, f, t.0.epoch.get()))
+                .collect();
+            lua.create_sequence_from(out)
+        });
+
         f.add_field_method_get("name", |_, t| Ok(t.get()?.name.clone()));
         f.add_field_method_set("name", |_, t, v: String| {
             t.get()?.name = v;
@@ -786,11 +1025,20 @@ impl UserData for LayerH {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
+        // layer:cel(frame) -> the cel, or nil when the layer has no image there (as in Aseprite).
+        m.add_method("cel", |_, t, frame: Value| {
+            t.get()?;
+            let f = t.0.frame_of(&frame)?;
+            Ok(t.0.sprite().cels[f][t.1].is_some().then(|| CelH(t.0.clone(), t.1, f, t.0.epoch.get())))
+        });
+
         // Tiles are addressed by grid cell: (x, y) is the cell whose top-left pixel is
         // (x * tileWidth, y * tileHeight). Tile 0 is the empty tile.
-        m.add_method("getTile", |_, t, (x, y, frame): (i64, i64, Option<i64>)| {
+        // getTile(x, y [, frame]) or getTile(point [, frame])
+        m.add_method("getTile", |_, t, mut a: MultiValue| {
+            let geometry::PointV { x, y } = geometry::take_point(&mut a, "getTile")?;
             let (tw, th) = t.tile_size()?;
-            let f = t.0.frame_index(frame)?;
+            let f = take_frame_idx(&t.0, &mut a, false)?;
             let s = t.0.sprite();
             let (px, py) = (x.saturating_mul(tw as i64), y.saturating_mul(th as i64));
             if px < 0 || py < 0 || px >= s.width as i64 || py >= s.height as i64 {
@@ -804,21 +1052,24 @@ impl UserData for LayerH {
                 v & crate::document::tilemap::FLIP_D != 0,
             ))
         });
-        m.add_method(
-            "setTile",
-            |_,
-             t,
-             (x, y, index, fx, fy, fd, frame): (
-                i64,
-                i64,
-                i64,
-                Option<bool>,
-                Option<bool>,
-                Option<bool>,
-                Option<i64>,
-            )| {
+        // setTile(x, y, index [, flipX, flipY, diagonal [, frame]]) or setTile(point, index [, ...])
+        m.add_method("setTile", |_, t, mut a: MultiValue| {
+            let geometry::PointV { x, y } = geometry::take_point(&mut a, "setTile")?;
+            let index = geometry::take_opt_int(&mut a, "setTile index")?
+                .ok_or_else(|| Error::runtime("setTile needs a tile index"))?;
+            let flag = |a: &mut MultiValue| match a.pop_front() {
+                None | Some(Value::Nil) => Ok(None),
+                Some(Value::Boolean(b)) => Ok(Some(b)),
+                Some(_) => Err(Error::runtime("setTile: flip flags must be booleans")),
+            };
+            let (fx, fy, fd) = (flag(&mut a)?, flag(&mut a)?, flag(&mut a)?);
+            let frame = a.pop_front();
+            {
+                let f = match frame {
+                    None | Some(Value::Nil) => t.0.frame_index(None)?,
+                    Some(v) => t.0.frame_of(&v)?,
+                };
                 let (tw, th) = t.tile_size()?;
-                let f = t.0.frame_index(frame)?;
                 let s = t.0.sprite();
                 let ti = s.layers[t.1].tileset as usize;
                 let count = s.tilesets[ti].tiles.len();
@@ -837,8 +1088,8 @@ impl UserData for LayerH {
                 crate::document::tilemap::stamp(s, t.1, f, px as i32, py as i32, value);
                 s.flush_links();
                 Ok(())
-            },
-        );
+            }
+        });
     }
 }
 
@@ -981,12 +1232,34 @@ impl UserData for CelH {
             t.check()?;
             Ok(UserDataH::new(&t.0, 2, t.2, t.1))
         });
-        f.add_field_method_get("userData", |_, t| {
-            t.check()?;
-            Ok(UserDataH::new(&t.0, 2, t.2, t.1))
-        });
         f.add_field_method_get("layer", |_, t| Ok(t.1 + 1));
         f.add_field_method_get("frame", |_, t| Ok(t.2 + 1));
+        f.add_field_method_get("frameNumber", |_, t| Ok(t.2 + 1));
+        // The box around the cel's non-transparent pixels (Pixmith cels are canvas-sized; see `image.rs`).
+        f.add_field_method_get("bounds", |_, t| {
+            t.check()?;
+            Ok(image::cel_rect(t.0.sprite(), t.1, t.2))
+        });
+        f.add_field_method_get("position", |_, t| {
+            t.check()?;
+            let r = image::cel_rect(t.0.sprite(), t.1, t.2);
+            Ok(geometry::PointV { x: r.x, y: r.y })
+        });
+        f.add_field_method_set("position", |_, t, v: Value| {
+            t.check()?;
+            let (x, y) = geometry::point_of(&v).ok_or_else(|| Error::runtime("position must be a Point"))?;
+            image::set_cel_position(&t.0, t.1, t.2, geometry::PointV { x, y })
+        });
+        // A live view of the cel's pixels (nil for an empty cel): drawing on it draws on the cel.
+        f.add_field_method_get("image", |_, t| {
+            t.check()?;
+            Ok(image::cel_image(&t.0, t.1, t.2))
+        });
+        f.add_field_method_set("image", |_, t, v: Value| {
+            t.check()?;
+            let img = image::image_of(&v).ok_or_else(|| Error::runtime("cel.image must be set to an Image"))?;
+            image::set_cel_image(&t.0, t.1, t.2, &img)
+        });
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
@@ -1012,58 +1285,106 @@ fn mode_arg(v: Option<Value>) -> LuaResult<u8> {
     })
 }
 
+/// Combines a rectangle (clipped to the canvas) with the script's selection. `mode`: 0 replace, 1 add,
+/// 2 subtract, 3 intersect.
+fn select_with_rect(ctx: &Ctx, rect: &geometry::RectV, mode: u8) {
+    let s = ctx.sprite();
+    let (cw, ch) = (s.width as i64, s.height as i64);
+    let mut r = Selection::new(s.width, s.height, false);
+    let (x0, y0) = (rect.x.max(0), rect.y.max(0));
+    let (x1, y1) = (rect.x.saturating_add(rect.w).min(cw), rect.y.saturating_add(rect.h).min(ch));
+    for py in y0..y1.max(y0) {
+        for px in x0..x1.max(x0) {
+            r.bits[(py * cw + px) as usize] = true;
+        }
+    }
+    let combined = match (mode, ctx.mask()) {
+        (1, Some(base)) => {
+            let mut c = (*base).clone();
+            c.bits.iter_mut().zip(&r.bits).for_each(|(a, b)| *a |= *b);
+            c
+        }
+        (2, Some(base)) => {
+            let mut c = (*base).clone();
+            c.bits.iter_mut().zip(&r.bits).for_each(|(a, b)| *a &= !*b);
+            c
+        }
+        (2 | 3, None) => Selection::new(s.width, s.height, false),
+        (3, Some(base)) => {
+            let mut c = (*base).clone();
+            c.bits.iter_mut().zip(&r.bits).for_each(|(a, b)| *a &= *b);
+            c
+        }
+        _ => r,
+    };
+    ctx.set_mask(combined);
+}
+
 impl UserData for SelectionH {
     fn add_fields<F: UserDataFields<Self>>(f: &mut F) {
         f.add_field_method_get("isEmpty", |_, t| Ok(t.0.mask().is_none()));
-        f.add_field_method_get("bounds", |lua, t| {
-            let Some((x, y, w, h)) = t.0.mask().and_then(|m| m.bounds()) else { return Ok(None) };
-            let tb = lua.create_table()?;
-            tb.set("x", x)?;
-            tb.set("y", y)?;
-            tb.set("w", w)?;
-            tb.set("h", h)?;
-            Ok(Some(tb))
+        f.add_field_method_get("bounds", |_, t| {
+            Ok(t.0
+                .mask()
+                .and_then(|m| m.bounds())
+                .map(|(x, y, w, h)| geometry::RectV::new(x as i64, y as i64, w as i64, h as i64)))
+        });
+        // The top-left of the selection (0,0 when empty); assigning a Point moves the selection.
+        f.add_field_method_get("origin", |_, t| {
+            let (x, y) = t.0.mask().and_then(|m| m.bounds()).map_or((0, 0), |b| (b.0 as i64, b.1 as i64));
+            Ok(geometry::PointV { x, y })
+        });
+        f.add_field_method_set("origin", |_, t, v: Value| {
+            let (x, y) = geometry::point_of(&v).ok_or_else(|| Error::runtime("origin must be a Point"))?;
+            let Some(mask) = t.0.mask() else { return Ok(()) };
+            let Some((bx, by, _, _)) = mask.bounds() else { return Ok(()) };
+            let (dx, dy) = (x.saturating_sub(bx as i64), y.saturating_sub(by as i64));
+            let (w, h) = (mask.w as i64, mask.h as i64);
+            let mut moved = Selection::new(mask.w, mask.h, false);
+            for (i, on) in mask.bits.iter().enumerate() {
+                if *on {
+                    let (nx, ny) = ((i as i64 % w).saturating_add(dx), (i as i64 / w).saturating_add(dy));
+                    if nx >= 0 && ny >= 0 && nx < w && ny < h {
+                        moved.bits[(ny * w + nx) as usize] = true;
+                    }
+                }
+            }
+            t.0.set_mask(moved);
+            Ok(())
         });
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
-        m.add_method("contains", |_, t, (x, y): (i64, i64)| {
+        // contains(x, y) or contains(point)
+        m.add_method("contains", |_, t, mut a: MultiValue| {
+            let p = geometry::take_point(&mut a, "contains")?;
             Ok(match t.0.mask() {
                 Some(m)
-                    if x >= i32::MIN as i64 && x <= i32::MAX as i64 && y >= i32::MIN as i64 && y <= i32::MAX as i64 =>
+                    if p.x >= i32::MIN as i64
+                        && p.x <= i32::MAX as i64
+                        && p.y >= i32::MIN as i64
+                        && p.y <= i32::MAX as i64 =>
                 {
-                    m.get(x as i32, y as i32)
+                    m.get(p.x as i32, p.y as i32)
                 }
                 _ => false,
             })
         });
-        m.add_method("selectRect", |_, t, (x, y, w, h, mode): (i64, i64, i64, i64, Option<Value>)| {
-            let mode = mode_arg(mode)?;
-            let s = t.0.sprite();
-            let (cw, ch) = (s.width as i64, s.height as i64);
-            let mut r = Selection::new(s.width, s.height, false);
-            for py in y.max(0)..(y + h).min(ch) {
-                for px in x.max(0)..(x + w).min(cw) {
-                    r.bits[(py * cw + px) as usize] = true;
-                }
-            }
-            let combined = match (mode, t.0.mask()) {
-                (1, Some(base)) => {
-                    let mut c = (*base).clone();
-                    c.bits.iter_mut().zip(&r.bits).for_each(|(a, b)| *a |= *b);
-                    c
-                }
-                (2, Some(base)) => {
-                    let mut c = (*base).clone();
-                    c.bits.iter_mut().zip(&r.bits).for_each(|(a, b)| *a &= !*b);
-                    c
-                }
-                (2, None) => Selection::new(s.width, s.height, false),
-                _ => r,
-            };
-            t.0.set_mask(combined);
+        // selectRect(x, y, w, h [, mode]) or selectRect(rectangle [, mode]); mode: "replace", "add", "subtract"
+        m.add_method("selectRect", |_, t, mut a: MultiValue| {
+            let r = geometry::take_rect(&mut a, "selectRect")?;
+            let mode = mode_arg(a.pop_front())?;
+            select_with_rect(&t.0, &r, mode);
             Ok(())
         });
+        // Aseprite's names: select(rect) replaces; add, subtract and intersect combine.
+        for (name, mode) in [("select", 0u8), ("add", 1), ("subtract", 2), ("intersect", 3)] {
+            m.add_method(name, move |_, t, mut a: MultiValue| {
+                let r = geometry::take_rect(&mut a, name)?;
+                select_with_rect(&t.0, &r, mode);
+                Ok(())
+            });
+        }
         m.add_method("selectAll", |_, t, ()| {
             let s = t.0.sprite();
             t.0.set_mask(Selection::new(s.width, s.height, true));
@@ -1256,21 +1577,24 @@ impl SliceH {
     }
 }
 
-fn rect_table(lua: &Lua, r: crate::document::slices::Rect) -> LuaResult<Table> {
-    let t = lua.create_table()?;
-    t.set("x", r.x)?;
-    t.set("y", r.y)?;
-    t.set("w", r.w)?;
-    t.set("h", r.h)?;
-    Ok(t)
-}
-
 fn slice_rect(x: i64, y: i64, w: i64, h: i64) -> LuaResult<crate::document::slices::Rect> {
     const LIMIT: i64 = 1 << 20;
     if x.abs() > LIMIT || y.abs() > LIMIT || !(0..=LIMIT).contains(&w) || !(0..=LIMIT).contains(&h) {
         return Err(Error::runtime("slice rectangle out of range"));
     }
     Ok(crate::document::slices::Rect { x: x as i32, y: y as i32, w: w as u32, h: h as u32 })
+}
+
+/// An optional trailing frame argument (a number or a frame handle); the active frame when absent.
+fn take_frame(ctx: &Ctx, a: &mut MultiValue) -> LuaResult<u32> {
+    match a.pop_front() {
+        None | Some(Value::Nil) => Ok(ctx.frame_index(None)? as u32),
+        Some(v) => Ok(ctx.frame_of(&v)? as u32),
+    }
+}
+
+fn rect_value(r: crate::document::slices::Rect) -> geometry::RectV {
+    geometry::RectV::new(r.x as i64, r.y as i64, r.w as i64, r.h as i64)
 }
 
 impl UserData for SliceH {
@@ -1290,33 +1614,96 @@ impl UserData for SliceH {
             t.get()?;
             Ok(UserDataH::new(&t.0, 4, t.1, 0))
         });
-    }
-
-    fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
-        // Geometry is per frame: a key set on frame N applies from N until the next key.
-        m.add_method("getBounds", |lua, t, frame: Option<i64>| {
-            let f = t.0.frame_index(frame)? as u32;
+        // As in Aseprite, `bounds`, `center` and `pivot` are the values of the slice's first frame; use
+        // getBounds / setBounds ... to address another frame. `center` is relative to `bounds`.
+        f.add_field_method_get("bounds", |_, t| {
             let sl = t.get()?;
-            sl.key_at(f).or(sl.keys.first()).map(|k| rect_table(lua, k.bounds)).transpose()
+            Ok(sl.key_at(0).or(sl.keys.first()).map(|k| rect_value(k.bounds)))
         });
-        m.add_method("setBounds", |_, t, (x, y, w, h, frame): (i64, i64, i64, i64, Option<i64>)| {
-            let f = t.0.frame_index(frame)? as u32;
-            let r = slice_rect(x, y, w, h)?;
+        f.add_field_method_set("bounds", |_, t, v: Value| {
+            let r = geometry::rect_of(&v).ok_or_else(|| Error::runtime("bounds must be a Rectangle"))?;
+            let r = slice_rect(r.x, r.y, r.w, r.h)?;
             t.get()?;
-            crate::document::slices::set_bounds(t.0.sprite(), t.1, f, r);
+            crate::document::slices::set_bounds(t.0.sprite(), t.1, 0, r);
             Ok(())
         });
-        m.add_method("getCenter", |lua, t, frame: Option<i64>| {
-            let f = t.0.frame_index(frame)? as u32;
+        f.add_field_method_get("center", |_, t| {
             let sl = t.get()?;
             if !sl.nine_patch {
                 return Ok(None);
             }
-            sl.key_at(f).or(sl.keys.first()).map(|k| rect_table(lua, k.center)).transpose()
+            Ok(sl.key_at(0).or(sl.keys.first()).map(|k| rect_value(k.center)))
         });
-        m.add_method("setCenter", |_, t, (x, y, w, h, frame): (i64, i64, i64, i64, Option<i64>)| {
-            let f = t.0.frame_index(frame)? as u32;
-            let r = slice_rect(x, y, w, h)?;
+        f.add_field_method_set("center", |_, t, v: Value| {
+            let sl = t.get()?;
+            if matches!(v, Value::Nil) {
+                sl.nine_patch = false;
+                return Ok(());
+            }
+            let r = geometry::rect_of(&v).ok_or_else(|| Error::runtime("center must be a Rectangle or nil"))?;
+            let r = slice_rect(r.x, r.y, r.w, r.h)?;
+            crate::document::slices::key_for_edit(sl, 0).center = r;
+            sl.nine_patch = true;
+            Ok(())
+        });
+        f.add_field_method_get("pivot", |_, t| {
+            let sl = t.get()?;
+            if !sl.has_pivot {
+                return Ok(None);
+            }
+            Ok(sl.key_at(0).or(sl.keys.first()).map(|k| geometry::PointV { x: k.pivot.0 as i64, y: k.pivot.1 as i64 }))
+        });
+        f.add_field_method_set("pivot", |_, t, v: Value| {
+            let sl = t.get()?;
+            if matches!(v, Value::Nil) {
+                sl.has_pivot = false;
+                return Ok(());
+            }
+            let (x, y) = geometry::point_of(&v).ok_or_else(|| Error::runtime("pivot must be a Point or nil"))?;
+            if x.abs() > 1 << 20 || y.abs() > 1 << 20 {
+                return Err(Error::runtime("pivot out of range"));
+            }
+            crate::document::slices::key_for_edit(sl, 0).pivot = (x as i32, y as i32);
+            sl.has_pivot = true;
+            Ok(())
+        });
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
+        // Geometry is per frame: a key set on frame N applies from N until the next key.
+        m.add_method("getBounds", |_, t, frame: Option<Value>| {
+            let f = match frame {
+                None | Some(Value::Nil) => t.0.frame_index(None)?,
+                Some(v) => t.0.frame_of(&v)?,
+            } as u32;
+            let sl = t.get()?;
+            Ok(sl.key_at(f).or(sl.keys.first()).map(|k| rect_value(k.bounds)))
+        });
+        // setBounds(x, y, w, h [, frame]) or setBounds(rectangle [, frame])
+        m.add_method("setBounds", |_, t, mut a: MultiValue| {
+            let r = geometry::take_rect(&mut a, "setBounds")?;
+            let f = take_frame(&t.0, &mut a)?;
+            let r = slice_rect(r.x, r.y, r.w, r.h)?;
+            t.get()?;
+            crate::document::slices::set_bounds(t.0.sprite(), t.1, f, r);
+            Ok(())
+        });
+        m.add_method("getCenter", |_, t, frame: Option<Value>| {
+            let f = match frame {
+                None | Some(Value::Nil) => t.0.frame_index(None)?,
+                Some(v) => t.0.frame_of(&v)?,
+            } as u32;
+            let sl = t.get()?;
+            if !sl.nine_patch {
+                return Ok(None);
+            }
+            Ok(sl.key_at(f).or(sl.keys.first()).map(|k| rect_value(k.center)))
+        });
+        // setCenter(x, y, w, h [, frame]) or setCenter(rectangle [, frame])
+        m.add_method("setCenter", |_, t, mut a: MultiValue| {
+            let r = geometry::take_rect(&mut a, "setCenter")?;
+            let f = take_frame(&t.0, &mut a)?;
+            let r = slice_rect(r.x, r.y, r.w, r.h)?;
             let sl = t.get()?;
             crate::document::slices::key_for_edit(sl, f).center = r;
             sl.nine_patch = true;
@@ -1326,8 +1713,11 @@ impl UserData for SliceH {
             t.get()?.nine_patch = false;
             Ok(())
         });
-        m.add_method("getPivot", |_, t, frame: Option<i64>| {
-            let f = t.0.frame_index(frame)? as u32;
+        m.add_method("getPivot", |_, t, frame: Option<Value>| {
+            let f = match frame {
+                None | Some(Value::Nil) => t.0.frame_index(None)?,
+                Some(v) => t.0.frame_of(&v)?,
+            } as u32;
             let sl = t.get()?;
             if !sl.has_pivot {
                 return Ok((None, None));
@@ -1335,13 +1725,15 @@ impl UserData for SliceH {
             let p = sl.key_at(f).or(sl.keys.first()).map(|k| k.pivot);
             Ok((p.map(|p| p.0), p.map(|p| p.1)))
         });
-        m.add_method("setPivot", |_, t, (x, y, frame): (i64, i64, Option<i64>)| {
-            let f = t.0.frame_index(frame)? as u32;
-            if x.abs() > 1 << 20 || y.abs() > 1 << 20 {
+        // setPivot(x, y [, frame]) or setPivot(point [, frame])
+        m.add_method("setPivot", |_, t, mut a: MultiValue| {
+            let p = geometry::take_point(&mut a, "setPivot")?;
+            let f = take_frame(&t.0, &mut a)?;
+            if p.x.abs() > 1 << 20 || p.y.abs() > 1 << 20 {
                 return Err(Error::runtime("pivot out of range"));
             }
             let sl = t.get()?;
-            crate::document::slices::key_for_edit(sl, f).pivot = (x as i32, y as i32);
+            crate::document::slices::key_for_edit(sl, f).pivot = (p.x as i32, p.y as i32);
             sl.has_pivot = true;
             Ok(())
         });
@@ -1548,6 +1940,8 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
 
     g.set("sprite", SpriteH(ctx.clone()))?;
     g.get::<Table>("app")?.raw_set("sprite", g.get::<Value>("sprite")?)?;
+    geometry::install(lua)?;
+    image::install(lua, ctx)?;
     host::install(lua, ctx)?;
     Ok(())
 }
@@ -1556,6 +1950,13 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
 /// the document is restored. `active` is the (layer, frame) pair, 0-based, scripts default to.
 pub fn run(e: &mut Editor, source: &str, active: (usize, usize), limits: Limits) -> Outcome {
     run_with(e, source, active, limits, &NEVER)
+}
+
+/// `run` with the layer and frame the C ABI defaults to (the top drawable layer, frame 1): the entry point
+/// for hosts that only need to choose the `Limits` (e.g. a longer timeout for a script that builds big art).
+pub fn run_with_limits(e: &mut Editor, source: &str, limits: Limits) -> Outcome {
+    let layer = e.sprite.layers.iter().rposition(|l| !l.is_group()).unwrap_or(0);
+    run(e, source, (layer, 0), limits)
 }
 
 /// Like `run`; the script stops with "script cancelled" soon after `cancel` becomes true.
@@ -1580,6 +1981,7 @@ pub fn run_with(
         mask: RefCell::new(old_mask.clone()),
         rt: RefCell::new(None),
         has_doc: Cell::new(true),
+        image_bytes: Cell::new(0),
     });
     let result = exec(&ctx, source, limits, cancel);
     let messages = ctx.messages.borrow().clone();
@@ -1712,6 +2114,16 @@ unsafe fn run_ffi(
     active: Option<(usize, usize)>,
     out: *mut *mut c_char,
 ) -> bool {
+    run_ffi_limits(doc, source, active, Limits::default(), out)
+}
+
+unsafe fn run_ffi_limits(
+    doc: *mut Editor,
+    source: *const c_char,
+    active: Option<(usize, usize)>,
+    limits: Limits,
+    out: *mut *mut c_char,
+) -> bool {
     if !out.is_null() {
         *out = std::ptr::null_mut();
     }
@@ -1719,7 +2131,7 @@ unsafe fn run_ffi(
     e.dirty.mark_all();
     let src = CStr::from_ptr(source).to_string_lossy().into_owned();
     let active = active.unwrap_or_else(|| (e.sprite.layers.iter().rposition(|l| !l.is_group()).unwrap_or(0), 0));
-    let outcome = run_with(e, &src, active, Limits::default(), &CANCEL);
+    let outcome = run_with(e, &src, active, limits, &CANCEL);
     if !out.is_null() {
         let mut lines = outcome.messages.clone();
         if let Some((l, f)) = outcome.select {
@@ -1768,6 +2180,31 @@ pub unsafe extern "C" fn pixmith_run_script_at(
 ) -> bool {
     crate::ffi::guarded("pixmith_run_script_at", doc, || {
         run_ffi(doc, source, Some((layer as usize, frame as usize)), out_messages)
+    })
+}
+
+/// Like `pixmith_run_script_at`, with explicit budgets: `instructions` VM instructions (0 = the default of
+/// 300 million), `time_ms` milliseconds (0 = the default of 10 s) and `memory_mb` MiB of Lua memory
+/// (0 = the default of 128). Meant for hosts such as an MCP server that run long scripts.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_run_script_limits(
+    doc: *mut Editor,
+    source: *const c_char,
+    layer: u32,
+    frame: u32,
+    instructions: u64,
+    time_ms: u64,
+    memory_mb: u32,
+    out_messages: *mut *mut c_char,
+) -> bool {
+    crate::ffi::guarded("pixmith_run_script_limits", doc, || {
+        let d = Limits::default();
+        let limits = Limits {
+            instructions: if instructions == 0 { d.instructions } else { instructions },
+            time: if time_ms == 0 { d.time } else { Duration::from_millis(time_ms) },
+            memory: if memory_mb == 0 { d.memory } else { (memory_mb as usize).saturating_mul(1 << 20) },
+        };
+        run_ffi_limits(doc, source, Some((layer as usize, frame as usize)), limits, out_messages)
     })
 }
 

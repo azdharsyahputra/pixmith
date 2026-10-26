@@ -192,10 +192,12 @@ impl PixmithApp {
         tab
     }
 
-    /// Shows a document: replaces the active tab if it is a pristine untitled one, else opens a new tab.
+    /// Shows a document: replaces the active tab if it is a pristine untitled one that no Live request made,
+    /// else opens a new tab.
     pub fn present(&mut self, doc: Doc) {
         let tab = self.new_tab(doc);
-        if self.is_pristine(self.active) {
+        let live_made = self.tabs.get(self.active).is_some_and(|t| self.live.was_created(t.doc.uid()));
+        if self.is_pristine(self.active) && !live_made {
             self.tabs[self.active] = tab;
         } else {
             self.tabs.push(tab);

@@ -52,13 +52,29 @@ struct ViewOptionsView: View {
             }
             Section("Custom Grid") {
                 Toggle("Show custom grid", isOn: $s.customGrid)
-                HStack {
-                    TextField("W", value: $s.customGridW, format: .number)
-                    TextField("H", value: $s.customGridH, format: .number)
+                Picker("Type", selection: $s.customGridType) {
+                    ForEach(GridType.allCases) { Text($0.title).tag($0) }
                 }
-                HStack {
-                    TextField("X offset", value: $s.customGridX, format: .number)
-                    TextField("Y offset", value: $s.customGridY, format: .number)
+                if s.customGridType == .isometric {
+                    HStack {
+                        TextField("Tile W", value: $s.isoGridW, format: .number)
+                        TextField("Tile H", value: $s.isoGridH, format: .number)
+                    }
+                    HStack {
+                        TextField("X offset", value: $s.isoGridX, format: .number)
+                        TextField("Y offset", value: $s.isoGridY, format: .number)
+                    }
+                    Text("Diamond cells of an isometric tile (even sizes, at least 4; 32x16 is 2:1). Select > Isometric Tile selects the cell under the cursor.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        TextField("W", value: $s.customGridW, format: .number)
+                        TextField("H", value: $s.customGridH, format: .number)
+                    }
+                    HStack {
+                        TextField("X offset", value: $s.customGridX, format: .number)
+                        TextField("Y offset", value: $s.customGridY, format: .number)
+                    }
                 }
                 ColorPicker("Color", selection: $s.customGridColor, supportsOpacity: false)
                 slider("Opacity", $s.customGridOpacity, 0.05...1)

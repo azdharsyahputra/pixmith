@@ -431,6 +431,26 @@ fn stale_revision_bad_bytes_and_layer_frame() {
 }
 
 #[test]
+fn back_to_back_new_documents_all_stay_open() {
+    let mut rig = Rig::new("live-parallel-new");
+    let mut c = rig.client();
+    // Only the app's own blank tab is reused; the tab the first request made is not blank for the second.
+    let first = rig.ok(&mut c, "documents.new", r#"{"width":8,"height":8,"name":"a"}"#);
+    let second = rig.ok(&mut c, "documents.new", r#"{"width":10,"height":6,"name":"b"}"#);
+    let third = rig.ok(&mut c, "documents.new", r#"{"width":4,"height":4}"#);
+    let ids: Vec<&str> = [&first, &second, &third].iter().map(|r| s(r.get("document").unwrap(), "id")).collect();
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[2]);
+    assert_ne!(ids[0], ids[2]);
+    assert_eq!(rig.app.tabs.len(), 3);
+    let list = rig.ok(&mut c, "documents.list", "{}");
+    let docs = list.get("documents").unwrap().as_array().unwrap();
+    assert_eq!(docs.len(), 3);
+    assert_eq!((n(&docs[0], "width"), n(&docs[0], "height")), (8, 8));
+    assert_eq!((n(&docs[1], "width"), n(&docs[1], "height")), (10, 6));
+}
+
+#[test]
 fn new_open_save_activate_close() {
     let mut rig = Rig::new("live-files");
     let mut c = rig.client();

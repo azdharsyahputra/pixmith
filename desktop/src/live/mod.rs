@@ -31,6 +31,9 @@ pub struct LiveState {
     app_dir: Option<PathBuf>,
     docs: Vec<Tracked>,
     next_id: u64,
+    /// Documents (`Doc::uid`) a Live request created or opened. Their tabs are never reused as a blank tab, so
+    /// two quick `documents.new` calls cannot swallow each other's document.
+    created: Vec<u64>,
 }
 
 /// What Live knows about one open document.
@@ -71,6 +74,7 @@ impl LiveState {
     /// Notes which tabs exist and bumps the revision of every one that changed since the last look.
     fn update(&mut self, current: &[(u64, (u64, u64))]) {
         self.docs.retain(|d| current.iter().any(|(uid, _)| *uid == d.uid));
+        self.created.retain(|c| current.iter().any(|(uid, _)| uid == c));
         for &(uid, seen) in current {
             match self.docs.iter_mut().find(|d| d.uid == uid) {
                 Some(d) if d.seen != seen => {
@@ -84,6 +88,18 @@ impl LiveState {
                 }
             }
         }
+    }
+
+    /// Remembers that a Live request made this document, so its tab is not reused as a blank one.
+    fn mark_created(&mut self, uid: u64) {
+        if !self.created.contains(&uid) {
+            self.created.push(uid);
+        }
+    }
+
+    /// Whether a Live request created or opened this document.
+    pub fn was_created(&self, uid: u64) -> bool {
+        self.created.contains(&uid)
     }
 
     fn tracked(&self, uid: u64) -> Option<&Tracked> {
@@ -422,10 +438,20 @@ fn new_document(app: &mut PixmithApp, params: &Value) -> Reply {
     };
     let mut doc = Doc::new(width, height);
     doc.name = name;
-    // A blank untitled tab is reused, else the document gets a new tab; either way it is the active one.
+    // The app's own blank untitled tab is reused (once); a tab an earlier Live request made never is. Either
+    // way the document ends up in the active tab.
     app.present(doc);
+    mark_active_created(app);
     refresh(app);
     Ok(obj(vec![("document", doc_json(app, app.active))]))
+}
+
+/// The active tab holds what a Live request just created or opened: it is not a blank tab to reuse any more.
+fn mark_active_created(app: &mut PixmithApp) {
+    if let Some(tab) = app.tabs.get(app.active) {
+        let uid = tab.doc.uid();
+        app.live.mark_created(uid);
+    }
 }
 
 fn absolute_path(params: &Value) -> Result<PathBuf, RpcError> {
@@ -439,6 +465,7 @@ fn open(app: &mut PixmithApp, params: &Value) -> Reply {
         return Err(err(ERR_PARAMS, "\"path\" is a folder; open a document file"));
     }
     app.open_file_in_tab(&path).map_err(|e| err(ERR_OTHER, e))?;
+    mark_active_created(app);
     refresh(app);
     Ok(obj(vec![("document", doc_json(app, app.active))]))
 }

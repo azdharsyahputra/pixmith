@@ -1,7 +1,7 @@
 //! The View Options window: onion skin, tiled mode, pixel grid, custom grid and reference image
 //! (`ViewOptionsWindow.swift`). A floating window of grouped sections, 380 pt wide.
 
-use super::view::{ReferencePlacement, TiledMode};
+use super::view::{GridType, ReferencePlacement, TiledMode};
 use crate::app::PixmithApp;
 use crate::theme::{self, Colors, font, radius, space};
 use crate::ui::widgets::{self, NumberOpts};
@@ -225,8 +225,18 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
                     });
                     section(ui, "Custom Grid", |card| {
                         card.toggle("Show custom grid", &mut s.custom_grid);
-                        card.pair("size", ("W", &mut s.custom_grid_w), ("H", &mut s.custom_grid_h));
-                        card.pair("offset", ("X offset", &mut s.custom_grid_x), ("Y offset", &mut s.custom_grid_y));
+                        let names: Vec<&str> = GridType::ALL.iter().map(|t| t.title()).collect();
+                        let sel = GridType::ALL.iter().position(|t| *t == s.custom_grid_type).unwrap_or(0);
+                        if let Some(i) = card.picker("Type", "grid-type", sel, &names) {
+                            s.custom_grid_type = GridType::ALL[i];
+                        }
+                        if s.custom_grid_type == GridType::Isometric {
+                            card.pair("iso-size", ("Tile W", &mut s.iso_grid_w), ("Tile H", &mut s.iso_grid_h));
+                            card.pair("iso-offset", ("X offset", &mut s.iso_grid_x), ("Y offset", &mut s.iso_grid_y));
+                        } else {
+                            card.pair("size", ("W", &mut s.custom_grid_w), ("H", &mut s.custom_grid_h));
+                            card.pair("offset", ("X offset", &mut s.custom_grid_x), ("Y offset", &mut s.custom_grid_y));
+                        }
                         card.color("Color", &mut s.custom_grid_color);
                         card.slider("Opacity", &mut s.custom_grid_opacity, (0.05, 1.0));
                     });

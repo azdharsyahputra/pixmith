@@ -643,7 +643,7 @@ fn plain_script_runs_have_no_ui_and_dialogs_return_at_once() {
         super::Limits::default(),
     );
     assert_eq!(o.error, None);
-    assert_eq!(o.messages, ["false\t2.5\thi\tfalse\ta\tfalse", "0", "true\t255\t4294967295\t3"]);
+    assert_eq!(o.messages, ["false\t2.5\thi\tfalse\ta\tfalse", "0", "true\t255\t4294967295\t4"]);
 }
 
 #[test]

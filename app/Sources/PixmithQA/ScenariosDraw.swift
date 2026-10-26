@@ -23,6 +23,7 @@ func registerScenarios() {
     registerRetouch()
     registerSpriteData()
     registerImageFormats()
+    registerIso()
 }
 
 /// Snapshot of the whole composite plus undo counts; used to check that an operation is one undo step.

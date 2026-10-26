@@ -838,6 +838,17 @@ enum LiveHandler {
         return ["document": json(slot), "steps": done]
     }
 
+    /// Shows a document a Live request made. A blank tab is reused only when a Live request did not make it (the
+    /// app's own initial tab, once); the tab that results is marked so no later request reuses it.
+    private static func presentFromLive(_ d: OpaquePointer, url: URL?) {
+        if model.activeSlotObject?.liveCreated == true {
+            model.newTab(doc: d, url: url)
+        } else {
+            model.present(d, url: url)
+        }
+        model.activeSlotObject?.liveCreated = true
+    }
+
     private static func newDocument(_ params: [String: Any]) throws -> [String: Any] {
         func dimension(_ key: String) throws -> Int {
             let v = try requiredInt(params, key)
@@ -852,8 +863,9 @@ enum LiveHandler {
             guard !trimmed.contains(where: { "/\\:".contains($0) }) else { throw LiveError.params("\"name\" must not contain / \\ or :") }
             name = trimmed.isEmpty ? nil : trimmed
         }
-        // A blank untitled tab is reused, else the document gets a new tab; either way it is the active one.
-        model.newSprite(width: w, height: h)
+        // A blank untitled tab the app opened itself is reused, else the document gets a new tab; either way it is
+        // the active one.
+        presentFromLive(pixmith_new(UInt32(w), UInt32(h)), url: nil)
         model.activeSlotObject?.customName = name
         model.objectWillChange.send()
         refresh()
@@ -868,7 +880,7 @@ enum LiveHandler {
         }
         if url.pathExtension.lowercased() == "png" {
             guard let d = url.path.withCString({ pixmith_import_png($0) }) else { throw LiveError.other(model.lastError) }
-            model.present(d, url: nil)
+            presentFromLive(d, url: nil)
             model.changed()
             RecentFiles.shared.add(url)
         } else if let slot = model.slot(for: url), let i = model.slots.firstIndex(where: { $0 === slot }) {
@@ -876,7 +888,7 @@ enum LiveHandler {
             model.activate(i)
         } else {
             guard let d = url.path.withCString({ pixmith_open($0) }) else { throw LiveError.other(model.lastError) }
-            model.present(d, url: url)
+            presentFromLive(d, url: url)
         }
         refresh()
         return ["document": json(model.activeSlotObject!)]

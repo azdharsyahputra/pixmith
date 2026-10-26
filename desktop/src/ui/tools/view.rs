@@ -5,6 +5,7 @@
 //! the other per-user data (`ViewSettings.persist` in the macOS app uses `UserDefaults`).
 
 use crate::app::DocTab;
+use crate::ui::iso;
 use eframe::egui::{self, Color32, Pos2, Rect, TextureHandle, TextureId, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -111,6 +112,36 @@ impl PreviewZoom {
     }
 }
 
+/// The kind of the custom grid: square cells, or isometric diamonds (`ui::iso`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridType {
+    #[default]
+    Rectangular,
+    Isometric,
+}
+
+impl GridType {
+    pub const ALL: [GridType; 2] = [GridType::Rectangular, GridType::Isometric];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            GridType::Rectangular => "Rectangular",
+            GridType::Isometric => "Isometric",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            GridType::Rectangular => "rectangular",
+            GridType::Isometric => "isometric",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<GridType> {
+        GridType::ALL.into_iter().find(|t| t.key() == key)
+    }
+}
+
 /// How the onion skin tints a frame (`OnionTint`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum OnionTint {
@@ -137,6 +168,13 @@ pub struct ViewSettings {
     pub custom_grid_h: i32,
     pub custom_grid_x: i32,
     pub custom_grid_y: i32,
+    /// Rectangular cells (the size and offset above) or isometric diamonds (the iso fields below).
+    pub custom_grid_type: GridType,
+    /// Isometric tile width and height (even, 4 or more) and the offset of the tile at the origin.
+    pub iso_grid_w: i32,
+    pub iso_grid_h: i32,
+    pub iso_grid_x: i32,
+    pub iso_grid_y: i32,
     pub custom_grid_color: [u8; 3],
     pub custom_grid_opacity: f64,
     pub show_reference: bool,
@@ -166,6 +204,11 @@ impl Default for ViewSettings {
             custom_grid_h: 16,
             custom_grid_x: 0,
             custom_grid_y: 0,
+            custom_grid_type: GridType::Rectangular,
+            iso_grid_w: iso::DEFAULT_W,
+            iso_grid_h: iso::DEFAULT_H,
+            iso_grid_x: 0,
+            iso_grid_y: 0,
             custom_grid_color: [26, 128, 255],
             custom_grid_opacity: 0.6,
             show_reference: true,
@@ -208,6 +251,11 @@ impl ViewSettings {
             format!("customGridH={}", self.custom_grid_h),
             format!("customGridX={}", self.custom_grid_x),
             format!("customGridY={}", self.custom_grid_y),
+            format!("customGridType={}", self.custom_grid_type.key()),
+            format!("isoGridW={}", self.iso_grid_w),
+            format!("isoGridH={}", self.iso_grid_h),
+            format!("isoGridX={}", self.iso_grid_x),
+            format!("isoGridY={}", self.iso_grid_y),
             format!("customGridColor={}", hex(self.custom_grid_color)),
             format!("customGridOpacity={}", self.custom_grid_opacity),
             format!("previewZoom={zoom}"),
@@ -236,6 +284,11 @@ impl ViewSettings {
                 "customGridH" => self.custom_grid_h = i.unwrap_or(self.custom_grid_h),
                 "customGridX" => self.custom_grid_x = i.unwrap_or(self.custom_grid_x),
                 "customGridY" => self.custom_grid_y = i.unwrap_or(self.custom_grid_y),
+                "customGridType" => self.custom_grid_type = GridType::from_key(v).unwrap_or(self.custom_grid_type),
+                "isoGridW" => self.iso_grid_w = i.map_or(self.iso_grid_w, iso::clamp_side),
+                "isoGridH" => self.iso_grid_h = i.map_or(self.iso_grid_h, iso::clamp_side),
+                "isoGridX" => self.iso_grid_x = i.unwrap_or(self.iso_grid_x),
+                "isoGridY" => self.iso_grid_y = i.unwrap_or(self.iso_grid_y),
                 "customGridColor" => self.custom_grid_color = parse_hex(v).unwrap_or(self.custom_grid_color),
                 "customGridOpacity" => self.custom_grid_opacity = f.unwrap_or(self.custom_grid_opacity),
                 "previewZoom" => {
@@ -245,6 +298,11 @@ impl ViewSettings {
                 _ => {}
             }
         }
+    }
+
+    /// The isometric grid these settings describe.
+    pub fn iso(&self) -> iso::Iso {
+        iso::Iso::new(self.iso_grid_w, self.iso_grid_h, self.iso_grid_x, self.iso_grid_y)
     }
 
     /// Where the settings are kept: `PIXMITH_SUPPORT_DIR` if set, else the platform's per-user data folder.
@@ -552,7 +610,12 @@ pub fn paint_over(painter: &egui::Painter, sc: &Scene) {
         });
         grid_lines(painter, sc, vis, (sc.zoom, sc.zoom), (0.0, 0.0), color, hairline);
     }
-    if s.custom_grid && s.custom_grid_w > 0 && s.custom_grid_h > 0 {
+    if s.custom_grid && s.custom_grid_type == GridType::Isometric {
+        let [r, g, b] = s.custom_grid_color;
+        let color =
+            Color32::from_rgba_unmultiplied(r, g, b, (s.custom_grid_opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
+        iso::paint(painter, &s.iso(), sc.srect.min, sc.zoom, sc.ppp, vis, color);
+    } else if s.custom_grid && s.custom_grid_w > 0 && s.custom_grid_h > 0 {
         let [r, g, b] = s.custom_grid_color;
         let color =
             Color32::from_rgba_unmultiplied(r, g, b, (s.custom_grid_opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -632,9 +695,32 @@ mod tests {
         s.grid_color = [1, 2, 3];
         s.preview_zoom = PreviewZoom::Fit;
         s.custom_grid_x = -4;
+        s.custom_grid_type = GridType::Isometric;
+        s.iso_grid_w = 104;
+        s.iso_grid_h = 56;
+        s.iso_grid_x = -3;
+        s.iso_grid_y = 7;
         let mut back = ViewSettings::default();
         back.apply_text(&s.to_text());
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn isometric_grid_defaults_and_malformed_values() {
+        let d = ViewSettings::default();
+        assert_eq!(
+            (d.custom_grid_type, d.iso_grid_w, d.iso_grid_h, d.iso_grid_x, d.iso_grid_y),
+            (GridType::Rectangular, 32, 16, 0, 0)
+        );
+        let mut s = ViewSettings::default();
+        s.apply_text("customGridType=hexagonal\nisoGridW=1\nisoGridH=15\nisoGridX=zebra");
+        assert_eq!(s.custom_grid_type, GridType::Rectangular);
+        assert_eq!(
+            (s.iso_grid_w, s.iso_grid_h, s.iso_grid_x),
+            (4, 16, 0),
+            "sizes are clamped to even values of 4 or more"
+        );
+        assert_eq!(s.iso(), iso::Iso::new(4, 16, 0, 0));
     }
 
     #[test]

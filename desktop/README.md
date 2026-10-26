@@ -75,6 +75,7 @@ Each file mirrors a Swift file, so a change in one app is easy to carry over to 
 | `src/ui/menus/` (`bar.rs`, `commands.rs`) | the menus of `PixmithApp.swift` and every `CommandMenu` in `app/Sources/Pixmith` |
 | `src/ui/menus/filters.rs`, `calls/menus.rs` | `Dialogs/FiltersView.swift`, `Dialogs/CurvesEditor.swift`, `Dialogs/ColorModeView.swift` |
 | `src/ui/menus/history.rs`, `prefs.rs`, `shortcuts.rs`, `help.rs` | `Panels/HistoryPanel.swift`, `App/Preferences.swift`, `App/Shortcuts.swift` |
+| `src/ui/iso.rs` | the isometric grid and the exact tile mask (View Options > Custom Grid, Select > Isometric Tile) |
 | `src/live/` (`mod.rs`, `net.rs`) | `App/Live.swift`: Pixmith Live, the loopback server for AI agents (`docs/LIVE_PROTOCOL.md`); the chip is in `src/ui/title_row.rs` |
 | `src/ui/menus/spritedata.rs`, `src/calls/spritedata.rs` | `Panels/SpriteDataUI.swift` (Sprite Properties with the color profile, cel z-index in Cel Properties, reference layers: the New Reference Layer command, the timeline icon and lock, the View > Reference Layers display) |
 | `src/ui/projects/`, `src/calls/projects.rs` | Home (recent canvases and projects), the project view (canvas grid, trash, reorder), the editor's project switcher; the `.pxmt` and project core calls |
@@ -102,6 +103,12 @@ Works now:
 | Ctrl/Cmd+= and Ctrl/Cmd+- | Zoom in and out |
 
 Not in phase 1: the macOS app's other import commands (GIF, sprite sheet, PNG as layer), Open Recent, autosave and crash recovery, the Export options and Godot export sheets, tab reordering by drag, and the panels and canvas tools that are still being ported (see the Swift sources for the full target). Exports run on the UI thread, so very large sprites pause the window while they write.
+
+## Isometric grid
+
+For isometric games the custom grid can be a grid of diamond cells (`src/ui/iso.rs`). Turn it on with View > Isometric Grid, or in View Options > Custom Grid with Type set to Isometric; the tile width and height (even, 4 or more, default 32 x 16) and the X and Y offset are saved with the other view settings, and the color and opacity are the custom grid's. Cell (0, 0) has its bounding box at the offset, so its corners are `(x + w/2, y)`, `(x + w, y + h/2)`, `(x + w/2, y + h)` and `(x, y + h/2)`, and the other cells follow by `(w/2, h/2)` steps. Lines are drawn pixel by pixel (the classic two pixels per step for 32 x 16).
+
+Select > Isometric Tile selects the diamond cell under the pointer, or under the last click on the canvas when the pointer is over the menu, or on the next click if there has been none (Shift adds and Option subtracts when that click arrives). The mask is exact: a pixel belongs to the cell its center is in, a center exactly on a border going to the cell below or to the right, so the cells partition the canvas and a 32 x 16 cell has 256 pixels (rows of 2, 6, 10, ... 30, 30, ... 2). `tests/iso.rs` covers it.
 
 ## Live mode
 

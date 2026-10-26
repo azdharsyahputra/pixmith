@@ -699,7 +699,7 @@ pub(super) fn install(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
     let app: Table = g.get("app")?;
     app.set("events", lua.create_userdata(EventsH { ctx: ctx.clone(), scope: "app" })?)?;
     app.set("isUIAvailable", ctx.rt.borrow().as_ref().is_some_and(|r| r.ui_available()))?;
-    app.set("apiVersion", 3)?;
+    app.set("apiVersion", 4)?;
     lua.load(
         r#"
         local alert0 = app.alert

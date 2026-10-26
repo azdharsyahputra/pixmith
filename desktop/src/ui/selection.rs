@@ -6,7 +6,9 @@
 //! for example [`select_all`] or [`copy`]; the keyboard shortcuts run the same functions.
 
 use crate::app::{DocTab, PixmithApp, Tool};
+use crate::doc::Doc;
 use crate::theme::{Colors, space};
+use crate::ui::iso::Iso;
 use crate::ui::transform::{self, TransformState};
 use crate::ui::widgets::{self, DialogAction};
 use eframe::egui::{self, Color32, Key, Modifiers, PointerButton, Pos2, Rect, Stroke};
@@ -86,6 +88,10 @@ pub struct SelectionState {
     polygon: Option<Vec<(i32, i32)>>,
     last_press: Option<(f64, Pos2)>,
     by_color_armed: bool,
+    /// Select > Isometric Tile waits for a click on the canvas, with the grid to use.
+    iso_armed: Option<Iso>,
+    /// The last primary-button click on the canvas: the document and the pixel.
+    last_click: Option<(usize, (i32, i32))>,
     outline: Option<Outline>,
     /// The last copy, so a paste lands where it was copied from (`copyOrigin`).
     clip: Option<CopiedPixels>,
@@ -111,6 +117,8 @@ impl Default for SelectionState {
             polygon: None,
             last_press: None,
             by_color_armed: false,
+            iso_armed: None,
+            last_click: None,
             outline: None,
             clip: None,
             marker: String::new(),
@@ -139,6 +147,7 @@ impl SelectionState {
         self.drag = None;
         self.polygon = None;
         self.by_color_armed = false;
+        self.iso_armed = None;
         self.xf.reset_transients();
     }
 }
@@ -238,6 +247,40 @@ pub fn select_by_color(app: &mut PixmithApp) {
     match app.canvas.cursor {
         Some(p) => select_by_color_at(app, p),
         None => app.selection.by_color_armed = true,
+    }
+}
+
+/// The exact pixels of the diamond cell `iso` puts around pixel `p`, selected like a polygon selection:
+/// `mode` replaces, adds to or subtracts from the selection. Returns false when the cell has no pixel.
+pub fn select_iso_cell(doc: &mut Doc, iso: &Iso, p: (i32, i32), mode: SelMode) -> bool {
+    let polygon = iso.cell_polygon(iso.cell_at(p.0, p.1));
+    if polygon.is_empty() {
+        return false;
+    }
+    doc.sel_begin(mode);
+    doc.sel_poly(&polygon);
+    doc.sel_end();
+    true
+}
+
+/// Select > Isometric Tile: selects the diamond cell of the isometric grid settings under the pointer, or under
+/// the last click on the canvas when the pointer is not over it (the menu is open), or else on the next click.
+pub fn select_iso_tile(app: &mut PixmithApp) {
+    let doc = app.tab().doc.raw() as usize;
+    let clicked = app.selection.last_click.filter(|(d, _)| *d == doc).map(|(_, p)| p);
+    match app.canvas.cursor.or(clicked) {
+        Some(p) => select_iso_tile_at(app, p, SelMode::Replace),
+        None => app.selection.iso_armed = Some(app.canvas.tools.settings.iso()),
+    }
+}
+
+fn select_iso_tile_at(app: &mut PixmithApp, p: (i32, i32), mode: SelMode) {
+    let iso = app.canvas.tools.settings.iso();
+    let tab = app.tab_mut();
+    tab.playing = false;
+    if select_iso_cell(&mut tab.doc, &iso, p, mode) {
+        tab.doc.label_last_step("Select Isometric Tile");
+        mutated(tab);
     }
 }
 
@@ -561,6 +604,9 @@ pub fn input(
     });
     let located = pos.map(|pos| locate(srect, tab.zoom, pos));
     let mut owned = false;
+    if primary && response.hovered() {
+        sel.last_click = located.map(|l| (doc, l.0));
+    }
 
     // A drag in progress keeps the pointer until release.
     if sel.xf.dragging() {
@@ -578,6 +624,7 @@ pub fn input(
     owned
         || tab.doc.xf_active()
         || sel.by_color_armed
+        || sel.iso_armed.is_some()
         || sel.dragging()
         || (is_selection_tool(tool) && !(tool == Tool::Move && mods.alt))
 }
@@ -603,6 +650,13 @@ fn press(
         let tolerance = sel.tolerance;
         let (layer, frame) = (tab.layer, tab.frame);
         if tab.doc.sel_wand(layer, frame, p.0, p.1, tolerance, false, SelMode::Replace) {
+            mutated(tab);
+        }
+        return true;
+    }
+    if let Some(iso) = sel.iso_armed.take() {
+        if select_iso_cell(&mut tab.doc, &iso, p, mode_of(mods)) {
+            tab.doc.label_last_step("Select Isometric Tile");
             mutated(tab);
         }
         return true;

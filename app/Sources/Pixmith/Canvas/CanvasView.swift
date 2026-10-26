@@ -60,6 +60,7 @@ final class CanvasNSView: NSView {
         guard let m = model else { return }
         TimelineSelection.shared.focused = false
         let p = pixel(e)
+        IsoGrid.lastClick = p
         if m.tweenMouseDown(e, in: self) { return }
         if m.transformMouseDown(e) { return }
         if m.consumeSelectByColorClick(p) { return }
