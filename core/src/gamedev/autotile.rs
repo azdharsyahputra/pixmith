@@ -17,7 +17,8 @@
 //! cell (i, j) has world cells NW=(i-1,j-1) NE=(i,j-1) SE=(i,j) SW=(i-1,j) as its corners, so a
 //! painted cell updates a 2x2 block.
 
-use crate::document::tilemap::{render_grid, TileGrid, FLIP_D, FLIP_X, FLIP_Y, KIND_TILEMAP, TILE_ID_MASK};
+use crate::document::iso::Iso;
+use crate::document::tilemap::{render_cel, TileGrid, FLIP_D, FLIP_X, FLIP_Y, KIND_TILEMAP, TILE_ID_MASK};
 use crate::document::{Editor, Sprite};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, CStr, CString};
@@ -137,15 +138,30 @@ pub fn transform_dir(dir: usize, t: u8) -> usize {
     DIRS.iter().position(|&d| d == (dx, dy)).unwrap()
 }
 
+/// Like [`transform_dir`] for isometric tiles. A flip is a flip of the picture on screen: flipping X mirrors the
+/// diamond left to right, which swaps the two cell axes (`i` runs down-right, `j` down-left), so the neighbour
+/// at (dx, dy) in cell space moves to (dy, dx); flipping Y mirrors it top to bottom, which sends (dx, dy) to
+/// (-dy, -dx). The diagonal flip does not exist for isometric tiles.
+pub fn transform_dir_iso(dir: usize, t: u8) -> usize {
+    let (mut dx, mut dy) = DIRS[dir];
+    if t & 1 != 0 {
+        (dx, dy) = (dy, dx);
+    }
+    if t & 2 != 0 {
+        (dx, dy) = (-dy, -dx);
+    }
+    DIRS.iter().position(|&d| d == (dx, dy)).unwrap()
+}
+
 /// The tile value flags of a transform.
 pub fn transform_flags(t: u8) -> u32 {
     ((t & 1) as u32 * FLIP_X) | (((t >> 1) & 1) as u32 * FLIP_Y) | (((t >> 2) & 1) as u32 * FLIP_D)
 }
 
-fn transform_peers(p: &[u8; 8], t: u8) -> [u8; 8] {
+fn transform_peers(p: &[u8; 8], t: u8, iso: bool) -> [u8; 8] {
     let mut o = [0u8; 8];
     for (d, &v) in p.iter().enumerate() {
-        o[transform_dir(d, t)] = v;
+        o[if iso { transform_dir_iso(d, t) } else { transform_dir(d, t) }] = v;
     }
     o
 }
@@ -232,6 +248,9 @@ pub struct Autotile {
     pub intent: BTreeMap<u32, Grid<Option<TerrainId>>>,
     /// Manual tiles per frame (display cells); they always win.
     pub overrides: BTreeMap<u32, Grid<Option<TileRef>>>,
+    /// The layer is isometric: cells are (i, j) diamonds and flips move neighbours as `transform_dir_iso` says.
+    /// Not stored; `load` sets it from the layer's tileset.
+    pub iso: bool,
 }
 
 impl Default for Autotile {
@@ -244,6 +263,7 @@ impl Default for Autotile {
             edge_same: false,
             intent: BTreeMap::new(),
             overrides: BTreeMap::new(),
+            iso: false,
         }
     }
 }
@@ -339,7 +359,7 @@ impl Autotile {
                 if t & !m.sym != 0 || (t & 4 != 0 && !square) {
                     continue;
                 }
-                let p = transform_peers(&m.peer, t);
+                let p = transform_peers(&m.peer, t, self.iso);
                 if dirs.iter().all(|&d| p[d] == want[d]) {
                     out.push((i, t, m.weight));
                     break;
@@ -387,7 +407,7 @@ impl Autotile {
                 if t & !m.sym != 0 || (t & 4 != 0 && !square) {
                     continue;
                 }
-                let p = transform_peers(&m.peer, t);
+                let p = transform_peers(&m.peer, t, self.iso);
                 let mut score: i32 = dirs
                     .iter()
                     .map(|&d| {
@@ -675,7 +695,24 @@ pub fn join_text(user: &str, at: &Autotile) -> String {
 /// Loads a layer's auto-tile state (`None` if the layer has none).
 pub fn load(s: &Sprite, layer: usize) -> Option<Autotile> {
     let t = s.layers.get(layer)?.user_data.text.as_deref()?;
-    split_text(t).1
+    let mut at = split_text(t).1?;
+    if is_iso_layer(s, layer) {
+        at.iso = true;
+        // The dual grid needs a half-cell shift of the tile grid, which isometric layers do not have.
+        if at.mode == Mode::Corners {
+            at.mode = Mode::Blob;
+        }
+    }
+    Some(at)
+}
+
+/// Whether the layer is an isometric tilemap layer.
+fn is_iso_layer(s: &Sprite, layer: usize) -> bool {
+    s.layers
+        .get(layer)
+        .filter(|l| l.kind == KIND_TILEMAP)
+        .and_then(|l| s.tilesets.get(l.tileset as usize))
+        .is_some_and(|t| t.is_iso())
 }
 
 pub fn save(s: &mut Sprite, layer: usize, at: &Autotile) {
@@ -701,6 +738,10 @@ struct Ctx {
     dims: (u32, u32),
     dual: bool,
     square: bool,
+    /// The layer's isometric grid (cells are (i, j) diamonds placed at the layer's offset).
+    iso: Option<Iso>,
+    /// Layer offset and offset-independent render settings.
+    offset: (i32, i32),
 }
 
 impl Ctx {
@@ -713,7 +754,9 @@ impl Ctx {
         }
     }
     fn origin(&self) -> (i32, i32) {
-        if self.dual {
+        if self.iso.is_some() {
+            (0, 0)
+        } else if self.dual {
             (-((self.tw / 2) as i32), -((self.th / 2) as i32))
         } else {
             (0, 0)
@@ -721,6 +764,13 @@ impl Ctx {
     }
     /// Display cell containing a canvas pixel.
     fn display_cell(&self, px: i32, py: i32) -> (i32, i32) {
+        if let Some(iso) = &self.iso {
+            let (i, j) = iso.cell_at(px, py);
+            return (
+                i.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                j.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            );
+        }
         let (ox, oy) = self.origin();
         ((px - ox).div_euclid(self.tw as i32), (py - oy).div_euclid(self.th as i32))
     }
@@ -732,15 +782,29 @@ fn ctx_for(s: &Sprite, layer: usize, mode: Mode) -> Option<Ctx> {
         return None;
     }
     let t = &s.tilesets[l.tileset as usize];
+    let iso = t.iso_grid(l.offset);
+    let dims = match &iso {
+        // Cells (i, j) with i, j >= 0 up to the last one that reaches into the canvas.
+        Some(g) => {
+            let (_, hi_i, _, hi_j) = g.cells_touching(0, 0, s.width as i64, s.height as i64, 0);
+            ((hi_i + 1).clamp(1, ISO_MAX_DIM as i64) as u32, (hi_j + 1).clamp(1, ISO_MAX_DIM as i64) as u32)
+        }
+        None => (s.width.div_ceil(t.tile_w), s.height.div_ceil(t.tile_h)),
+    };
     Some(Ctx {
         ts: l.tileset as usize,
         tw: t.tile_w,
         th: t.tile_h,
-        dims: (s.width.div_ceil(t.tile_w), s.height.div_ceil(t.tile_h)),
-        dual: mode == Mode::Corners,
-        square: t.tile_w == t.tile_h,
+        dims,
+        dual: mode == Mode::Corners && iso.is_none(),
+        square: t.tile_w == t.tile_h && iso.is_none(),
+        iso,
+        offset: l.offset,
     })
 }
+
+/// Most cells along one axis of an isometric terrain map (the map grid holds at most 2^24 cells).
+const ISO_MAX_DIM: u32 = 4096;
 
 fn is_tilemap(s: &Sprite, layer: usize) -> bool {
     s.layers.get(layer).is_some_and(|l| l.kind == KIND_TILEMAP && (l.tileset as usize) < s.tilesets.len())
@@ -778,6 +842,25 @@ fn apply(s: &mut Sprite, layer: usize, frame: usize, c: &Ctx, updates: &[(i32, i
     let mut lost = false;
     let mut grid = match old {
         Some(g) if (g.x, g.y, g.w, g.h) == (ox, oy, gw, gh) => g,
+        Some(old) if c.iso.is_some() => {
+            // Cells are addressed by (i, j): keep the tiles that lie inside the new range.
+            let mut ng = TileGrid { x: 0, y: 0, w: gw, h: gh, tiles: vec![0; gw as usize * gh as usize] };
+            for ty in 0..old.h as i64 {
+                for tx in 0..old.w as i64 {
+                    let v = old.tiles[ty as usize * old.w as usize + tx as usize];
+                    let (i, j) = (old.x as i64 + tx, old.y as i64 + ty);
+                    if v == 0 {
+                        continue;
+                    }
+                    if i >= 0 && j >= 0 && i < gw as i64 && j < gh as i64 {
+                        ng.tiles[j as usize * gw as usize + i as usize] = v;
+                    } else {
+                        lost = true;
+                    }
+                }
+            }
+            ng
+        }
         old => {
             let mut ng = TileGrid { x: ox, y: oy, w: gw, h: gh, tiles: vec![0; gw as usize * gh as usize] };
             if let Some(old) = old {
@@ -812,7 +895,7 @@ fn apply(s: &mut Sprite, layer: usize, frame: usize, c: &Ctx, updates: &[(i32, i
             grid.tiles[y as usize * gw as usize + x as usize] = v;
         }
     }
-    cel.pixels = render_grid(&grid, &ts, w, h);
+    cel.pixels = render_cel(&grid, &ts, c.offset, w, h);
     cel.tiles = Some(grid);
     lost
 }
@@ -850,14 +933,15 @@ fn affected(mode: Mode, x: i32, y: i32) -> Vec<(i32, i32)> {
 // MARK: Editing
 
 fn payload(s: &Sprite, layer: usize) -> Option<(Autotile, Ctx)> {
-    let at = load(s, layer).unwrap_or_default();
+    let mut at = load(s, layer).unwrap_or_default();
     let c = ctx_for(s, layer, at.mode)?;
+    at.iso = c.iso.is_some();
     Some((at, c))
 }
 
 /// Defines (or updates) the layer's first terrain and the mode. Creates the payload when needed.
 pub fn set_terrain(s: &mut Sprite, layer: usize, name: &str, color: [u8; 4], mode: Mode) -> bool {
-    if !is_tilemap(s, layer) {
+    if !is_tilemap(s, layer) || (mode == Mode::Corners && is_iso_layer(s, layer)) {
         return false;
     }
     let mut at = load(s, layer).unwrap_or_default();
@@ -869,6 +953,9 @@ pub fn set_terrain(s: &mut Sprite, layer: usize, name: &str, color: [u8; 4], mod
 
 /// Changes the mode; the cache is rebuilt (manual overrides are dropped when the grid geometry changes).
 pub fn set_mode(s: &mut Sprite, layer: usize, mode: Mode) -> bool {
+    if mode == Mode::Corners && is_iso_layer(s, layer) {
+        return false;
+    }
     let Some((mut at, _)) = payload(s, layer) else { return false };
     if at.mode != mode {
         if (at.mode == Mode::Corners) != (mode == Mode::Corners) {
@@ -1096,6 +1183,20 @@ pub fn note_stamp(s: &mut Sprite, layer: usize, frame: usize, px: i32, py: i32, 
         return;
     }
     let (x, y) = c.display_cell(px, py);
+    set_override(s, layer, frame, x, y, (value & TILE_ID_MASK != 0).then_some(value));
+}
+
+/// Like [`note_stamp`] for a tile stamped by cell (i, j) on an isometric layer.
+pub fn note_stamp_cell(s: &mut Sprite, layer: usize, frame: usize, i: i64, j: i64, value: u32) {
+    if load(s, layer).is_none() || !is_iso_layer(s, layer) {
+        return;
+    }
+    let Some((at, _)) = payload(s, layer) else { return };
+    let kf = key_frame(s, layer, frame);
+    if !at.intent.contains_key(&kf) && !at.overrides.contains_key(&kf) {
+        return;
+    }
+    let (Ok(x), Ok(y)) = (i32::try_from(i), i32::try_from(j)) else { return };
     set_override(s, layer, frame, x, y, (value & TILE_ID_MASK != 0).then_some(value));
 }
 
@@ -1351,7 +1452,8 @@ pub fn assign_masks_from_template(s: &mut Sprite, layer: usize) -> usize {
     let id = at.terrains[0].id;
     let avail = s.tilesets[c.ts].tiles.len().saturating_sub(1);
     let reduced = reduced_masks(at.mode);
-    let (masks, sym) = if avail == reduced.len() && avail != at.mode.masks().len() {
+    // The reduced layouts rely on rotating tiles, which isometric tiles cannot do.
+    let (masks, sym) = if c.iso.is_none() && avail == reduced.len() && avail != at.mode.masks().len() {
         (reduced, if c.square { 7u8 } else { 3 })
     } else {
         (at.mode.masks(), 0)
@@ -1440,18 +1542,87 @@ fn draw_template(px: &mut [u8], tw: usize, th: usize, mode: Mode, mask: u8, colo
     }
 }
 
+/// Draws an isometric template tile: the diamond outline at the tile's pivot, a filled mark where a mask bit is
+/// set (on the matching edge for sides, on the matching corner for corners) and the mask number.
+fn draw_template_iso(
+    px: &mut [u8],
+    (tw, th): (usize, usize),
+    (cw, ch): (usize, usize),
+    pivot: (i32, i32),
+    mode: Mode,
+    mask: u8,
+    color: [u8; 4],
+) {
+    let mut put = |x: i64, y: i64, c: [u8; 4]| {
+        if x >= 0 && y >= 0 && (x as usize) < tw && (y as usize) < th {
+            px[(y as usize * tw + x as usize) * 4..][..4].copy_from_slice(&c);
+        }
+    };
+    let (cx, cy) = (pivot.0 as i64, pivot.1 as i64);
+    let (a, b) = (cw as i64 / 2, ch as i64 / 2);
+    let guide = [140, 140, 140, 255];
+    let fill = [color[0], color[1], color[2], 255];
+    // Outline: walk the four edges.
+    let corners = [(cx, cy - b), (cx + a, cy), (cx, cy + b), (cx - a, cy)];
+    for k in 0..4 {
+        let ((x0, y0), (x1, y1)) = (corners[k], corners[(k + 1) % 4]);
+        let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+        for t in 0..=steps {
+            put(x0 + (x1 - x0) * t / steps, y0 + (y1 - y0) * t / steps, guide);
+        }
+    }
+    // Marks, by ring direction N, NE, E, SE, S, SW, W, NW (see `DIRS`) in screen terms: N is the upper right edge,
+    // NE the right corner, E the lower right edge, SE the bottom corner, and so on around.
+    let spots: [(i64, i64); 8] = [
+        (cx + a / 2, cy - b / 2),
+        (cx + a - 1, cy),
+        (cx + a / 2, cy + b / 2),
+        (cx, cy + b - 1),
+        (cx - a / 2, cy + b / 2),
+        (cx - a + 1, cy),
+        (cx - a / 2, cy - b / 2),
+        (cx, cy - b + 1),
+    ];
+    for &d in mode.dirs() {
+        if mask & mode.bit(d).unwrap() == 0 {
+            continue;
+        }
+        let (sx, sy) = spots[d];
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                put(sx + dx, sy + dy, fill);
+            }
+        }
+    }
+    for (k, ch) in mask.to_string().bytes().enumerate() {
+        for (r, row) in DIGITS[(ch - b'0') as usize].iter().enumerate() {
+            for bit in 0..3 {
+                if row >> (2 - bit) & 1 == 1 {
+                    put(cx - 4 + (k * 4 + bit) as i64, cy - 2 + r as i64, [255, 255, 255, 255]);
+                }
+            }
+        }
+    }
+}
+
 /// Appends one labelled, guide-lined template tile per mask of the layer's mode (or only the
 /// rotation/flip representatives when `reduced`) and assigns the masks. Returns tiles added.
 pub fn generate_template(s: &mut Sprite, layer: usize, reduced: bool) -> usize {
     let Some((mut at, c)) = payload(s, layer) else { return 0 };
+    let reduced = reduced && c.iso.is_none();
     let masks = if reduced { reduced_masks(at.mode) } else { at.mode.masks() };
     let (tw, th) = (c.tw as usize, c.th as usize);
     let first = s.tilesets[c.ts].tiles.len();
     let t0 = at.terrains[0].clone();
     for m in &masks {
         let id = s.tilesets[c.ts].add_blank() as usize;
+        let cell = s.tilesets[c.ts].iso.as_ref().map(|i| (i.cell_w as usize, i.cell_h as usize));
+        let pivot = s.tilesets[c.ts].pivot(id as u32);
         let t = std::sync::Arc::make_mut(&mut s.tilesets[c.ts].tiles[id]);
-        draw_template(t, tw, th, at.mode, *m, t0.color);
+        match cell {
+            Some(cell) => draw_template_iso(t, (tw, th), cell, pivot, at.mode, *m, t0.color),
+            None => draw_template(t, tw, th, at.mode, *m, t0.color),
+        }
     }
     for (k, m) in masks.iter().enumerate() {
         let mut meta = TileMeta {
@@ -1492,6 +1663,9 @@ unsafe fn sp<'a>(d: *const Editor) -> Option<&'a Sprite> {
 
 fn cell_of_px(s: &Sprite, layer: usize, px: i32, py: i32) -> Option<(i32, i32)> {
     let c = ctx_for(s, layer, Mode::Blob)?;
+    if c.iso.is_some() {
+        return Some(c.display_cell(px, py));
+    }
     (px >= 0 && py >= 0).then(|| (px / c.tw as i32, py / c.th as i32))
 }
 
@@ -1985,8 +2159,15 @@ pub unsafe extern "C" fn pixmith_autotile_missing_cells(
             let (ox, oy) = c.origin();
             for (k, (x, y)) in cells.iter().enumerate() {
                 if k * 2 + 1 < cap {
-                    *out.add(k * 2) = ox + x * c.tw as i32;
-                    *out.add(k * 2 + 1) = oy + y * c.th as i32;
+                    let (px, py) = match &c.iso {
+                        Some(g) => {
+                            let (a, b) = g.cell_origin((*x as i64, *y as i64));
+                            (a as i32, b as i32)
+                        }
+                        None => (ox + x * c.tw as i32, oy + y * c.th as i32),
+                    };
+                    *out.add(k * 2) = px;
+                    *out.add(k * 2 + 1) = py;
                 }
             }
         }
@@ -2030,9 +2211,12 @@ pub unsafe extern "C" fn pixmith_autotile_generate_template(doc: *mut Editor, la
 }
 
 #[cfg(test)]
+mod iso_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::tilemap::{add_tilemap_layer, stamp, tile_at};
+    use crate::document::tilemap::{add_tilemap_layer, render_grid, stamp, tile_at};
     use std::collections::HashSet;
 
     /// 32x32 sprite, 8x8 tiles (4x4 cells), full template tileset in the given mode.

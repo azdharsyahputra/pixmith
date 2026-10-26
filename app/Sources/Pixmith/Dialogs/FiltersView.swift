@@ -7,6 +7,7 @@ import SwiftUI
 enum FilterKind: UInt32, CaseIterable, Identifiable {
     case replaceColor = 0, invert, desaturate, hsl, brightnessContrast, colorBalance
     case outline, dropShadow, despeckle, blur, sharpen, curves, cleanEdges
+    case removeBackground = 13
     case scale = 1000
     case lintSprite
 
@@ -24,6 +25,7 @@ enum FilterKind: UInt32, CaseIterable, Identifiable {
         case .outline: "Outline"
         case .dropShadow: "Drop Shadow"
         case .despeckle: "Remove Isolated Pixels"
+        case .removeBackground: "Remove Background"
         case .blur: "Blur"
         case .sharpen: "Sharpen"
         case .cleanEdges: "Clean Edges"
@@ -87,6 +89,7 @@ struct FXCommands: Commands {
             item(.outline)
             item(.dropShadow)
             item(.despeckle)
+            item(.removeBackground)
             item(.cleanEdges)
             Divider()
             item(.lintSprite)
@@ -161,6 +164,10 @@ private struct FilterParams: Equatable {
     var eight = false
     var shadowX = 1, shadowY = 1
     var shadowColor: UInt32 = 0x00000099
+    /// Remove Background: tolerance, and the shadow / enclosed-color options (flags 1 and 2 of the core filter).
+    var bgTolerance = 28
+    var bgShadow = true
+    var bgGlobal = false
     var curves = CurveSet()
     var clean = CleanParams()
 
@@ -175,6 +182,7 @@ private struct FilterParams: Equatable {
         case .outline: return [c(outlineColor), inside ? 1 : 0, eight ? 1 : 0]
         case .dropShadow: return [Int32(shadowX), Int32(shadowY), c(shadowColor)]
         case .despeckle: return [eight ? 1 : 0]
+        case .removeBackground: return [Int32(bgTolerance), (bgShadow ? 1 : 0) | (bgGlobal ? 2 : 0)]
         case .cleanEdges: return clean.values
         case .invert, .desaturate, .blur, .sharpen, .scale, .lintSprite: return []
         }
@@ -260,6 +268,11 @@ struct FilterSheet: View {
                 DSSegmented(selection: $p.eight, options: [.init(false, title: "4-connected"), .init(true, title: "8-connected")])
             }
             DSNote("Clears pixels that have no opaque neighbor.")
+        case .removeBackground:
+            ValueSlider(label: "Tolerance", value: $p.bgTolerance, range: 0...255)
+            Toggle("Also remove the drop shadow", isOn: $p.bgShadow)
+            Toggle("Also remove the same color inside the figure", isOn: $p.bgGlobal)
+            DSNote("The background is the main color of the image border, removed from the edges inwards.")
         case .invert:
             DSNote("Inverts the RGB channels, keeping alpha.")
         case .desaturate:

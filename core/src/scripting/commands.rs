@@ -11,8 +11,11 @@ use super::sprites::active_ctx;
 use super::{Ctx, SpriteH};
 use crate::document::color_mode::ColorMode;
 use crate::document::{Cel, Layer, Sprite};
+use crate::paint::background::{remove_background, BgOptions, BgStats};
 use crate::paint::filters::{self, Filter, Target};
 use crate::paint::selection::Selection;
+use crate::paint::trace::{trace_sprite, Colors, Pitch, TraceOptions};
+use crate::paint::warp::{self, Warp};
 use mlua::{
     Error, Function, Lua, MetaMethod, MultiValue, ObjectLike, Result as LuaResult, Table, UserData, UserDataFields,
     UserDataMethods, Value,
@@ -509,6 +512,98 @@ fn filter_cel(a: &Ctx, filter: Filter) -> LuaResult<()> {
     Ok(())
 }
 
+/// A number inside a Lua table that is either `{ a, b }` or `{ name1 = a, name2 = b }`.
+fn pair_of(v: &Value, names: (&str, &str)) -> Option<(f64, f64)> {
+    let Value::Table(t) = v else { return None };
+    let num = |k: Value| match k {
+        Value::Integer(i) => Some(i as f64),
+        Value::Number(n) => Some(n),
+        _ => None,
+    };
+    let get = |i: i64, name: &str| {
+        let v =
+            t.raw_get::<Value>(name).ok().filter(|v| !matches!(v, Value::Nil)).or_else(|| t.raw_get::<Value>(i).ok());
+        v.and_then(num)
+    };
+    Some((get(1, names.0)?, get(2, names.1)?))
+}
+
+/// `app.command.Warp{ grid = {cols, rows}, offsets = {{dx, dy}, ...}, samples = 4, smooth = false,
+/// pins = {{ x, y, dx, dy, radius }, ...} }` on the active cel, limited to the selection. The grid is
+/// spread over the selection bounds (or the canvas) and `offsets` are its handles' displacements, row
+/// by row.
+fn warp_cel(a: &Ctx, p: &Params) -> LuaResult<()> {
+    let (l, f) = drawable(a)?;
+    let s = a.sprite();
+    let mask = a.mask();
+    let region = warp::region(mask.as_deref(), s.width, s.height);
+    let bad = |what: &str| Error::runtime(format!("Warp: {what}"));
+    let (cols, rows) = match p.get("grid") {
+        Value::Nil => (2, 2),
+        Value::Table(t) => {
+            let n = |i: i64, name: &str| {
+                let v = t
+                    .raw_get::<Value>(name)
+                    .ok()
+                    .filter(|v| !matches!(v, Value::Nil))
+                    .or_else(|| t.raw_get::<Value>(i).ok());
+                super::geometry::int_of(&v.unwrap_or(Value::Nil))
+            };
+            match (n(1, "cols"), n(2, "rows")) {
+                (Some(c), Some(r))
+                    if (2..=warp::MAX_GRID as i64).contains(&c) && (2..=warp::MAX_GRID as i64).contains(&r) =>
+                {
+                    (c as u32, r as u32)
+                }
+                _ => return Err(bad(&format!("grid needs {{cols, rows}}, each from 2 to {}", warp::MAX_GRID))),
+            }
+        }
+        _ => return Err(bad("grid must be a table {cols, rows}")),
+    };
+    let mut offsets = Vec::new();
+    match p.get("offsets") {
+        Value::Nil => offsets.resize((cols * rows * 2) as usize, 0.0),
+        Value::Table(t) => {
+            for v in t.sequence_values::<Value>() {
+                let (dx, dy) = pair_of(&v?, ("dx", "dy")).ok_or_else(|| bad("each offset must be {dx, dy}"))?;
+                offsets.extend([dx, dy]);
+            }
+        }
+        _ => return Err(bad("offsets must be a table of {dx, dy}")),
+    }
+    if offsets.len() != (cols * rows * 2) as usize {
+        return Err(bad(&format!("offsets needs {} entries (cols * rows), got {}", cols * rows, offsets.len() / 2)));
+    }
+    let mut pins: Vec<f64> = Vec::new();
+    match p.get("pins") {
+        Value::Nil => {}
+        Value::Table(t) => {
+            for v in t.sequence_values::<Value>() {
+                let v = v?;
+                let at = pair_of(&v, ("x", "y")).ok_or_else(|| bad("each pin needs x and y"))?;
+                let by = pair_of(&v, ("dx", "dy")).ok_or_else(|| bad("each pin needs dx and dy"))?;
+                let Value::Table(pt) = &v else { unreachable!("pair_of accepted a table") };
+                let radius = match pt.raw_get::<Value>("radius")? {
+                    Value::Integer(i) => i as f64,
+                    Value::Number(n) => n,
+                    _ => return Err(bad("each pin needs a radius")),
+                };
+                pins.extend([at.0, at.1, by.0, by.1, radius]);
+            }
+            if pins.len() / 5 > warp::MAX_PINS {
+                return Err(bad(&format!("at most {} pins", warp::MAX_PINS)));
+            }
+        }
+        _ => return Err(bad("pins must be a table of {x, y, dx, dy, radius}")),
+    }
+    let samples = p.int("samples").unwrap_or(4).clamp(1, warp::MAX_SAMPLES as i64) as u32;
+    let w = Warp::from_flat(region, (cols, rows), &offsets, samples, p.flag("smooth").unwrap_or(false), &pins)
+        .ok_or_else(|| bad("invalid grid, offsets or pins"))?;
+    warp::apply(s, &w, l, f, mask.as_deref());
+    s.flush_links();
+    Ok(())
+}
+
 fn check_frames(s: &Sprite) -> LuaResult<()> {
     if s.frame_count() >= super::MAX_SCRIPT_FRAMES || !s.cels_fit_budget(s.width as u64, s.height as u64) {
         return Err(Error::runtime(format!(
@@ -530,18 +625,178 @@ fn check_layers(s: &Sprite) -> LuaResult<()> {
 
 const UNSUPPORTED_UI: &str = "it belongs to Aseprite's user interface (or to a feature Pixmith does not have)";
 
-fn run_command(lua: &Lua, root: &Rc<Ctx>, name: &str, p: Params) -> LuaResult<()> {
+fn run_command(lua: &Lua, root: &Rc<Ctx>, name: &str, p: Params) -> LuaResult<Value> {
     let a = active_ctx(root);
     if a.doc.closed.get() || !a.has_doc.get() {
         return Err(Error::runtime(format!("app.command.{name}: there is no active sprite")));
     }
     let a = &a;
     a.undo.boundary(a);
-    let result = dispatch(lua, root, a, name, &p);
+    // Most commands return nothing; the pixel-art cleaning commands return a report table.
+    let result = match name {
+        "TraceGrid" => trace_grid_command(lua, a, &p).map(Value::Table),
+        "RemoveBackground" => remove_background_command(lua, a, &p).map(Value::Table),
+        _ => dispatch(lua, root, a, name, &p).map(|()| Value::Nil),
+    };
     if result.is_ok() {
         a.undo.boundary(a);
     }
     result
+}
+
+// MARK: Background removal and grid tracing
+
+/// `RemoveBackground{ tolerance, shadow, shadowDepth, global, color }` options.
+fn bg_options(p: &Params, color_key: &str) -> LuaResult<BgOptions> {
+    let mut o = BgOptions::default();
+    if let Some(t) = p.int("tolerance") {
+        o.tolerance = t.clamp(0, 255) as u8;
+    }
+    o.shadow = p.flag("shadow") == Some(true);
+    o.global = p.flag("global") == Some(true);
+    if let Some(d) = p.int("shadowDepth") {
+        o.shadow_depth = d.clamp(1, 95) as u8;
+    }
+    if let Some(c) = p.color(color_key)? {
+        o.color = Some([c[0], c[1], c[2]]);
+    }
+    Ok(o)
+}
+
+fn num_of(v: &Value) -> Option<f64> {
+    match v {
+        Value::Integer(i) => Some(*i as f64),
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn pair(p: &Params, key: &str) -> LuaResult<Option<(f64, f64)>> {
+    match p.get(key) {
+        Value::Nil => Ok(None),
+        Value::Table(t) => {
+            let n = |i: i64| t.raw_get::<Value>(i).ok().and_then(|v| num_of(&v));
+            match (n(1), n(2)) {
+                (Some(x), Some(y)) => Ok(Some((x, y))),
+                _ => Err(Error::runtime(format!("{key} must be a number or {{ x, y }}"))),
+            }
+        }
+        v => match num_of(&v) {
+            Some(n) => Ok(Some((n, n))),
+            None => Err(Error::runtime(format!("{key} must be a number or {{ x, y }}"))),
+        },
+    }
+}
+
+fn trace_options(a: &Ctx, p: &Params) -> LuaResult<TraceOptions> {
+    let mut o = TraceOptions::default();
+    let (pmin, pmax) = (p.num("minPitch").unwrap_or(3.0), p.num("maxPitch").unwrap_or(32.0));
+    o.pitch = match p.get("pitch") {
+        Value::Nil => Pitch::Auto { min: pmin, max: pmax },
+        Value::String(s) if s.to_string_lossy() == "auto" => Pitch::Auto { min: pmin, max: pmax },
+        Value::String(_) => return Err(Error::runtime("pitch must be \"auto\", a number or { x, y }")),
+        _ => pair(p, "pitch")?.map_or(Pitch::Auto { min: pmin, max: pmax }, |(x, y)| Pitch::Fixed(x, y)),
+    };
+    o.phase = pair(p, "phase")?;
+    o.separate_axes = p.flag("separateAxes") == Some(true);
+    let (cmin, cmax) =
+        (p.int("minColors").unwrap_or(2).max(1) as usize, p.int("maxColors").unwrap_or(32).max(1) as usize);
+    o.colors = match p.get("colors") {
+        Value::Nil => Colors::Auto { min: cmin, max: cmax },
+        Value::String(s) => match s.to_string_lossy().as_str() {
+            "auto" => Colors::Auto { min: cmin, max: cmax },
+            "keep" => Colors::Keep,
+            "palette" => Colors::Palette(a.sprite().palette.clone()),
+            _ => {
+                return Err(Error::runtime(
+                    "colors must be a number, \"auto\", \"keep\", \"palette\" or a list of colors",
+                ))
+            }
+        },
+        Value::Table(t) => {
+            let mut pal = Vec::new();
+            for v in t.sequence_values::<Value>() {
+                pal.push(color::arg(&v?)?);
+            }
+            Colors::Palette(pal)
+        }
+        v => match super::geometry::int_of(&v) {
+            Some(k) if k >= 1 => Colors::Count(k as usize),
+            _ => {
+                return Err(Error::runtime(
+                    "colors must be a number, \"auto\", \"keep\", \"palette\" or a list of colors",
+                ))
+            }
+        },
+    };
+    if p.flag("removeBackground") == Some(true) {
+        o.remove_background = Some(bg_options(p, "backgroundColor")?);
+    }
+    o.close_outline = p.flag("closeOutline") == Some(true);
+    o.crop = p.flag("crop") != Some(false);
+    if let Some(s) = p.int("seed") {
+        o.seed = s.max(0) as u64;
+    }
+    o.validate().map_err(Error::runtime)?;
+    Ok(o)
+}
+
+fn color_list(lua: &Lua, colors: &[[u8; 4]]) -> LuaResult<Table> {
+    let t = lua.create_table()?;
+    for (i, c) in colors.iter().enumerate() {
+        t.raw_set(i + 1, color::new_color(lua, *c)?)?;
+    }
+    Ok(t)
+}
+
+fn bg_report(lua: &Lua, s: &BgStats) -> LuaResult<Table> {
+    let t = lua.create_table()?;
+    if let Some(c) = s.color {
+        t.set("color", color::new_color(lua, [c[0], c[1], c[2], 255])?)?;
+    }
+    t.set("background", s.background)?;
+    t.set("global", s.global)?;
+    t.set("shadow", s.shadow)?;
+    t.set("shadowSkipped", s.shadow_skipped)?;
+    t.set("removed", s.removed())?;
+    Ok(t)
+}
+
+/// `app.command.RemoveBackground{ tolerance = 28, shadow = false, shadowDepth = 55, global = false, color = nil }`
+/// on the active cel, inside the selection. Returns `{ color, background, global, shadow, shadowSkipped, removed }`.
+fn remove_background_command(lua: &Lua, a: &Ctx, p: &Params) -> LuaResult<Table> {
+    let o = bg_options(p, "color")?;
+    let (l, f) = drawable(a)?;
+    let s = a.sprite();
+    let (w, h) = (s.width as usize, s.height as usize);
+    let stats = match s.cels[f][l].as_ref().filter(|c| c.pixels.len() == w * h * 4) {
+        Some(c) => remove_background(&mut c.pixels.clone(), w, h, &o),
+        None => BgStats::default(),
+    };
+    filter_cel(a, Filter::RemoveBackground(o))?;
+    bg_report(lua, &stats)
+}
+
+/// `app.command.TraceGrid{ pitch = "auto", colors = 16, removeBackground = true, closeOutline = true, ... }`: traces
+/// the sprite onto the pixel grid found in the active cel (see docs/LUA_API.md). Returns
+/// `{ width, height, pitch = {x, y}, phase = {x, y}, palette, quality, background, closedOutline }`.
+fn trace_grid_command(lua: &Lua, a: &Ctx, p: &Params) -> LuaResult<Table> {
+    let o = trace_options(a, p)?;
+    let (l, f) = drawable(a)?;
+    let r = trace_sprite(a.sprite(), l, f, &o).map_err(|m| Error::runtime(format!("TraceGrid: {m}")))?;
+    *a.mask.borrow_mut() = None;
+    a.invalidate_handles();
+    clamp_site(a);
+    let t = lua.create_table()?;
+    t.set("width", r.width)?;
+    t.set("height", r.height)?;
+    t.set("pitch", lua.create_sequence_from([r.pitch.0, r.pitch.1])?)?;
+    t.set("phase", lua.create_sequence_from([r.phase.0, r.phase.1])?)?;
+    t.set("palette", color_list(lua, &r.palette)?)?;
+    t.set("quality", r.quality)?;
+    t.set("closedOutline", r.closed_outline)?;
+    t.set("background", bg_report(lua, &r.background)?)?;
+    Ok(t)
 }
 
 fn dispatch(lua: &Lua, root: &Rc<Ctx>, a: &Rc<Ctx>, name: &str, p: &Params) -> LuaResult<()> {
@@ -784,6 +1039,7 @@ fn dispatch(lua: &Lua, root: &Rc<Ctx>, a: &Rc<Ctx>, name: &str, p: &Params) -> L
             )?;
         }
         "Despeckle" => filter_cel(a, Filter::Despeckle { eight: true })?,
+        "Warp" => warp_cel(a, p)?,
         "CleanEdges" => clean_edges_command(a, p)?,
         // Selection and cels
         "SelectAll" => {

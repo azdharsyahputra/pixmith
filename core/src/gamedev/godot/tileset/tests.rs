@@ -13,6 +13,7 @@ fn input(mode: TerrainMode, masks: Vec<Option<u8>>) -> GodotTilesetInput {
         tiles: masks.iter().enumerate().map(|(i, m)| TileSpec::from_mask(tile(i as u8 + 1), *m)).collect(),
         terrains: vec![Terrain { name: "Grass".into(), color: [0.3, 0.7, 0.3, 1.0] }],
         mode,
+        iso: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn golden_multi_terrain() {
             Terrain { name: "Water \"deep\"".into(), color: [0.1, 0.25, 0.9, 0.5] },
         ],
         mode: TerrainMode::Blob,
+        iso: None,
     };
     let want = "\
 [gd_resource type=\"TileSet\" format=3]
@@ -165,6 +167,7 @@ fn golden_alternatives_probability_collision() {
         tiles: vec![t],
         terrains: vec![Terrain { name: "T".into(), color: [1.0, 0.0, 0.0, 1.0] }],
         mode: TerrainMode::Sides,
+        iso: None,
     };
     let opts = Options { collision: Collision::Full, ..Options::default() };
     let want = "\

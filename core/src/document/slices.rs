@@ -509,6 +509,11 @@ fn parse(bytes: &[u8]) -> Parsed {
     x
 }
 
+/// The sprite-level user data text of a file, without building anything else.
+pub fn sprite_text(bytes: &[u8]) -> Option<String> {
+    parse(bytes).extra.sprite.text
+}
+
 /// Fills in the slices and user data of a sprite just read from `bytes`. Malformed files yield
 /// whatever could be found.
 pub fn attach(bytes: &[u8], s: &mut Sprite) {

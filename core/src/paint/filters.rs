@@ -87,6 +87,8 @@ pub enum Filter {
     Convolve(Kernel),
     /// Lookup tables for R, G, B and A, already combined with the master (RGB) curve.
     Curves(Box<[[u8; 256]; 4]>),
+    /// Makes the background (read from the border) and optionally a soft shadow transparent; see `paint::background`.
+    RemoveBackground(crate::paint::background::BgOptions),
     /// Halo removal, despeckle and outline thinning (see `paint::cleanup`).
     CleanEdges(crate::paint::cleanup::CleanEdgesOptions),
 }
@@ -104,6 +106,7 @@ pub const KIND_BLUR: u32 = 9;
 pub const KIND_SHARPEN: u32 = 10;
 pub const KIND_CURVES: u32 = 11;
 pub const KIND_CLEAN_EDGES: u32 = 12;
+pub const KIND_REMOVE_BACKGROUND: u32 = 13;
 
 /// Most control points accepted per curve.
 const MAX_CURVE_POINTS: usize = 64;
@@ -240,6 +243,7 @@ impl Filter {
             KIND_BLUR => Filter::Convolve(Kernel::Blur),
             KIND_SHARPEN => Filter::Convolve(Kernel::Sharpen),
             KIND_CURVES => return curves_from_params(p),
+            KIND_REMOVE_BACKGROUND => Filter::RemoveBackground(crate::paint::background::BgOptions::from_params(p)?),
             KIND_CLEAN_EDGES => Filter::CleanEdges(clean_edges_from_params(p)),
             _ => return None,
         })
@@ -290,6 +294,11 @@ impl Filter {
             Filter::Curves(ref l) => map_pixels(src, |p| {
                 [l[0][p[0] as usize], l[1][p[1] as usize], l[2][p[2] as usize], l[3][p[3] as usize]]
             }),
+            Filter::RemoveBackground(ref o) => {
+                let mut out = src.to_vec();
+                crate::paint::background::remove_background(&mut out, w, h, o);
+                out
+            }
             Filter::CleanEdges(ref o) => crate::paint::cleanup::clean_edges(src, w, h, o),
         }
     }
@@ -488,6 +497,19 @@ pub fn apply(
     frame: usize,
     rect: Option<Rect>,
 ) -> bool {
+    apply_with(sprite, &|px, w, h| filter.run(px, w, h), target, layer, frame, rect)
+}
+
+/// Like `apply`, for any function from a straight-alpha RGBA canvas buffer (`w` x `h`) to a new one
+/// (such as `paint::warp`). Linked cels, indexed palettes and skipped layers are handled the same way.
+pub(crate) fn apply_with(
+    sprite: &mut Sprite,
+    run: &dyn Fn(&[u8], usize, usize) -> Vec<u8>,
+    target: Target,
+    layer: usize,
+    frame: usize,
+    rect: Option<Rect>,
+) -> bool {
     let (w, h) = (sprite.width as usize, sprite.height as usize);
     let (x0, y0, x1, y1) = match rect.filter(|r| r.w > 0) {
         Some(r) => {
@@ -522,7 +544,7 @@ pub fn apply(
             continue;
         }
         let original = cel.clone();
-        let filtered = filter.run(&cel.pixels, w, h);
+        let filtered = run(&cel.pixels, w, h);
         let mut result = cel.pixels.clone();
         for y in y0..y1 {
             let a = (y * w + x0) * 4;

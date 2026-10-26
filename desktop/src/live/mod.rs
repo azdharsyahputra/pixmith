@@ -264,6 +264,7 @@ fn busy(app: &PixmithApp) -> Option<&'static str> {
         || f.prompt.is_some()
         || f.export.is_some()
         || f.sheet_import.is_some()
+        || f.trace_import.is_some()
         || m.filter.is_some()
         || m.scale.is_some()
         || m.canvas_size.is_some()

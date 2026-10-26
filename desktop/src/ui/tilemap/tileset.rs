@@ -84,10 +84,10 @@ pub fn menu_items(ui: &mut Ui, info: &MenuInfo) -> Option<MenuAction> {
 pub fn apply_menu_action(tab: &mut DocTab, tm: &mut TilemapState, action: MenuAction) -> bool {
     let layer = tab.layer;
     match action {
-        MenuAction::NewLayer => open_sheet(tm, Sheet::NewLayer),
-        MenuAction::Convert => open_sheet(tm, Sheet::Convert),
+        MenuAction::NewLayer => open_sheet(tm, Sheet::NewLayer, super::active_iso(tab)),
+        MenuAction::Convert => open_sheet(tm, Sheet::Convert, None),
         MenuAction::Rename => {
-            open_sheet(tm, Sheet::Rename);
+            open_sheet(tm, Sheet::Rename, None);
             tm.sheet_name = tab.doc.tileset_of_layer(layer).map(|t| tab.doc.tileset_title(t)).unwrap_or_default();
         }
         MenuAction::ToNormal => {
@@ -128,7 +128,11 @@ pub fn tileset_section(ui: &mut Ui, tab: &mut DocTab, tm: &mut TilemapState, err
     let Some(ts) = tab.doc.tileset_of_layer(layer) else { return false };
     let (tw, th) = tab.doc.tile_size(ts);
     let count = tab.doc.tile_count(ts);
-    let subtitle = format!("{tw}\u{d7}{th} \u{b7} {count} tiles");
+    let iso = tab.doc.tileset_iso_cell(ts);
+    let subtitle = match iso {
+        Some((cw, ch)) => format!("{tw}\u{d7}{th} \u{b7} {count} tiles \u{b7} iso {cw}\u{d7}{ch}"),
+        None => format!("{tw}\u{d7}{th} \u{b7} {count} tiles"),
+    };
     let info = MenuInfo::of(&tab.doc, layer);
     let mut menu: Option<MenuAction> = None;
     let mut add_tile = false;
@@ -149,6 +153,7 @@ pub fn tileset_section(ui: &mut Ui, tab: &mut DocTab, tm: &mut TilemapState, err
         |ui| {
             ui.spacing_mut().item_spacing.y = space::MD;
             changed |= tileset_body(ui, tab, tm, ts, (tw, th));
+            changed |= super::iso_panel::iso_section(ui, tab, tm, ts);
             changed |= autotile_panel(ui, tab, tm, error);
         },
     );
@@ -343,9 +348,20 @@ fn tileset_body(ui: &mut Ui, tab: &mut DocTab, tm: &mut TilemapState, ts: u32, t
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = space::XS;
-            if title_chip(ui, "D", None, tm.flip_d, "Flip diagonally (square tiles)").clicked() {
-                tm.flip_d = !tm.flip_d;
+            let iso = tab.doc.layer_is_iso(layer);
+            if iso {
+                tm.flip_d = false;
             }
+            ui.add_enabled_ui(!iso, |ui| {
+                let help = if iso {
+                    "Diagonal flips do not exist for isometric tiles"
+                } else {
+                    "Flip diagonally (square tiles)"
+                };
+                if title_chip(ui, "D", None, tm.flip_d, help).clicked() {
+                    tm.flip_d = !tm.flip_d;
+                }
+            });
             if title_chip(ui, "Y", None, tm.flip_y, "Flip vertically").clicked() {
                 tm.flip_y = !tm.flip_y;
             }
@@ -399,7 +415,9 @@ fn autotile_panel(ui: &mut Ui, tab: &mut DocTab, tm: &mut TilemapState, _error: 
         return changed;
     }
     // Mode picker.
-    if let Some(m) = ds_popup(ui, "terrain_mode", mode as usize, &MODE_NAMES, None, true, "How tiles connect") {
+    // The dual grid of "Corners" needs a half-cell shift that isometric layers do not have.
+    let modes = if tab.doc.layer_is_iso(layer) { &MODE_NAMES[..2] } else { &MODE_NAMES[..] };
+    if let Some(m) = ds_popup(ui, "terrain_mode", mode as usize, modes, None, true, "How tiles connect") {
         changed |= tab.doc.set_terrain_mode(layer, m as i32);
     }
     changed |= terrain_list(ui, tab, tm);
@@ -453,8 +471,10 @@ fn create_terrain(ui: &mut Ui, tab: &mut DocTab, tm: &mut TilemapState) -> bool 
                 ui.painter().layout_no_wrap("Create".into(), strong(ui.ctx(), font::CAPTION), Color32::WHITE).size().x;
             let button_w = text_w + 2.0 * (space::SM + 2.0);
             let popup_w = ui.available_width() - button_w - (space::SM - 2.0);
+            let modes = if tab.doc.layer_is_iso(layer) { &MODE_NAMES[..2] } else { &MODE_NAMES[..] };
+            tm.new_mode = tm.new_mode.min(modes.len() - 1);
             if let Some(m) =
-                ds_popup(ui, "terrain_new_mode", tm.new_mode, &MODE_NAMES, Some(popup_w), false, "How tiles connect")
+                ds_popup(ui, "terrain_new_mode", tm.new_mode, modes, Some(popup_w), false, "How tiles connect")
             {
                 tm.new_mode = m;
             }

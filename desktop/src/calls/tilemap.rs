@@ -78,8 +78,9 @@ impl Doc {
     /// Other tilesets with the tile size of `layer`'s, which it could switch to (`compatibleTilesets`).
     pub fn compatible_tilesets(&self, layer: u32) -> Vec<u32> {
         let Some(cur) = self.tileset_of_layer(layer) else { return Vec::new() };
-        let size = self.tile_size(cur);
-        (0..self.tileset_total()).filter(|&t| t != cur && self.tile_size(t) == size).collect()
+        let key = |t: u32| (self.tile_size(t), self.tileset_iso_cell(t));
+        let want = key(cur);
+        (0..self.tileset_total()).filter(|&t| t != cur && key(t) == want).collect()
     }
 
     /// Adds a tilemap layer above `above` and returns its index (`newTilemapLayer`).
@@ -158,6 +159,112 @@ impl Doc {
         let mut out = [0i32; 2];
         unsafe { tm::pixmith_tile_grid_origin(self.raw(), layer, frame, out.as_mut_ptr()) };
         (out[0], out[1])
+    }
+
+    // MARK: Isometric tilemaps
+
+    /// Adds an isometric tilemap layer above `above`: `tile_w` x `tile_h` images on `cell_w` x `cell_h` diamonds,
+    /// cell (0, 0)'s box at canvas pixel `offset`. Returns the layer's index.
+    pub fn new_iso_tilemap_layer(&mut self, above: u32, tile: (u32, u32), cell: (u32, u32), offset: (i32, i32)) -> u32 {
+        let i = unsafe {
+            tm::pixmith_add_iso_tilemap_layer(self.raw(), above, tile.0, tile.1, cell.0, cell.1, offset.0, offset.1)
+        };
+        self.label_last_step("New Isometric Tilemap Layer");
+        self.touch();
+        i
+    }
+
+    /// Makes an unused tileset isometric with `cell` diamonds, or square again with `None` (false while a layer
+    /// shows a tile of it).
+    pub fn set_tileset_iso(&mut self, ts: u32, cell: Option<(u32, u32)>) -> bool {
+        let (w, h) = cell.unwrap_or((0, 0));
+        let ok = unsafe { tm::pixmith_tileset_set_iso(self.raw(), ts, w, h) };
+        self.done(ok, if cell.is_some() { "Make Tileset Isometric" } else { "Make Tileset Square" })
+    }
+
+    pub fn tileset_is_iso(&self, ts: u32) -> bool {
+        unsafe { tm::pixmith_tileset_is_iso(self.raw(), ts) }
+    }
+
+    /// The diamond cell size of an isometric tileset.
+    pub fn tileset_iso_cell(&self, ts: u32) -> Option<(u32, u32)> {
+        let mut out = [0u32; 2];
+        unsafe { tm::pixmith_tileset_iso_cell(self.raw(), ts, out.as_mut_ptr()) }.then_some((out[0], out[1]))
+    }
+
+    /// The layer is an isometric tilemap layer.
+    pub fn layer_is_iso(&self, layer: u32) -> bool {
+        unsafe { tm::pixmith_layer_is_iso(self.raw(), layer) }
+    }
+
+    /// Canvas pixel of cell (0, 0)'s box of an isometric layer (its elevation offset).
+    pub fn layer_grid_offset(&self, layer: u32) -> Option<(i32, i32)> {
+        let mut out = [0i32; 2];
+        unsafe { tm::pixmith_layer_grid_offset(self.raw(), layer, out.as_mut_ptr()) }.then_some((out[0], out[1]))
+    }
+
+    pub fn set_layer_grid_offset(&mut self, layer: u32, offset: (i32, i32)) -> bool {
+        let ok = unsafe { tm::pixmith_layer_set_grid_offset(self.raw(), layer, offset.0, offset.1) };
+        self.done(ok, "Layer Offset")
+    }
+
+    /// The cell containing canvas pixel `(x, y)` (diamond for isometric layers, `pixel / tile size` otherwise).
+    pub fn layer_cell_at(&self, layer: u32, x: i32, y: i32) -> Option<(i32, i32)> {
+        let mut out = [0i32; 2];
+        unsafe { tm::pixmith_layer_cell_at(self.raw(), layer, x, y, out.as_mut_ptr()) }.then_some((out[0], out[1]))
+    }
+
+    /// Canvas pixel of the top-left corner of cell `(i, j)`'s box.
+    pub fn layer_cell_origin(&self, layer: u32, i: i32, j: i32) -> Option<(i32, i32)> {
+        let mut out = [0i32; 2];
+        unsafe { tm::pixmith_layer_cell_origin(self.raw(), layer, i, j, out.as_mut_ptr()) }.then_some((out[0], out[1]))
+    }
+
+    /// The tile value in cell `(i, j)`.
+    pub fn tile_value_in_cell(&self, layer: u32, frame: u32, i: i32, j: i32) -> u32 {
+        unsafe { tm::pixmith_tile_in_cell(self.raw(), layer, frame, i, j) }
+    }
+
+    /// Like [`Doc::stamp_tile`], by cell. Open the undo step with `begin_edit` first.
+    pub fn stamp_tile_cell(&mut self, layer: u32, frame: u32, i: i32, j: i32, value: u32) -> bool {
+        let ok = unsafe { tm::pixmith_tile_stamp_cell(self.raw(), layer, frame, i, j, value) };
+        if ok {
+            self.touch();
+        }
+        ok
+    }
+
+    /// The tile you see at canvas pixel `(x, y)` of an isometric layer: its cell and tile value.
+    pub fn tile_hit_at(&self, layer: u32, frame: u32, x: i32, y: i32) -> Option<((i32, i32), u32)> {
+        let mut out = [0i32; 3];
+        unsafe { tm::pixmith_tile_hit_at(self.raw(), layer, frame, x, y, out.as_mut_ptr()) }
+            .then_some(((out[0], out[1]), out[2] as u32))
+    }
+
+    /// The point of a tile's image (from its top-left corner) that sits on the diamond's center.
+    pub fn tile_pivot(&self, ts: u32, tile: u32) -> Option<(i32, i32)> {
+        let mut out = [0i32; 2];
+        unsafe { tm::pixmith_tile_pivot(self.raw(), ts, tile, out.as_mut_ptr()) }.then_some((out[0], out[1]))
+    }
+
+    pub fn tile_pivot_is_set(&self, ts: u32, tile: u32) -> bool {
+        unsafe { tm::pixmith_tile_pivot_is_set(self.raw(), ts, tile) }
+    }
+
+    /// The pivot as Godot's `texture_origin` (offset from the image center).
+    pub fn tile_texture_origin(&self, ts: u32, tile: u32) -> Option<(i32, i32)> {
+        let mut out = [0i32; 2];
+        unsafe { tm::pixmith_tile_texture_origin(self.raw(), ts, tile, out.as_mut_ptr()) }.then_some((out[0], out[1]))
+    }
+
+    pub fn set_tile_pivot(&mut self, ts: u32, tile: u32, pivot: (i32, i32)) -> bool {
+        let ok = unsafe { tm::pixmith_tile_set_pivot(self.raw(), ts, tile, pivot.0, pivot.1) };
+        self.done(ok, "Tile Origin")
+    }
+
+    pub fn clear_tile_pivot(&mut self, ts: u32, tile: u32) -> bool {
+        let ok = unsafe { tm::pixmith_tile_clear_pivot(self.raw(), ts, tile) };
+        self.done(ok, "Reset Tile Origin")
     }
 
     // MARK: Terrains

@@ -26,6 +26,8 @@
 //   "ico_sizes":  [16, 32, 48, 256] up to 8 sizes from 1 to 256. The sprite is scaled by a whole number to fit each
 //                 square and centered (reduced if larger). Without sizes the icon has the sprite's own size (<= 256).
 // Import options (pixmith_import_image_ex): {"ico_size": 32} opens that size of an icon (default: the largest).
+//   {"mode": "trace_grid", ...} opens the first image as pixel art traced onto its grid; the options are those of
+//   pixmith_trace_grid (pixmith_trace.h): pitch, colors, remove_background, shadow, close_outline, ...
 #pragma once
 #include "pixmith.h"
 #include "pixmith_io.h"

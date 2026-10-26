@@ -39,11 +39,13 @@ final class CanvasNSView: NSView {
         CanvasOverlays.drawSprite(ctx, model: m, dirty: dirtyRect)
         CanvasOverlays.drawFront(ctx, model: m, dirty: dirtyRect, backingScale: window?.backingScaleFactor ?? 1)
         let rect = CGRect(x: 0, y: 0, width: CGFloat(m.width) * m.zoom, height: CGFloat(m.height) * m.zoom)
-        m.drawTileGrid(ctx, size: rect.size, scale: window?.backingScaleFactor ?? 1)
+        m.drawTileGrid(ctx, size: rect.size, scale: window?.backingScaleFactor ?? 1, dirty: dirtyRect)
         m.drawMissingCells(ctx)
+        m.drawIsoOverlay(ctx, dirty: dirtyRect)
         drawSelectionOutline(ctx, m)
         drawSlices(ctx, m)
         drawTransformOverlay(ctx, m)
+        drawWarpOverlay(ctx, m)
         m.drawTweenOverlay(ctx)
         m.drawMirrorGuides(ctx, size: rect.size)
     }
@@ -61,7 +63,9 @@ final class CanvasNSView: NSView {
         TimelineSelection.shared.focused = false
         let p = pixel(e)
         IsoGrid.lastClick = p
+        m.isoPointerMoved(p, in: self)
         if m.tweenMouseDown(e, in: self) { return }
+        if m.warpMouseDown(e) { return }
         if m.transformMouseDown(e) { return }
         if m.consumeSelectByColorClick(p) { return }
         if m.handleTerrainMouse(e, at: p, began: true) { return }
@@ -90,7 +94,9 @@ final class CanvasNSView: NSView {
     override func mouseDragged(with e: NSEvent) {
         guard let m = model else { return }
         let p = pixel(e)
+        m.isoPointerMoved(p, in: self)
         if m.tweenDragging { m.tweenMouseDragged(e, in: self); return }
+        if m.warpMouseDragged(e) { return }
         if m.transformActive { _ = m.transformMouseDragged(e); return }
         if m.selectionDragging { return m.selectionMouseDragged(p) }
         if m.sliceDragging { return m.sliceMouseDragged(p) }
@@ -114,11 +120,20 @@ final class CanvasNSView: NSView {
                                        owner: self))
     }
 
-    override func mouseMoved(with e: NSEvent) { model?.shapeMoved(pixel(e)) }
-    override func mouseExited(with e: NSEvent) { StatusInfo.shared.cursor = nil }
+    override func mouseMoved(with e: NSEvent) {
+        let p = pixel(e)
+        model?.shapeMoved(p)
+        model?.isoPointerMoved(p, in: self)
+    }
+
+    override func mouseExited(with e: NSEvent) {
+        StatusInfo.shared.cursor = nil
+        model?.isoPointerMoved(nil, in: self)
+    }
 
     override func mouseUp(with e: NSEvent) {
         if let m = model, m.tweenDragging { m.tweenMouseUp(); return }
+        if let m = model, m.warpMouseUp() { return }
         if let m = model, m.transformActive { _ = m.transformMouseUp(); return }
         if let m = model, m.selectionDragging { m.selectionMouseUp() }
         if let m = model, m.sliceDragging { m.sliceMouseUp() }

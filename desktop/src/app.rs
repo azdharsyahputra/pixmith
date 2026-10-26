@@ -235,6 +235,7 @@ impl PixmithApp {
         crate::live::frame(self, root.ctx());
         let doc_id = self.tab().doc.raw() as usize;
         self.tilemap.sync(self.tool, doc_id);
+        self.tilemap.iso_default = self.canvas.tools.settings.iso();
         ui::menus::shortcuts_first(self, root.ctx());
         let c = self.colors();
         root.painter().rect_filled(root.max_rect(), 0.0, c.panel);

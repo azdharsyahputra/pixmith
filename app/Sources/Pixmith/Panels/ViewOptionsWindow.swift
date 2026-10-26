@@ -70,7 +70,7 @@ struct ViewOptionsView: View {
                         TextField("X offset", value: $s.isoGridX, format: .number)
                         TextField("Y offset", value: $s.isoGridY, format: .number)
                     }
-                    Text("Diamond cells of an isometric tile (even sizes, at least 4; 32x16 is 2:1). Select > Isometric Tile selects the cell under the cursor.")
+                    Text("Diamond cells of an isometric tile (even sizes, at least 4; 32x16 is 2:1). Select > Isometric Tile selects the cell under the cursor. While an isometric tilemap layer is selected, its own cell size and offset are used instead.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     HStack {

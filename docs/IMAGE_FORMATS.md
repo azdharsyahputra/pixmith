@@ -21,7 +21,7 @@ header before anything large is allocated, and damaged files are errors (the dec
 
 ```c
 PixmithDoc *pixmith_import_image(const char *path);                         // format from the content
-PixmithDoc *pixmith_import_image_ex(const char *path, const char *json);    // {"ico_size": 32}
+PixmithDoc *pixmith_import_image_ex(const char *path, const char *json);    // {"ico_size": 32} or {"mode": "trace_grid", ...}
 char *pixmith_image_info(const char *path);   // {"format":"ico","name":"ICO","animated":false,"sizes":[16,32,256]}
 bool pixmith_export_image(const PixmithDoc *, uint32_t frame, uint32_t scale, const char *path, const char *json);
 int32_t pixmith_export_run_ex(const PixmithDoc *, const PixmithExport *, const char *json, const char *path);

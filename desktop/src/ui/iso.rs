@@ -37,6 +37,18 @@ impl Iso {
         Iso { w: clamp_side(w) as i64, h: clamp_side(h) as i64, x: x as i64, y: y as i64 }
     }
 
+    /// Pixel position of the top-left corner of the bounding box of cell `(i, j)`.
+    pub fn cell_origin(&self, cell: (i64, i64)) -> (i64, i64) {
+        (self.x + (cell.0 - cell.1) * self.w / 2, self.y + (cell.0 + cell.1) * self.h / 2)
+    }
+
+    /// The four corners of cell `(i, j)`'s diamond (top, right, bottom, left) in pixel edge coordinates.
+    pub fn cell_corners(&self, cell: (i64, i64)) -> [(f64, f64); 4] {
+        let (ox, oy) = self.cell_origin(cell);
+        let (x, y, w, h) = (ox as f64, oy as f64, self.w as f64, self.h as f64);
+        [(x + w / 2.0, y), (x + w, y + h / 2.0), (x + w / 2.0, y + h), (x, y + h / 2.0)]
+    }
+
     /// The cell `(i, j)` that contains pixel `(px, py)`.
     pub fn cell_at(&self, px: i32, py: i32) -> (i64, i64) {
         let (w, h) = (self.w, self.h);

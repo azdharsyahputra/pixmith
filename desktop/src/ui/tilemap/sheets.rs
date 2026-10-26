@@ -1,7 +1,7 @@
 //! The tilemap and slice sheets: New Tilemap Layer, Convert to Tilemap, Rename Tileset, Slice Properties and
 //! User Data (`TileSizeSheet`, `TilesetRenameSheet`, `SliceSheet`, `UserDataSheet`).
 
-use super::{Sheet, slices};
+use super::{Sheet, SizeForm, slices};
 use crate::app::PixmithApp;
 use crate::theme::{self, Colors, font, radius, space};
 use crate::ui::widgets::{self, DialogAction, NumberOpts, ds_number_field, ds_popup, ds_text_field};
@@ -26,43 +26,113 @@ pub fn show_sheets(app: &mut PixmithApp, ctx: &egui::Context) {
     }
 }
 
+/// Names of the grid shapes in the sheets' popup.
+pub const SHAPES: [&str; 2] = ["Square", "Isometric (diamond)"];
+/// The cell layouts of an isometric grid (Godot's `TileSet.tile_layout`).
+pub const LAYOUTS: [&str; 1] = ["Diamond Down"];
+
+fn int_number(ui: &mut Ui, id: &str, label: &str, value: &mut i32, range: (i32, i32), width: f32) {
+    let mut v = *value as f64;
+    let o = NumberOpts { range: (range.0 as f64, range.1 as f64), width: Some(width), ..Default::default() };
+    if ds_number_field(ui, id, label, &mut v, &o).changed {
+        *value = v as i32;
+    }
+}
+
+/// The fields of the size sheets: grid shape, then the tile (or diamond and tile image) size and the origin.
+fn form_fields(ui: &mut Ui, f: &mut SizeForm, convert: bool) {
+    if convert {
+        widgets::form_row(ui, "Grid", |ui| {
+            ui.label("Square");
+        });
+    } else {
+        widgets::form_row(ui, "Grid", |ui| {
+            if let Some(i) =
+                ds_popup(ui, "tilemap_shape", f.iso as usize, &SHAPES, None, true, "Shape of the grid cells")
+            {
+                f.set_iso(i == 1);
+            }
+        });
+    }
+    if f.iso {
+        widgets::form_row(ui, "Layout", |ui| {
+            ds_popup(ui, "tilemap_layout", 0, &LAYOUTS, None, true, "Row i runs down-right, j down-left");
+        });
+        widgets::form_row(ui, "Cell size", |ui| {
+            let (mut w, mut h) = (f.cell_w, f.cell_h);
+            widgets::number_field(ui, "CW", &mut w, 4..=1024, "px", 120.0);
+            widgets::number_field(ui, "CH", &mut h, 4..=1024, "px", 120.0);
+            if (w, h) != (f.cell_w, f.cell_h) {
+                f.set_cell(w, h);
+            }
+        });
+    }
+    let max = if f.iso { 1024 } else { 256 };
+    let (wl, hl) = if f.iso { ("Image width", "Image height") } else { ("Tile width", "Tile height") };
+    if f.iso {
+        widgets::form_row(ui, "Tile image", |ui| {
+            widgets::number_field(ui, "W", &mut f.tile_w, 1..=max, "px", 120.0);
+            widgets::number_field(ui, "H", &mut f.tile_h, 1..=max, "px", 120.0);
+        });
+        ui.label(
+            egui::RichText::new(
+                "Make the image taller than the cell for cliffs and trees; the diamond sits at its bottom.",
+            )
+            .font(theme::ui_font(font::CAPTION)),
+        );
+        widgets::form_row(ui, "Origin", |ui| {
+            int_number(ui, "tilemap_origin_x", "X", &mut f.origin.0, (-16384, 16384), 120.0);
+            int_number(ui, "tilemap_origin_y", "Y", &mut f.origin.1, (-16384, 16384), 120.0);
+        });
+    } else {
+        widgets::form_row(ui, wl, |ui| widgets::number_field(ui, "W", &mut f.tile_w, 1..=max, "px", 120.0));
+        widgets::form_row(ui, hl, |ui| widgets::number_field(ui, "H", &mut f.tile_h, 1..=max, "px", 120.0));
+    }
+    if convert {
+        ui.checkbox(&mut f.flip_aware, "Share flipped copies of tiles");
+    }
+}
+
 fn size_sheet(app: &mut PixmithApp, ctx: &egui::Context, convert: bool) {
     let tm = &mut app.tilemap;
-    let (mut w, mut h, mut flip) = (tm.sheet_w, tm.sheet_h, tm.sheet_flip_aware);
+    let mut f = tm.form.clone();
     let title = if convert { "Convert to Tilemap" } else { "New Tilemap Layer" };
-    let action = widgets::dialog(ctx, "tilemap-size", 320.0, title, None, |ui| {
-        widgets::form_row(ui, "Tile width", |ui| widgets::number_field(ui, "W", &mut w, 1..=256, "px", 120.0));
-        widgets::form_row(ui, "Tile height", |ui| widgets::number_field(ui, "H", &mut h, 1..=256, "px", 120.0));
-        if convert {
-            ui.checkbox(&mut flip, "Share flipped copies of tiles");
-        }
+    let action = widgets::dialog(ctx, "tilemap-size", 400.0, title, None, |ui| {
+        form_fields(ui, &mut f, convert);
         widgets::dialog_buttons(ui, None, Some("Cancel"), if convert { "Convert" } else { "Create" }, true)
     });
-    tm.sheet_w = w;
-    tm.sheet_h = h;
-    tm.sheet_flip_aware = flip;
+    tm.form = f.clone();
     match action {
         DialogAction::Primary => {
             tm.sheet = None;
-            let (w, h) = (w.clamp(1, 256), h.clamp(1, 256));
-            let tab = &mut app.tabs[app.active];
-            let layer = tab.layer;
-            if convert {
-                if tab.doc.convert_layer_to_tilemap(layer, w, h, flip) {
-                    app.tilemap.selected = 1;
-                    tab.changed();
-                } else {
-                    app.error = Some("Only normal layers can be converted to tilemaps.".to_string());
-                }
-            } else {
-                tab.playing = false;
-                tab.layer = tab.doc.new_tilemap_layer(layer, w, h);
-                app.tilemap.selected = 1;
-                tab.changed();
-            }
+            apply_form(app, &f, convert);
         }
         DialogAction::Cancel => tm.sheet = None,
         _ => {}
+    }
+}
+
+/// Creates the layer or converts the active one from the sheet's values.
+pub fn apply_form(app: &mut PixmithApp, f: &SizeForm, convert: bool) {
+    let (w, h) = f.tile();
+    let tab = &mut app.tabs[app.active];
+    let layer = tab.layer;
+    if convert {
+        if tab.doc.convert_layer_to_tilemap(layer, w, h, f.flip_aware) {
+            app.tilemap.selected = 1;
+            tab.changed();
+        } else {
+            app.error = Some("Only normal layers can be converted to tilemaps.".to_string());
+        }
+    } else {
+        tab.playing = false;
+        tab.layer = if f.iso {
+            tab.doc.new_iso_tilemap_layer(layer, (w, h), f.cell(), f.origin)
+        } else {
+            tab.doc.new_tilemap_layer(layer, w, h)
+        };
+        app.tilemap.selected = 1;
+        tab.changed();
     }
 }
 

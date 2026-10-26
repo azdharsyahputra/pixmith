@@ -142,7 +142,7 @@ extension SpriteModel {
     func selectIsometricTile(at p: (Int, Int)) -> Bool {
         guard p.0 >= 0, p.1 >= 0, p.0 < width, p.1 < height else { return false }
         stop()
-        let grid = IsoGrid.current
+        let grid = IsoGrid.active(for: self)
         let pts = IsoGrid.path(of: grid.rows(grid.cell(atX: p.0, y: p.1)))
         pixmith_sel_begin(doc, 0)
         pixmith_sel_poly(doc, pts, pts.count / 2)

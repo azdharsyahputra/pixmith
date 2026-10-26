@@ -139,7 +139,7 @@ extension SpriteModel {
 
     /// Draws the rectangle preview and marks cells that use a fallback tile because no tile has their exact mask.
     func drawMissingCells(_ ctx: CGContext) {
-        guard isTilemapLayer, let ts = tilesetIndex, terrainMode >= 0 else { return }
+        guard isTilemapLayer, let ts = tilesetIndex, terrainMode >= 0, !isIsoLayer else { return }
         let (tw, th) = tileSize(of: ts)
         let state = AutotileState.shared
         if state.brush, state.tool == .rect, let a = state.rectStart, let b = state.rectEnd, tw > 0, th > 0 {
@@ -361,11 +361,12 @@ struct AutotilePanel: View {
     private func create() -> some View {
         VStack(alignment: .leading, spacing: DS.Space.sm) {
             DSNote("Name a terrain and pick how its tiles connect. Painting terrain then picks the right tile for you.")
+            if iso { DSNote("Isometric layers connect through the diamond's four sides and four corners; the dual-grid Corners mode is not available.") }
             TextField("Name", text: $state.newName).dsTextField()
             HStack(spacing: DS.Space.sm - 2) {
-                DSPopup(selection: $state.newMode, options: (0..<3).map { (Int32($0), AutotileState.modeNames[$0]) },
-                        help: "How tiles connect", fill: true)
-                Button("Create") { model.createTerrain(name: state.newName, mode: state.newMode) }
+                DSPopup(selection: Binding(get: { iso && state.newMode == 2 ? 1 : state.newMode }, set: { state.newMode = $0 }),
+                        options: modeOptions, help: "How tiles connect", fill: true)
+                Button("Create") { model.createTerrain(name: state.newName, mode: iso && state.newMode == 2 ? 1 : state.newMode) }
                     .buttonStyle(DSBarButtonStyle(prominent: true))
             }
         }
@@ -373,7 +374,13 @@ struct AutotilePanel: View {
 
     private func modePicker(_ mode: Int32) -> some View {
         DSPopup(selection: Binding(get: { mode }, set: { model.setTerrainMode($0) }),
-                options: (0..<3).map { (Int32($0), AutotileState.modeNames[$0]) }, help: "How tiles connect", fill: true)
+                options: modeOptions, help: "How tiles connect", fill: true)
+    }
+
+    /// Isometric layers have no dual grid, so Corners is not offered there.
+    private var iso: Bool { model.isIsoLayer }
+    private var modeOptions: [(Int32, String)] {
+        (0..<(iso ? 2 : 3)).map { (Int32($0), AutotileState.modeNames[$0]) }
     }
 
     @ViewBuilder
@@ -502,6 +509,9 @@ struct AutotilePanel: View {
                 }
                 .onChange(of: tile) { _ in
                     state.weightText = String(pixmith_autotile_tile_weight(doc, layer, UInt32(tile)))
+                }
+                if model.isIsoLayer {
+                    DSNote("On diamonds N is the top-right side, E bottom-right, S bottom-left and W top-left; NE, SE, SW and NW are the right, bottom, left and top corners.")
                 }
             } else {
                 DSNote("Select a tile to edit its terrain edges.")

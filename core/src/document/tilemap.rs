@@ -6,10 +6,11 @@
 //! into the shared tile images by [`sync_cel`], so they affect every instance of a tile.
 
 use crate::document::color_mode::Encoder;
+use crate::document::iso::{self, Iso};
 use crate::document::{Cel, Editor, Sprite};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, CString};
 use std::io::{Read, Write};
 use std::ptr::null_mut;
@@ -39,12 +40,56 @@ const MAX_TILES: usize = 1 << 20;
 
 pub type Result<T> = std::result::Result<T, String>;
 
+/// How the cells of an isometric grid are laid out. Godot calls this `TileSet.tile_layout`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsoLayout {
+    /// Cell (i, j) has its box at `(x + (i - j) * w/2, y + (i + j) * h/2)`: `i` runs down-right, `j` down-left.
+    DiamondDown,
+}
+
+impl IsoLayout {
+    /// Value of Godot's `TileSet.tile_layout`.
+    pub fn godot_value(self) -> u8 {
+        match self {
+            IsoLayout::DiamondDown => 5,
+        }
+    }
+}
+
+/// The isometric shape of a tileset: the diamond cell (`cell_w` x `cell_h`, 2:1 for the usual look) that
+/// tiles are placed on, and where each tile image sits on it. Square tilesets have none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IsoSpec {
+    pub cell_w: u32,
+    pub cell_h: u32,
+    pub layout: IsoLayout,
+    /// Pivot of tiles that deviate from the default, by tile index: the point of the tile image (in pixels from
+    /// its top-left corner, edge coordinates) that sits on the center of the cell's diamond.
+    pub pivots: BTreeMap<u32, (i32, i32)>,
+}
+
+impl IsoSpec {
+    /// A spec with sanitized (even, in range) cell sides.
+    pub fn new(cell_w: u32, cell_h: u32) -> IsoSpec {
+        IsoSpec {
+            cell_w: iso::clamp_side(cell_w.min(iso::MAX_SIDE as u32) as i32) as u32,
+            cell_h: iso::clamp_side(cell_h.min(iso::MAX_SIDE as u32) as i32) as u32,
+            layout: IsoLayout::DiamondDown,
+            pivots: BTreeMap::new(),
+        }
+    }
+}
+
 /// A set of equally sized RGBA tiles. Tile 0 is the empty tile.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tileset {
     pub name: String,
+    /// Size of the tile images. For isometric tilesets the diamond cell is `iso.cell_w` x `iso.cell_h`; images
+    /// taller than the diamond (cliffs, tufts) stick out above it.
     pub tile_w: u32,
     pub tile_h: u32,
+    /// `Some` for isometric tilesets; `None` is the ordinary square grid.
+    pub iso: Option<IsoSpec>,
     /// Number shown in the UI for tile 1 (the file format default is 1).
     pub base_index: i16,
     /// Raw Aseprite tileset flags except the storage bits.
@@ -58,12 +103,47 @@ impl Tileset {
             name: name.into(),
             tile_w: tile_w.clamp(1, MAX_TILE_SIZE),
             tile_h: tile_h.clamp(1, MAX_TILE_SIZE),
+            iso: None,
             base_index: 1,
             flags: TS_ZERO_EMPTY,
             tiles: Vec::new(),
         };
         t.add_blank();
         t
+    }
+
+    /// An isometric tileset: `tile_w` x `tile_h` images on `cell_w` x `cell_h` diamonds.
+    pub fn new_iso(name: impl Into<String>, tile_w: u32, tile_h: u32, cell_w: u32, cell_h: u32) -> Self {
+        let mut t = Tileset::new(name, tile_w, tile_h);
+        t.iso = Some(IsoSpec::new(cell_w, cell_h));
+        t
+    }
+
+    pub fn is_iso(&self) -> bool {
+        self.iso.is_some()
+    }
+
+    /// The pivot of a tile of an isometric tileset: the image point that sits on the diamond's center. Unless
+    /// set, tiles are centered across and, when taller than the diamond, bottom-aligned (the diamond is the
+    /// bottom `cell_h` rows of the image); otherwise the image is centered. Square tilesets: the image center.
+    pub fn pivot(&self, tile: u32) -> (i32, i32) {
+        let (tw, th) = (self.tile_w as i32, self.tile_h as i32);
+        let Some(spec) = &self.iso else { return (tw / 2, th / 2) };
+        if let Some(&p) = spec.pivots.get(&tile) {
+            return p;
+        }
+        (tw / 2, if th > spec.cell_h as i32 { th - spec.cell_h as i32 / 2 } else { th / 2 })
+    }
+
+    /// The pivot as a Godot `texture_origin` (the tile's drawn position is `center - size/2 - origin`).
+    pub fn texture_origin(&self, tile: u32) -> (i32, i32) {
+        let (px, py) = self.pivot(tile);
+        (px - self.tile_w as i32 / 2, py - self.tile_h as i32 / 2)
+    }
+
+    /// The grid used to place this tileset's cells with the layer offset `offset` (isometric tilesets only).
+    pub fn iso_grid(&self, offset: (i32, i32)) -> Option<Iso> {
+        self.iso.as_ref().map(|i| Iso::new(i.cell_w as i32, i.cell_h as i32, offset.0, offset.1))
     }
 
     fn tile_len(&self) -> usize {
@@ -131,6 +211,12 @@ impl TileGrid {
             return true;
         }
         let (tx, ty) = self.cell_of(px, py, tw, th);
+        self.grow_rel(tx, ty, tw as i32, th as i32)
+    }
+
+    /// Grows the grid by whole rows and columns so that the cell at column `tx` and row `ty` (relative to the
+    /// grid, possibly outside it) exists; the origin moves by `sx` / `sy` per column / row.
+    fn grow_rel(&mut self, tx: i32, ty: i32, sx: i32, sy: i32) -> bool {
         if self.index(tx, ty).is_some() {
             return false;
         }
@@ -146,12 +232,57 @@ impl TileGrid {
             let src = row * self.w as usize;
             tiles[dst..dst + self.w as usize].copy_from_slice(&self.tiles[src..src + self.w as usize]);
         }
-        self.x += min_x * tw as i32;
-        self.y += min_y * th as i32;
+        self.x += min_x * sx;
+        self.y += min_y * sy;
         self.w = nw as u32;
         self.h = nh as u32;
         self.tiles = tiles;
         true
+    }
+
+    // Isometric grids: `x` and `y` are the cell coordinates (i, j) of the first column and row.
+
+    /// Index of isometric cell `(i, j)`, if the grid holds it.
+    pub fn index_cell(&self, i: i64, j: i64) -> Option<usize> {
+        let (tx, ty) = (i - self.x as i64, j - self.y as i64);
+        (tx >= 0 && ty >= 0 && tx < self.w as i64 && ty < self.h as i64)
+            .then(|| ty as usize * self.w as usize + tx as usize)
+    }
+
+    /// The tile value in isometric cell `(i, j)` (0 outside the grid).
+    pub fn cell_value(&self, i: i64, j: i64) -> u32 {
+        self.index_cell(i, j).map_or(0, |k| self.tiles[k])
+    }
+
+    /// Grows an isometric grid so cell `(i, j)` exists. Returns whether it grew.
+    fn grow_to_include_cell(&mut self, i: i64, j: i64) -> bool {
+        if i.abs() > iso::MAX_CELL || j.abs() > iso::MAX_CELL {
+            return false;
+        }
+        if self.w == 0 || self.h == 0 {
+            *self = TileGrid { x: i as i32, y: j as i32, w: 1, h: 1, tiles: vec![0] };
+            return true;
+        }
+        self.grow_rel((i - self.x as i64) as i32, (j - self.y as i64) as i32, 1, 1)
+    }
+
+    /// Calls `f(i, j, value)` for every non-empty cell of an isometric grid in draw order (back to front by
+    /// `i + j`, then left to right by `i`).
+    pub fn for_each_cell_in_draw_order(&self, mut f: impl FnMut(i64, i64, u32)) {
+        if self.w == 0 || self.h == 0 {
+            return;
+        }
+        let (x0, y0) = (self.x as i64, self.y as i64);
+        let (x1, y1) = (x0 + self.w as i64 - 1, y0 + self.h as i64 - 1);
+        for sum in x0 + y0..=x1 + y1 {
+            for i in x0.max(sum - y1)..=x1.min(sum - y0) {
+                let j = sum - i;
+                let v = self.tiles[(j - y0) as usize * self.w as usize + (i - x0) as usize];
+                if v != 0 {
+                    f(i, j, v);
+                }
+            }
+        }
     }
 }
 
@@ -214,8 +345,99 @@ pub fn render_grid(grid: &TileGrid, ts: &Tileset, width: usize, height: usize) -
     out
 }
 
-fn make_cel(opacity: u8, grid: TileGrid, ts: &Tileset, w: usize, h: usize) -> Cel {
-    Cel { opacity, pixels: render_grid(&grid, ts, w, h), tiles: Some(grid), ..Default::default() }
+/// Source-over compositing of straight-alpha RGBA pixels: `src` drawn onto `dst`.
+fn blend_over(dst: &mut [u8], src: &[u8]) {
+    let sa = src[3] as u32;
+    if sa == 0 {
+        return;
+    }
+    let da = dst[3] as u32;
+    if sa == 255 || da == 0 {
+        dst.copy_from_slice(&src[..4]);
+        return;
+    }
+    // Alpha scaled by 255: the result is sa + da * (1 - sa) and each channel the alpha-weighted mix.
+    let out_a255 = sa * 255 + da * (255 - sa);
+    for c in 0..3 {
+        let v = (src[c] as u32 * sa * 255 + dst[c] as u32 * da * (255 - sa) + out_a255 / 2) / out_a255;
+        dst[c] = v.min(255) as u8;
+    }
+    dst[3] = ((out_a255 + 127) / 255).min(255) as u8;
+}
+
+/// The pivot of tile `id` as drawn with `flags`: the image point that sits on the diamond's center.
+fn drawn_pivot(ts: &Tileset, id: u32, flags: u32) -> (i32, i32) {
+    let (tw, th) = (ts.tile_w as i32, ts.tile_h as i32);
+    let (mut px, mut py) = ts.pivot(id);
+    if flags & FLIP_D != 0 && tw == th {
+        std::mem::swap(&mut px, &mut py);
+    }
+    if flags & FLIP_X != 0 {
+        px = tw - px;
+    }
+    if flags & FLIP_Y != 0 {
+        py = th - py;
+    }
+    (px, py)
+}
+
+/// Canvas position of the top-left pixel of the tile image drawn in isometric cell `(i, j)`.
+fn iso_image_origin(grid: &Iso, ts: &Tileset, cell: (i64, i64), value: u32) -> (i64, i64) {
+    let (cx, cy) = grid.cell_center(cell);
+    let (px, py) = drawn_pivot(ts, value & TILE_ID_MASK, value & FLIP_MASK);
+    (cx - px as i64, cy - py as i64)
+}
+
+/// Composites an isometric tile grid into a full-canvas RGBA buffer. Cells are drawn back to front (by
+/// `i + j`, then `i`) with source-over blending, so tall tiles overlap the cells behind them correctly.
+/// `offset` is the canvas position of cell (0, 0)'s bounding box.
+pub fn render_iso(grid: &TileGrid, ts: &Tileset, offset: (i32, i32), width: usize, height: usize) -> Vec<u8> {
+    let mut out = vec![0u8; width * height * 4];
+    let Some(iso) = ts.iso_grid(offset) else { return out };
+    let (tw, th) = (ts.tile_w as usize, ts.tile_h as usize);
+    grid.for_each_cell_in_draw_order(|i, j, value| {
+        let id = (value & TILE_ID_MASK) as usize;
+        if !ts.usable(id) {
+            return;
+        }
+        let (ox, oy) = iso_image_origin(&iso, ts, (i, j), value);
+        if ox >= width as i64 || oy >= height as i64 || ox + tw as i64 <= 0 || oy + th as i64 <= 0 {
+            return;
+        }
+        let tile = &ts.tiles[id];
+        let (cx0, cx1) = ((-ox).max(0) as usize, (width as i64 - ox).min(tw as i64) as usize);
+        for cy in (-oy).max(0) as usize..(height as i64 - oy).min(th as i64) as usize {
+            let py = (oy + cy as i64) as usize;
+            for cx in cx0..cx1 {
+                let (u, v) = source_pixel(cx, cy, value, tw, th);
+                let s = (v * tw + u) * 4;
+                if tile[s + 3] == 0 {
+                    continue;
+                }
+                let d = (py * width + (ox + cx as i64) as usize) * 4;
+                blend_over(&mut out[d..d + 4], &tile[s..s + 4]);
+            }
+        }
+    });
+    out
+}
+
+/// Composites a tile grid of either shape; `offset` is the layer's isometric offset (ignored for square tilesets).
+pub fn render_cel(grid: &TileGrid, ts: &Tileset, offset: (i32, i32), width: usize, height: usize) -> Vec<u8> {
+    if ts.is_iso() {
+        render_iso(grid, ts, offset, width, height)
+    } else {
+        render_grid(grid, ts, width, height)
+    }
+}
+
+/// The isometric offset of a layer (0, 0 for layers that are not isometric tilemaps).
+fn layer_offset(s: &Sprite, layer: usize) -> (i32, i32) {
+    s.layers.get(layer).map_or((0, 0), |l| l.offset)
+}
+
+fn make_cel(opacity: u8, grid: TileGrid, ts: &Tileset, offset: (i32, i32), w: usize, h: usize) -> Cel {
+    Cel { opacity, pixels: render_cel(&grid, ts, offset, w, h), tiles: Some(grid), ..Default::default() }
 }
 
 fn tileset_of(s: &Sprite, layer: usize) -> Option<usize> {
@@ -227,17 +449,18 @@ fn tileset_of(s: &Sprite, layer: usize) -> Option<usize> {
 fn refresh_cel(s: &mut Sprite, frame: usize, layer: usize) {
     let (w, h) = (s.width as usize, s.height as usize);
     let Some(ti) = tileset_of(s, layer) else { return };
+    let off = layer_offset(s, layer);
     let ts = &s.tilesets[ti];
     let Some(Some(arc)) = s.cels.get_mut(frame).and_then(|r| r.get_mut(layer)) else { return };
     let cel = Arc::make_mut(arc);
     let empty = TileGrid::empty();
-    cel.pixels = render_grid(cel.tiles.as_ref().unwrap_or(&empty), ts, w, h);
+    cel.pixels = render_cel(cel.tiles.as_ref().unwrap_or(&empty), ts, off, w, h);
 }
 
 /// Whether a tilemap cel's pixels match what its grid renders to.
-fn cel_in_sync(cel: &Cel, ts: &Tileset, w: usize, h: usize) -> bool {
+fn cel_in_sync(cel: &Cel, ts: &Tileset, offset: (i32, i32), w: usize, h: usize) -> bool {
     let empty = TileGrid::empty();
-    let expected = render_grid(cel.tiles.as_ref().unwrap_or(&empty), ts, w, h);
+    let expected = render_cel(cel.tiles.as_ref().unwrap_or(&empty), ts, offset, w, h);
     cel.pixels.len() == expected.len()
         && cel.pixels.chunks_exact(4).zip(expected.chunks_exact(4)).all(|(a, b)| same_pixel(a, b))
 }
@@ -277,6 +500,10 @@ fn pixels_outside_grid(
 pub fn sync_cel(s: &mut Sprite, layer: usize, frame: usize, bbox: Option<(i32, i32, i32, i32)>) {
     let (w, h) = (s.width as usize, s.height as usize);
     let Some(ti) = tileset_of(s, layer) else { return };
+    if s.tilesets[ti].is_iso() {
+        sync_cel_iso(s, layer, frame, ti, bbox);
+        return;
+    }
     let Some(Some(arc)) = s.cels.get_mut(frame).and_then(|r| r.get_mut(layer)) else { return };
     let ts = &mut s.tilesets[ti];
     let (tw, th) = (ts.tile_w, ts.tile_h);
@@ -354,13 +581,18 @@ pub fn sync_cel(s: &mut Sprite, layer: usize, frame: usize, bbox: Option<(i32, i
     cel.pixels = render_grid(&grid, ts, w, h);
     cel.tiles = Some(grid);
 
+    refresh_users(s, ti, (frame, layer), &changed);
+}
+
+/// Re-renders every cel (other than `except`) that shows one of the modified tiles of tileset `ti`.
+fn refresh_users(s: &mut Sprite, ti: usize, except: (usize, usize), changed: &[u32]) {
     if changed.is_empty() {
         return;
     }
     let mut stale = Vec::new();
     for (f, row) in s.cels.iter().enumerate() {
         for (l, cel) in row.iter().enumerate() {
-            if (f, l) == (frame, layer) || tileset_of(s, l) != Some(ti) {
+            if (f, l) == except || tileset_of(s, l) != Some(ti) {
                 continue;
             }
             let uses = cel
@@ -377,6 +609,113 @@ pub fn sync_cel(s: &mut Sprite, layer: usize, frame: usize, bbox: Option<(i32, i
     }
 }
 
+/// The tile that owns canvas pixel (`px`, `py`) of an isometric tilemap cel, for writing a painted pixel back:
+/// the front-most cell whose tile image shows a visible pixel there, else the cell whose diamond contains the
+/// pixel. Returns the cell and the pixel's position inside the (drawn, i.e. flipped) tile image if it lies in it.
+fn iso_owner(grid: &TileGrid, ts: &Tileset, iso: &Iso, px: i32, py: i32) -> ((i64, i64), Option<(usize, usize)>) {
+    let (tw, th) = (ts.tile_w as i64, ts.tile_h as i64);
+    let reach = tw.max(th);
+    let (lo_i, hi_i, lo_j, hi_j) = iso.cells_touching(px as i64, py as i64, px as i64 + 1, py as i64 + 1, reach);
+    let mut best: Option<((i64, i64), (usize, usize))> = None;
+    for j in lo_j..=hi_j {
+        for i in lo_i..=hi_i {
+            let value = grid.cell_value(i, j);
+            let id = (value & TILE_ID_MASK) as usize;
+            if !ts.usable(id) {
+                continue;
+            }
+            let (ox, oy) = iso_image_origin(iso, ts, (i, j), value);
+            let (cx, cy) = (px as i64 - ox, py as i64 - oy);
+            if cx < 0 || cy < 0 || cx >= tw || cy >= th {
+                continue;
+            }
+            let (u, v) = source_pixel(cx as usize, cy as usize, value, tw as usize, th as usize);
+            if ts.tiles[id][(v * tw as usize + u) * 4 + 3] == 0 {
+                continue;
+            }
+            if best.is_none_or(|(b, _)| iso::draw_order(b, (i, j)).is_lt()) {
+                best = Some(((i, j), (cx as usize, cy as usize)));
+            }
+        }
+    }
+    if let Some((cell, at)) = best {
+        return (cell, Some(at));
+    }
+    let cell = iso.cell_at(px, py);
+    let value = grid.cell_value(cell.0, cell.1);
+    let shown = if ts.usable((value & TILE_ID_MASK) as usize) { value } else { 0 };
+    let (ox, oy) = iso_image_origin(iso, ts, cell, shown);
+    let (cx, cy) = (px as i64 - ox, py as i64 - oy);
+    let inside = cx >= 0 && cy >= 0 && cx < tw && cy < th;
+    (cell, inside.then_some((cx as usize, cy as usize)))
+}
+
+/// `sync_cel` for isometric tilemaps. Tiles overlap, so a painted pixel is written to the tile that owns it
+/// (see [`iso_owner`]); a pixel on an empty cell gets a fresh tile and the grid grows to hold it.
+fn sync_cel_iso(s: &mut Sprite, layer: usize, frame: usize, ti: usize, bbox: Option<(i32, i32, i32, i32)>) {
+    let (w, h) = (s.width as usize, s.height as usize);
+    let off = layer_offset(s, layer);
+    let Some(Some(arc)) = s.cels.get_mut(frame).and_then(|r| r.get_mut(layer)) else { return };
+    let ts = &mut s.tilesets[ti];
+    let Some(iso) = ts.iso_grid(off) else { return };
+    let (tw, th) = (ts.tile_w as usize, ts.tile_h as usize);
+    let cel = Arc::make_mut(arc);
+    let mut grid = cel.tiles.take().unwrap_or_else(TileGrid::empty);
+    if cel.pixels.len() != w * h * 4 {
+        cel.pixels.resize(w * h * 4, 0);
+    }
+    let expected = render_iso(&grid, ts, off, w, h);
+    let (bx0, by0, bx1, by1) = bbox.unwrap_or((0, 0, w as i32, h as i32));
+    let (bx0, by0, bx1, by1) =
+        (bx0.max(0) as usize, by0.max(0) as usize, (bx1.max(0) as usize).min(w), (by1.max(0) as usize).min(h));
+    let mut diffs: Vec<(usize, usize, [u8; 4])> = Vec::new();
+    for y in by0..by1 {
+        for x in bx0..bx1 {
+            let i = (y * w + x) * 4;
+            if !same_pixel(&cel.pixels[i..i + 4], &expected[i..i + 4]) {
+                diffs.push((x, y, cel.pixels[i..i + 4].try_into().unwrap()));
+            }
+        }
+    }
+    let mut changed: Vec<u32> = Vec::new();
+    for (x, y, c) in diffs {
+        let (cell, at) = iso_owner(&grid, ts, &iso, x as i32, y as i32);
+        let Some((cx, cy)) = at else { continue };
+        let mut value = grid.cell_value(cell.0, cell.1);
+        if !ts.usable((value & TILE_ID_MASK) as usize) {
+            if ts.tiles.len() >= MAX_TILES || c[3] == 0 {
+                continue;
+            }
+            grid.grow_to_include_cell(cell.0, cell.1);
+            let Some(k) = grid.index_cell(cell.0, cell.1) else { continue };
+            let n = ts.add_blank();
+            grid.tiles[k] = n;
+            value = n;
+            // The image of a fresh tile is placed with the default pivot, which may differ from where the
+            // owner search looked; recompute the position inside it.
+            let (ox, oy) = iso_image_origin(&iso, ts, cell, value);
+            let (nx, ny) = (x as i64 - ox, y as i64 - oy);
+            if nx < 0 || ny < 0 || nx >= tw as i64 || ny >= th as i64 {
+                continue;
+            }
+            let tile = Arc::make_mut(&mut ts.tiles[n as usize]);
+            tile[(ny as usize * tw + nx as usize) * 4..][..4].copy_from_slice(&c);
+            changed.push(n);
+            continue;
+        }
+        let id = (value & TILE_ID_MASK) as usize;
+        let (u, v) = source_pixel(cx, cy, value, tw, th);
+        let tile = Arc::make_mut(&mut ts.tiles[id]);
+        tile[(v * tw + u) * 4..][..4].copy_from_slice(&c);
+        if !changed.contains(&(id as u32)) {
+            changed.push(id as u32);
+        }
+    }
+    cel.pixels = render_iso(&grid, ts, off, w, h);
+    cel.tiles = Some(grid);
+    refresh_users(s, ti, (frame, layer), &changed);
+}
+
 /// Writes pixel edits of every tilemap cel back into its tiles, in place (see `sync_cel`).
 pub fn reconcile(s: &mut Sprite) {
     let (w, h) = (s.width as usize, s.height as usize);
@@ -384,7 +723,7 @@ pub fn reconcile(s: &mut Sprite) {
     for (f, row) in s.cels.iter().enumerate() {
         for (l, cel) in row.iter().enumerate() {
             let (Some(ti), Some(cel)) = (tileset_of(s, l), cel) else { continue };
-            if cel.tiles.is_none() || !cel_in_sync(cel, &s.tilesets[ti], w, h) {
+            if cel.tiles.is_none() || !cel_in_sync(cel, &s.tilesets[ti], layer_offset(s, l), w, h) {
                 todo.push((f, l));
             }
         }
@@ -424,7 +763,7 @@ pub fn normalized(s: &Sprite) -> Cow<'_, Sprite> {
     for (f, row) in s.cels.iter().enumerate() {
         for (l, cel) in row.iter().enumerate() {
             let (Some(ti), Some(cel)) = (tileset_of(s, l), cel) else { continue };
-            if cel.tiles.is_none() || !cel_in_sync(cel, &s.tilesets[ti], w, h) {
+            if cel.tiles.is_none() || !cel_in_sync(cel, &s.tilesets[ti], layer_offset(s, l), w, h) {
                 todo.push((f, l));
             }
         }
@@ -498,6 +837,124 @@ pub fn add_tilemap_layer(s: &mut Sprite, above: usize, tile_w: u32, tile_h: u32)
     at
 }
 
+/// Inserts an isometric tilemap layer above `above`, backed by a new empty tileset of `tile_w` x `tile_h`
+/// images on `cell_w` x `cell_h` diamonds. `offset` is the canvas position of cell (0, 0)'s bounding box.
+/// Returns the layer's index.
+pub fn add_iso_tilemap_layer(
+    s: &mut Sprite,
+    above: usize,
+    tile_w: u32,
+    tile_h: u32,
+    cell_w: u32,
+    cell_h: u32,
+    offset: (i32, i32),
+) -> usize {
+    let at = s.add_layer(above);
+    let n = s.tilesets.len();
+    s.tilesets.push(Tileset::new_iso(format!("Tileset {}", n + 1), tile_w, tile_h, cell_w, cell_h));
+    let layer = &mut s.layers[at];
+    layer.kind = KIND_TILEMAP;
+    layer.tileset = n as u32;
+    layer.name = format!("Tilemap {}", at + 1);
+    layer.offset = offset;
+    at
+}
+
+/// Moves an isometric tilemap layer's grid: `offset` is the canvas position of cell (0, 0)'s bounding box.
+/// Layers at different elevations use offsets that differ by the elevation (half a cell is `cell_h / 2`
+/// pixels). Returns false for layers that are not isometric tilemaps.
+pub fn set_layer_offset(s: &mut Sprite, layer: usize, offset: (i32, i32)) -> bool {
+    let Some(ti) = tileset_of(s, layer) else { return false };
+    if !s.tilesets[ti].is_iso() || offset.0.unsigned_abs() > 1 << 24 || offset.1.unsigned_abs() > 1 << 24 {
+        return false;
+    }
+    if s.layers[layer].offset == offset {
+        return true;
+    }
+    // Pixel edits made before the move belong to the old position.
+    for f in 0..s.frame_count() {
+        if s.cels[f][layer].is_some() {
+            sync_cel(s, layer, f, None);
+        }
+    }
+    s.layers[layer].offset = offset;
+    for f in 0..s.frame_count() {
+        refresh_cel(s, f, layer);
+    }
+    true
+}
+
+/// Sets (`Some`) or clears (`None`, back to the default) the pivot of a tile of an isometric tileset: the point
+/// of the tile image, in pixels from its top-left corner, that sits on the center of the cell's diamond. Tiles
+/// taller than the diamond default to bottom-aligned (see [`Tileset::pivot`]). Re-renders the layers using it.
+pub fn set_tile_pivot(s: &mut Sprite, ts: usize, tile: u32, pivot: Option<(i32, i32)>) -> bool {
+    let Some(t) = s.tilesets.get_mut(ts) else { return false };
+    let Some(spec) = t.iso.as_mut() else { return false };
+    if tile as usize >= t.tiles.len() || pivot.is_some_and(|(x, y)| x.abs() > 1 << 14 || y.abs() > 1 << 14) {
+        return false;
+    }
+    let mut test = spec.pivots.clone();
+    match pivot {
+        Some(p) => test.insert(tile, p),
+        None => test.remove(&tile),
+    };
+    if test == spec.pivots {
+        return true;
+    }
+    for f in 0..s.frame_count() {
+        for l in 0..s.layers.len() {
+            if tileset_of(s, l) == Some(ts) && s.cels[f][l].is_some() {
+                sync_cel(s, l, f, None);
+            }
+        }
+    }
+    if let Some(spec) = s.tilesets[ts].iso.as_mut() {
+        spec.pivots = test;
+    }
+    refresh_tileset_users(s, ts);
+    true
+}
+
+/// Whether any cel shows a tile of tileset `ts`.
+fn tileset_has_tiles(s: &Sprite, ts: usize) -> bool {
+    s.layers.iter().enumerate().any(|(l, _)| {
+        tileset_of(s, l) == Some(ts)
+            && s.cels.iter().any(|row| {
+                row.get(l)
+                    .and_then(|c| c.as_ref())
+                    .and_then(|c| c.tiles.as_ref())
+                    .is_some_and(|g| g.tiles.iter().any(|&v| v & TILE_ID_MASK != 0))
+            })
+    })
+}
+
+/// Turns a tileset into an isometric one (`Some((cell_w, cell_h))`) or back into a square one (`None`). Tiles keep
+/// their images, but a grid of tiles means something else in the other shape, so this only works while no layer
+/// shows any tile of the tileset. Returns false otherwise.
+pub fn set_tileset_iso(s: &mut Sprite, ts: usize, cell: Option<(u32, u32)>) -> bool {
+    if ts >= s.tilesets.len() || tileset_has_tiles(s, ts) {
+        return false;
+    }
+    let spec = cell.map(|(w, h)| IsoSpec::new(w, h));
+    if s.tilesets[ts].iso == spec {
+        return true;
+    }
+    s.tilesets[ts].iso = spec;
+    for l in 0..s.layers.len() {
+        if tileset_of(s, l) == Some(ts) {
+            if s.tilesets[ts].iso.is_none() {
+                s.layers[l].offset = (0, 0);
+            }
+            for f in 0..s.frame_count() {
+                if let Some(Some(arc)) = s.cels.get_mut(f).and_then(|r| r.get_mut(l)) {
+                    Arc::make_mut(arc).tiles = None;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Places a tile value (index | flip flags) in the cell under canvas pixel (`px`, `py`).
 /// Tile index 0 clears the cell. Returns whether anything changed.
 pub fn stamp(s: &mut Sprite, layer: usize, frame: usize, px: i32, py: i32, value: u32) -> bool {
@@ -509,6 +966,11 @@ pub fn stamp(s: &mut Sprite, layer: usize, frame: usize, px: i32, py: i32, value
     let value = value & (TILE_ID_MASK | FLIP_MASK);
     if (value & TILE_ID_MASK) as usize >= s.tilesets[ti].tiles.len() {
         return false;
+    }
+    if s.tilesets[ti].is_iso() {
+        let Some(iso) = s.tilesets[ti].iso_grid(layer_offset(s, layer)) else { return false };
+        let (i, j) = iso.cell_at(px, py);
+        return stamp_cell(s, layer, frame, i, j, value);
     }
     if s.cels[frame][layer].as_ref().is_some_and(|c| c.tiles.is_none()) {
         sync_cel(s, layer, frame, None);
@@ -542,11 +1004,53 @@ pub fn stamp(s: &mut Sprite, layer: usize, frame: usize, px: i32, py: i32, value
     changed
 }
 
+/// Places a tile value in isometric cell `(i, j)` of an isometric tilemap layer, growing the layer's grid when
+/// the cell lies outside it. Tile index 0 clears the cell. Returns whether anything changed.
+pub fn stamp_cell(s: &mut Sprite, layer: usize, frame: usize, i: i64, j: i64, value: u32) -> bool {
+    let Some(ti) = tileset_of(s, layer) else { return false };
+    if !s.tilesets[ti].is_iso() || frame >= s.frame_count() || i.abs() > iso::MAX_CELL || j.abs() > iso::MAX_CELL {
+        return false;
+    }
+    let value = value & (TILE_ID_MASK | FLIP_MASK);
+    if (value & TILE_ID_MASK) as usize >= s.tilesets[ti].tiles.len() {
+        return false;
+    }
+    if s.cels[frame][layer].as_ref().is_some_and(|c| c.tiles.is_none()) {
+        sync_cel(s, layer, frame, None);
+    }
+    let off = layer_offset(s, layer);
+    let (uw, uh) = (s.width as usize, s.height as usize);
+    let slot = &mut s.cels[frame][layer];
+    if slot.is_none() && value & TILE_ID_MASK == 0 {
+        return false;
+    }
+    let arc =
+        slot.get_or_insert_with(|| Arc::new(Cel { opacity: 255, pixels: vec![0; uw * uh * 4], ..Default::default() }));
+    let cel = Arc::make_mut(arc);
+    let mut grid = cel.tiles.take().unwrap_or_else(TileGrid::empty);
+    let mut changed = false;
+    if grid.index_cell(i, j).is_none() && value & TILE_ID_MASK != 0 {
+        changed = grid.grow_to_include_cell(i, j);
+    }
+    if let Some(k) = grid.index_cell(i, j) {
+        if grid.tiles[k] != value {
+            grid.tiles[k] = value;
+            changed = true;
+        }
+    }
+    if changed {
+        cel.pixels = render_iso(&grid, &s.tilesets[ti], off, uw, uh);
+    }
+    cel.tiles = Some(grid);
+    changed
+}
+
 /// Replaces references to tiles that no longer exist with the empty tile and refreshes the pixels
 /// (for cels that came from a clipboard older than the tileset's current contents).
 pub fn repair_cel(s: &mut Sprite, layer: usize, frame: usize) {
     let (w, h) = (s.width as usize, s.height as usize);
     let Some(ti) = tileset_of(s, layer) else { return };
+    let off = layer_offset(s, layer);
     let n = s.tilesets[ti].tiles.len();
     let Some(Some(arc)) = s.cels.get_mut(frame).and_then(|r| r.get_mut(layer)) else { return };
     if arc.tiles.as_ref().is_none_or(|g| g.tiles.iter().all(|v| ((v & TILE_ID_MASK) as usize) < n)) {
@@ -559,24 +1063,69 @@ pub fn repair_cel(s: &mut Sprite, layer: usize, frame: usize) {
             *v = 0;
         }
     }
-    cel.pixels = render_grid(&grid, &s.tilesets[ti], w, h);
+    cel.pixels = render_cel(&grid, &s.tilesets[ti], off, w, h);
     cel.tiles = Some(grid);
 }
 
-/// The tile value under a canvas pixel of a tilemap cel (0 if empty or not a tilemap).
+/// The tile value under a canvas pixel of a tilemap cel (0 if empty or not a tilemap). For isometric tilemaps
+/// this is the tile of the cell whose diamond contains the pixel; see [`tile_hit_at`] for the visible tile.
 pub fn tile_at(s: &Sprite, layer: usize, frame: usize, px: i32, py: i32) -> u32 {
     let Some(ti) = tileset_of(s, layer) else { return 0 };
     let ts = &s.tilesets[ti];
-    s.cels
-        .get(frame)
-        .and_then(|r| r.get(layer))
-        .and_then(|c| c.as_ref())
-        .and_then(|c| c.tiles.as_ref())
-        .and_then(|g| {
-            let (tx, ty) = g.cell_of(px, py, ts.tile_w, ts.tile_h);
-            g.index(tx, ty).map(|i| g.tiles[i])
-        })
-        .unwrap_or(0)
+    let grid = s.cels.get(frame).and_then(|r| r.get(layer)).and_then(|c| c.as_ref()).and_then(|c| c.tiles.as_ref());
+    let Some(g) = grid else { return 0 };
+    if let Some(iso) = ts.iso_grid(layer_offset(s, layer)) {
+        let (i, j) = iso.cell_at(px, py);
+        return g.cell_value(i, j);
+    }
+    let (tx, ty) = g.cell_of(px, py, ts.tile_w, ts.tile_h);
+    g.index(tx, ty).map_or(0, |i| g.tiles[i])
+}
+
+/// The cell `(i, j)` of an isometric tilemap layer that contains a canvas pixel; for square tilemaps the
+/// grid column and row (`pixel / tile size`, relative to the canvas, not the cel's grid).
+pub fn cell_at(s: &Sprite, layer: usize, px: i32, py: i32) -> Option<(i64, i64)> {
+    let ts = &s.tilesets[tileset_of(s, layer)?];
+    Some(match ts.iso_grid(layer_offset(s, layer)) {
+        Some(iso) => iso.cell_at(px, py),
+        None => ((px as i64).div_euclid(ts.tile_w as i64), (py as i64).div_euclid(ts.tile_h as i64)),
+    })
+}
+
+/// Canvas position of the top-left corner of cell `(i, j)`'s box (for square tilemaps `(i * tile_w, j * tile_h)`).
+pub fn cell_origin(s: &Sprite, layer: usize, i: i64, j: i64) -> Option<(i64, i64)> {
+    let ts = &s.tilesets[tileset_of(s, layer)?];
+    Some(match ts.iso_grid(layer_offset(s, layer)) {
+        Some(iso) => iso.cell_origin((i, j)),
+        None => (i * ts.tile_w as i64, j * ts.tile_h as i64),
+    })
+}
+
+/// The tile value in cell `(i, j)` of a tilemap layer's cel (0 if empty). Cell coordinates as in [`cell_at`], but
+/// for square tilemaps relative to the canvas origin (a square grid that starts elsewhere is addressed by canvas).
+pub fn tile_in_cell(s: &Sprite, layer: usize, frame: usize, i: i64, j: i64) -> u32 {
+    let Some(ti) = tileset_of(s, layer) else { return 0 };
+    let ts = &s.tilesets[ti];
+    if ts.is_iso() {
+        let grid = s.cels.get(frame).and_then(|r| r.get(layer)).and_then(|c| c.as_ref()).and_then(|c| c.tiles.as_ref());
+        return grid.map_or(0, |g| g.cell_value(i, j));
+    }
+    match (i32::try_from(i * ts.tile_w as i64), i32::try_from(j * ts.tile_h as i64)) {
+        (Ok(px), Ok(py)) => tile_at(s, layer, frame, px, py),
+        _ => 0,
+    }
+}
+
+/// The tile you see at a canvas pixel of an isometric tilemap: the front-most tile whose image has a visible
+/// pixel there (a cliff drawn over the cell behind it), as `(cell, tile value)`. Falls back to the cell whose
+/// diamond contains the pixel. `None` when that cell is empty too, or the layer is not isometric.
+pub fn tile_hit_at(s: &Sprite, layer: usize, frame: usize, px: i32, py: i32) -> Option<((i64, i64), u32)> {
+    let ts = &s.tilesets[tileset_of(s, layer)?];
+    let iso = ts.iso_grid(layer_offset(s, layer))?;
+    let grid = s.cels.get(frame)?.get(layer)?.as_ref()?.tiles.as_ref()?;
+    let (cell, _) = iso_owner(grid, ts, &iso, px, py);
+    let v = grid.cell_value(cell.0, cell.1);
+    ts.usable((v & TILE_ID_MASK) as usize).then_some((cell, v))
 }
 
 /// Converts a normal layer into a tilemap layer with a new tileset, deduplicating identical
@@ -674,8 +1223,10 @@ pub fn convert_to_tilemap_with(s: &mut Sprite, layer: usize, tile_w: u32, tile_h
         assign.push((f, converted.len()));
         converted.push((arc.opacity, grid, arc.user_data.clone()));
     }
-    let cels: Vec<Arc<Cel>> =
-        converted.into_iter().map(|(o, g, u)| Arc::new(Cel { user_data: u, ..make_cel(o, g, &ts, w, h) })).collect();
+    let cels: Vec<Arc<Cel>> = converted
+        .into_iter()
+        .map(|(o, g, u)| Arc::new(Cel { user_data: u, ..make_cel(o, g, &ts, (0, 0), w, h) }))
+        .collect();
     for (f, ci) in assign {
         s.cels[f][layer] = Some(cels[ci].clone());
     }
@@ -703,7 +1254,10 @@ fn flatten_layer(s: &mut Sprite, layer: usize) {
     let Some(ti) = tileset_of(s, layer) else { return };
     let (w, h) = (s.width as usize, s.height as usize);
     for f in 0..s.frame_count() {
-        if s.cels[f][layer].as_ref().is_some_and(|c| c.tiles.is_none() || !cel_in_sync(c, &s.tilesets[ti], w, h)) {
+        if s.cels[f][layer]
+            .as_ref()
+            .is_some_and(|c| c.tiles.is_none() || !cel_in_sync(c, &s.tilesets[ti], layer_offset(s, layer), w, h))
+        {
             sync_cel(s, layer, f, None);
         }
         if let Some(arc) = &mut s.cels[f][layer] {
@@ -712,6 +1266,7 @@ fn flatten_layer(s: &mut Sprite, layer: usize) {
     }
     s.layers[layer].kind = 0;
     s.layers[layer].tileset = 0;
+    s.layers[layer].offset = (0, 0);
 }
 
 fn tileset_in_use(s: &Sprite, ti: usize) -> bool {
@@ -803,6 +1358,22 @@ pub fn shifted(grid: Option<&TileGrid>, dx: i32, dy: i32) -> Option<TileGrid> {
     grid.map(|g| TileGrid { x: g.x.saturating_add(dx), y: g.y.saturating_add(dy), ..g.clone() })
 }
 
+/// Per layer: whether it is an isometric tilemap (its grid is in cells, its placement in `Layer::offset`).
+pub fn iso_layers(s: &Sprite) -> Vec<bool> {
+    (0..s.layers.len()).map(|l| tileset_of(s, l).is_some_and(|ti| s.tilesets[ti].is_iso())).collect()
+}
+
+/// Moves the grids of all isometric tilemap layers by (`dx`, `dy`) pixels (the canvas was resized or cropped).
+/// The caller re-renders the cels afterwards (`refresh_all`).
+pub fn shift_iso_offsets(s: &mut Sprite, dx: i32, dy: i32) {
+    for (l, iso) in iso_layers(s).into_iter().enumerate() {
+        if iso {
+            let o = s.layers[l].offset;
+            s.layers[l].offset = (o.0.saturating_add(dx), o.1.saturating_add(dy));
+        }
+    }
+}
+
 /// Prepares tilemaps for `filters::scale_sprite` to `nw` x `nh`. Tilesets whose layers can be
 /// scaled exactly (the canvas grows by whole factors, so each tile is enlarged by replicating
 /// pixels, and the tile size stays within limits) are enlarged along with the canvas. Layers
@@ -826,9 +1397,12 @@ pub fn prepare_scale(s: &mut Sprite, nw: u32, nh: u32) {
                         .is_some_and(|g| g.tiles.iter().any(|v| v & FLIP_D != 0))
                 })
         });
+        // Isometric cells keep their 2:1 look only when the canvas grows by the same factor on both axes.
+        let iso_skew = ts.is_iso() && fx != fy;
         *flag = !exact
             || fx == 0
             || fy == 0
+            || iso_skew
             || tw * fx > MAX_TILE_SIZE
             || th * fy > MAX_TILE_SIZE
             || (uses_d && ((tw == th) != (tw * fx == th * fy)));
@@ -857,8 +1431,22 @@ pub fn prepare_scale(s: &mut Sprite, nw: u32, nh: u32) {
         }
         ts.tile_w = (tw * fx) as u32;
         ts.tile_h = (th * fy) as u32;
+        let is_iso = ts.iso.is_some();
+        if let Some(spec) = ts.iso.as_mut() {
+            spec.cell_w *= fx as u32;
+            spec.cell_h *= fy as u32;
+            for p in spec.pivots.values_mut() {
+                *p = (p.0 * fx as i32, p.1 * fy as i32);
+            }
+        }
         for l in 0..s.layers.len() {
             if tileset_of(s, l) != Some(ti) {
+                continue;
+            }
+            if is_iso {
+                // Isometric grids are addressed in cells; only the pixel offset of the layer scales.
+                let o = s.layers[l].offset;
+                s.layers[l].offset = (o.0.saturating_mul(fx as i32), o.1.saturating_mul(fy as i32));
                 continue;
             }
             for row in s.cels.iter_mut() {
@@ -884,7 +1472,13 @@ pub fn duplicate_tile(s: &mut Sprite, ts: usize, tile: u32) -> Option<u32> {
         return None;
     }
     t.tiles.push(Arc::new((*src).clone()));
-    Some(t.tiles.len() as u32 - 1)
+    let new = t.tiles.len() as u32 - 1;
+    if let Some(spec) = t.iso.as_mut() {
+        if let Some(&p) = spec.pivots.get(&tile) {
+            spec.pivots.insert(new, p);
+        }
+    }
+    Some(new)
 }
 
 /// Deletes a tile. Cells showing it become empty, and later tile indices shift down by one in
@@ -896,6 +1490,13 @@ pub fn delete_tile(s: &mut Sprite, ts: usize, tile: u32) -> bool {
         return false;
     }
     t.tiles.remove(id);
+    if let Some(spec) = t.iso.as_mut() {
+        spec.pivots = std::mem::take(&mut spec.pivots)
+            .into_iter()
+            .filter(|&(k, _)| k as usize != id)
+            .map(|(k, p)| (if k as usize > id { k - 1 } else { k }, p))
+            .collect();
+    }
     for l in 0..s.layers.len() {
         if tileset_of(s, l) != Some(ts) {
             continue;
@@ -925,7 +1526,8 @@ pub fn assign_tileset(s: &mut Sprite, layer: usize, ts: usize) -> bool {
         return false;
     }
     let (a, b) = (&s.tilesets[old], &s.tilesets[ts]);
-    if (a.tile_w, a.tile_h) != (b.tile_w, b.tile_h) {
+    let cell = |t: &Tileset| t.iso.as_ref().map(|i| (i.cell_w, i.cell_h));
+    if (a.tile_w, a.tile_h, cell(a)) != (b.tile_w, b.tile_h, cell(b)) {
         return false;
     }
     let count = b.tiles.len();
@@ -1058,6 +1660,7 @@ pub fn finish_tilesets(raw: Vec<RawTileset>, to_rgba: impl Fn(&[u8]) -> Vec<u8>)
             name: r.name,
             tile_w: r.tile_w,
             tile_h: r.tile_h,
+            iso: None,
             base_index: r.base_index,
             flags: r.flags & !(TS_EXTERNAL | TS_EMBEDDED),
             tiles: Vec::new(),
@@ -1136,7 +1739,7 @@ pub fn cel_from_grid(
     h: usize,
 ) -> Option<Cel> {
     let ts = s_tilesets.get(layer.tileset as usize).filter(|_| layer.kind == KIND_TILEMAP)?;
-    Some(make_cel(opacity, grid, ts, w, h))
+    Some(make_cel(opacity, grid, ts, layer.offset, w, h))
 }
 
 /// Tileset chunk bodies for a sprite, in tileset index order (the index is the file ID).
@@ -1444,6 +2047,9 @@ pub unsafe extern "C" fn pixmith_tile_grid_origin(doc: *const Editor, layer: u32
         let Some(s) = sp(doc) else { return false };
         let Some(ti) = tileset_of(s, layer as usize) else { return false };
         let ts = &s.tilesets[ti];
+        if ts.is_iso() {
+            return false;
+        }
         let (x, y) = s
             .cels
             .get(frame as usize)
@@ -1457,6 +2063,261 @@ pub unsafe extern "C" fn pixmith_tile_grid_origin(doc: *const Editor, layer: u32
         true
     })
 }
+
+// MARK: C ABI: isometric tilemaps
+
+unsafe fn put<T: Copy, const N: usize>(out: *mut T, v: [T; N]) {
+    if !out.is_null() {
+        std::slice::from_raw_parts_mut(out, N).copy_from_slice(&v);
+    }
+}
+
+/// Inserts an isometric tilemap layer with a new isometric tileset (undoable): `tile_w` x `tile_h` tile images on
+/// `cell_w` x `cell_h` diamonds (even sizes; odd ones are rounded up), cell (0, 0)'s box at canvas pixel
+/// (`offset_x`, `offset_y`). Returns the layer index.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_add_iso_tilemap_layer(
+    doc: *mut Editor,
+    above: u32,
+    tile_w: u32,
+    tile_h: u32,
+    cell_w: u32,
+    cell_h: u32,
+    offset_x: i32,
+    offset_y: i32,
+) -> u32 {
+    crate::ffi::guarded("pixmith_add_iso_tilemap_layer", doc, || {
+        let Some(e) = ed(doc) else { return 0 };
+        e.checkpoint();
+        add_iso_tilemap_layer(&mut e.sprite, above as usize, tile_w, tile_h, cell_w, cell_h, (offset_x, offset_y))
+            as u32
+    })
+}
+
+/// Whether tileset `ts` is isometric.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tileset_is_iso(doc: *const Editor, ts: u32) -> bool {
+    crate::ffi::guarded("pixmith_tileset_is_iso", std::ptr::null_mut(), || {
+        tileset(doc, ts).is_some_and(Tileset::is_iso)
+    })
+}
+
+/// Writes the diamond cell size (`cell_w`, `cell_h`) of an isometric tileset into `out[2]`. False for square tilesets.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tileset_iso_cell(doc: *const Editor, ts: u32, out: *mut u32) -> bool {
+    crate::ffi::guarded("pixmith_tileset_iso_cell", std::ptr::null_mut(), || {
+        let Some(spec) = tileset(doc, ts).and_then(|t| t.iso.as_ref()) else { return false };
+        put(out, [spec.cell_w, spec.cell_h]);
+        true
+    })
+}
+
+/// Makes a tileset isometric with the given cell size, or square again with `cell_w` = 0 (undoable). Only works
+/// while no layer shows a tile of the tileset.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tileset_set_iso(doc: *mut Editor, ts: u32, cell_w: u32, cell_h: u32) -> bool {
+    crate::ffi::guarded("pixmith_tileset_set_iso", doc, || {
+        let Some(e) = ed(doc) else { return false };
+        let cell = (cell_w != 0).then_some((cell_w, cell_h.max(1)));
+        undoable(e, |s| set_tileset_iso(s, ts as usize, cell))
+    })
+}
+
+/// Writes the pivot of a tile of an isometric tileset (the point of the image, from its top-left corner, that sits
+/// on the diamond's center; the default when none was set) into `out[2]`. False for square tilesets.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_pivot(doc: *const Editor, ts: u32, tile: u32, out: *mut i32) -> bool {
+    crate::ffi::guarded("pixmith_tile_pivot", std::ptr::null_mut(), || {
+        let Some(t) = tileset(doc, ts).filter(|t| t.is_iso() && (tile as usize) < t.tiles.len()) else { return false };
+        let (x, y) = t.pivot(tile);
+        put(out, [x, y]);
+        true
+    })
+}
+
+/// Whether the pivot of a tile was set explicitly (false: it has the default).
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_pivot_is_set(doc: *const Editor, ts: u32, tile: u32) -> bool {
+    crate::ffi::guarded("pixmith_tile_pivot_is_set", std::ptr::null_mut(), || {
+        tileset(doc, ts).and_then(|t| t.iso.as_ref()).is_some_and(|i| i.pivots.contains_key(&tile))
+    })
+}
+
+/// Sets the pivot of a tile of an isometric tileset (undoable).
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_set_pivot(doc: *mut Editor, ts: u32, tile: u32, x: i32, y: i32) -> bool {
+    crate::ffi::guarded("pixmith_tile_set_pivot", doc, || {
+        ed(doc).is_some_and(|e| undoable(e, |s| set_tile_pivot(s, ts as usize, tile, Some((x, y)))))
+    })
+}
+
+/// Resets the pivot of a tile to the default (undoable).
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_clear_pivot(doc: *mut Editor, ts: u32, tile: u32) -> bool {
+    crate::ffi::guarded("pixmith_tile_clear_pivot", doc, || {
+        ed(doc).is_some_and(|e| undoable(e, |s| set_tile_pivot(s, ts as usize, tile, None)))
+    })
+}
+
+/// Writes the pivot as Godot's `texture_origin` (offset from the image center) into `out[2]`.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_texture_origin(doc: *const Editor, ts: u32, tile: u32, out: *mut i32) -> bool {
+    crate::ffi::guarded("pixmith_tile_texture_origin", std::ptr::null_mut(), || {
+        let Some(t) = tileset(doc, ts).filter(|t| t.is_iso() && (tile as usize) < t.tiles.len()) else { return false };
+        let (x, y) = t.texture_origin(tile);
+        put(out, [x, y]);
+        true
+    })
+}
+
+/// Whether the layer is an isometric tilemap layer.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_layer_is_iso(doc: *const Editor, layer: u32) -> bool {
+    crate::ffi::guarded("pixmith_layer_is_iso", std::ptr::null_mut(), || {
+        sp(doc).is_some_and(|s| tileset_of(s, layer as usize).is_some_and(|ti| s.tilesets[ti].is_iso()))
+    })
+}
+
+/// Writes the canvas pixel of cell (0, 0)'s box (the layer's grid offset) into `out[2]`. False for other layers.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_layer_grid_offset(doc: *const Editor, layer: u32, out: *mut i32) -> bool {
+    crate::ffi::guarded("pixmith_layer_grid_offset", std::ptr::null_mut(), || {
+        let Some(s) = sp(doc) else { return false };
+        if !tileset_of(s, layer as usize).is_some_and(|ti| s.tilesets[ti].is_iso()) {
+            return false;
+        }
+        let o = s.layers[layer as usize].offset;
+        put(out, [o.0, o.1]);
+        true
+    })
+}
+
+/// Moves an isometric layer's grid (undoable): canvas pixel of cell (0, 0)'s box. Layers at other elevations use
+/// offsets that differ by the elevation, e.g. half a cell is `cell_h / 2` pixels.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_layer_set_grid_offset(doc: *mut Editor, layer: u32, x: i32, y: i32) -> bool {
+    crate::ffi::guarded("pixmith_layer_set_grid_offset", doc, || {
+        ed(doc).is_some_and(|e| undoable(e, |s| set_layer_offset(s, layer as usize, (x, y))))
+    })
+}
+
+/// Writes the cell `(i, j)` containing canvas pixel (x, y) into `out[2]`: the diamond of the layer's isometric grid,
+/// or for square tilemaps `(x / tile_w, y / tile_h)` (relative to the canvas). False for other layers.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_layer_cell_at(doc: *const Editor, layer: u32, x: i32, y: i32, out: *mut i32) -> bool {
+    crate::ffi::guarded("pixmith_layer_cell_at", std::ptr::null_mut(), || {
+        let Some((i, j)) = sp(doc).and_then(|s| cell_at(s, layer as usize, x, y)) else { return false };
+        put(out, [i.clamp(i32::MIN as i64, i32::MAX as i64) as i32, j.clamp(i32::MIN as i64, i32::MAX as i64) as i32]);
+        true
+    })
+}
+
+/// Writes the canvas pixel of the top-left corner of cell `(i, j)`'s box into `out[2]`.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_layer_cell_origin(
+    doc: *const Editor,
+    layer: u32,
+    i: i32,
+    j: i32,
+    out: *mut i32,
+) -> bool {
+    crate::ffi::guarded("pixmith_layer_cell_origin", std::ptr::null_mut(), || {
+        let Some((x, y)) = sp(doc).and_then(|s| cell_origin(s, layer as usize, i as i64, j as i64)) else {
+            return false;
+        };
+        put(out, [x.clamp(i32::MIN as i64, i32::MAX as i64) as i32, y.clamp(i32::MIN as i64, i32::MAX as i64) as i32]);
+        true
+    })
+}
+
+/// The tile value in cell `(i, j)` of an isometric layer (0 if empty).
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_in_cell(doc: *const Editor, layer: u32, frame: u32, i: i32, j: i32) -> u32 {
+    crate::ffi::guarded("pixmith_tile_in_cell", std::ptr::null_mut(), || {
+        sp(doc).map_or(0, |s| tile_in_cell(s, layer as usize, frame as usize, i as i64, j as i64))
+    })
+}
+
+/// Places `tile` (index | flip flags) in cell `(i, j)` of an isometric layer; 0 clears it. The grid grows to hold
+/// the cell. Call `pixmith_begin_stroke` first, as for `pixmith_tile_stamp`.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_stamp_cell(
+    doc: *mut Editor,
+    layer: u32,
+    frame: u32,
+    i: i32,
+    j: i32,
+    tile: u32,
+) -> bool {
+    crate::ffi::guarded("pixmith_tile_stamp_cell", doc, || {
+        ed(doc).is_some_and(|e| {
+            let ok = stamp_cell(&mut e.sprite, layer as usize, frame as usize, i as i64, j as i64, tile);
+            if ok {
+                crate::gamedev::autotile::note_stamp_cell(
+                    &mut e.sprite,
+                    layer as usize,
+                    frame as usize,
+                    i as i64,
+                    j as i64,
+                    tile,
+                );
+            }
+            ok
+        })
+    })
+}
+
+/// The tile you see at canvas pixel (x, y) of an isometric layer (see [`tile_hit_at`]): writes `[i, j, tile value]`
+/// into `out[3]`. False when the cell is empty.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_hit_at(
+    doc: *const Editor,
+    layer: u32,
+    frame: u32,
+    x: i32,
+    y: i32,
+    out: *mut i32,
+) -> bool {
+    crate::ffi::guarded("pixmith_tile_hit_at", std::ptr::null_mut(), || {
+        let Some(((i, j), v)) = sp(doc).and_then(|s| tile_hit_at(s, layer as usize, frame as usize, x, y)) else {
+            return false;
+        };
+        put(out, [i as i32, j as i32, v as i32]);
+        true
+    })
+}
+
+/// Grid math without a document, for overlays: the cell `(i, j)` of the isometric grid (`w` x `h` cells, cell (0, 0)'s
+/// box at (`gx`, `gy`)) that contains pixel (x, y), into `out[2]`.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_iso_cell_at(w: i32, h: i32, gx: i32, gy: i32, x: i32, y: i32, out: *mut i32) -> bool {
+    crate::ffi::guarded("pixmith_iso_cell_at", std::ptr::null_mut(), || {
+        let (i, j) = Iso::new(w, h, gx, gy).cell_at(x, y);
+        put(out, [i.clamp(i32::MIN as i64, i32::MAX as i64) as i32, j.clamp(i32::MIN as i64, i32::MAX as i64) as i32]);
+        true
+    })
+}
+
+/// Grid math without a document: the pixel of the top-left corner of cell `(i, j)`'s box, into `out[2]`.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_iso_cell_origin(
+    w: i32,
+    h: i32,
+    gx: i32,
+    gy: i32,
+    i: i32,
+    j: i32,
+    out: *mut i32,
+) -> bool {
+    crate::ffi::guarded("pixmith_iso_cell_origin", std::ptr::null_mut(), || {
+        let (x, y) = Iso::new(w, h, gx, gy).cell_origin((i as i64, j as i64));
+        put(out, [x.clamp(i32::MIN as i64, i32::MAX as i64) as i32, y.clamp(i32::MIN as i64, i32::MAX as i64) as i32]);
+        true
+    })
+}
+
+#[cfg(test)]
+mod iso_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1784,7 +2645,7 @@ mod tests {
         tiles[8750] = id;
         tiles[8752 + 8751] = id | FLIP_Y;
         let grid = TileGrid { x: -70000, y: 0, w: 8752, h: 2, tiles };
-        let cel = make_cel(255, grid, &s.tilesets[0], 16, 16);
+        let cel = make_cel(255, grid, &s.tilesets[0], (0, 0), 16, 16);
         s.cels[0][l] = Some(Arc::new(cel));
         let before = s.render(0);
         assert_eq!(&before[..4], &RED);
@@ -1808,7 +2669,7 @@ mod tests {
         assert_eq!(s.layers[l].kind, KIND_TILEMAP);
         assert_eq!((s.tilesets[0].tile_w, s.tilesets[0].tile_h), (16, 16));
         assert_eq!(s.render(0), expected.render(0));
-        assert!(cel_in_sync(s.cels[0][l].as_ref().unwrap(), &s.tilesets[0], 32, 32));
+        assert!(cel_in_sync(s.cels[0][l].as_ref().unwrap(), &s.tilesets[0], (0, 0), 32, 32));
         // Still editable and still saves as a tilemap.
         s.draw_line(l, 0, 3, 3, 3, 3, BLUE, 1);
         let back = ase::read(&ase::write(&s)).unwrap();
@@ -2056,12 +2917,12 @@ mod tests {
         assert_eq!(&s.tilesets[0].tiles[1][..4], &[255, 0, 0, 255]);
         assert_eq!(&s.tilesets[0].tiles[1][4..8], &[0, 0, 255, 255]);
         let l = s.layers.iter().position(|l| l.kind == KIND_TILEMAP).unwrap();
-        assert!(cel_in_sync(s.cels[0][l].as_ref().unwrap(), &s.tilesets[0], 16, 16));
+        assert!(cel_in_sync(s.cels[0][l].as_ref().unwrap(), &s.tilesets[0], (0, 0), 16, 16));
         assert_eq!(px(&s, 0, 0), [255, 0, 0, 255]);
         convert(&mut s, ColorMode::Grayscale, 0);
         let g = &s.tilesets[0].tiles[1];
         assert_eq!(g[0], g[1]);
-        assert!(cel_in_sync(s.cels[0][l].as_ref().unwrap(), &s.tilesets[0], 16, 16));
+        assert!(cel_in_sync(s.cels[0][l].as_ref().unwrap(), &s.tilesets[0], (0, 0), 16, 16));
     }
 
     #[test]

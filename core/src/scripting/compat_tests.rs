@@ -900,6 +900,56 @@ fn commands_filters_selection_and_cels() {
 }
 
 #[test]
+fn command_warp_bends_the_cel_by_majority_vote() {
+    let mut e = editor(8, 8);
+    plain(
+        &mut e,
+        r#"
+        sprite:setPixel(1, 1, 0xFF0000FF)
+        sprite:setPixel(6, 6, 0x00FF00FF)
+
+        -- every handle moves one pixel right: a translate
+        app.command.Warp{ grid = {2, 2}, offsets = { {1, 0}, {1, 0}, {1, 0}, {1, 0} }, samples = 4 }
+        assert(sprite:getPixel(2, 1) == 0xFF0000FF and sprite:getPixel(1, 1) == 0)
+        assert(sprite:getPixel(7, 6) == 0x00FF00FF)
+        app.command.Undo()                     -- one undo step
+        assert(sprite:getPixel(1, 1) == 0xFF0000FF and sprite:getPixel(6, 6) == 0x00FF00FF)
+
+        -- named fields, a bigger grid and the smooth spline; an all-zero warp changes nothing
+        local zero = {}
+        for i = 1, 6 do zero[i] = { dx = 0, dy = 0 } end
+        app.command.Warp{ grid = { cols = 3, rows = 2 }, offsets = zero, smooth = true }
+        assert(sprite:getPixel(1, 1) == 0xFF0000FF and sprite:getPixel(6, 6) == 0x00FF00FF)
+
+        -- without offsets or a grid there is nothing to do either
+        app.command.Warp{}
+        assert(sprite:getPixel(1, 1) == 0xFF0000FF)
+
+        -- the selection limits the warp: the green pixel outside stays
+        sprite.selection:select(Rectangle(0, 0, 4, 4))
+        app.command.Warp{ grid = {2, 2}, offsets = { {1, 0}, {1, 0}, {1, 0}, {1, 0} } }
+        assert(sprite:getPixel(2, 1) == 0xFF0000FF and sprite:getPixel(1, 1) == 0)
+        assert(sprite:getPixel(6, 6) == 0x00FF00FF)
+        app.command.DeselectMask()
+        app.command.ClearCel()
+
+        -- a pin drags the pixel under it
+        sprite:setPixel(4, 4, 0x0000FFFF)
+        app.command.Warp{ pins = { { x = 4.5, y = 4.5, dx = 2, dy = 0, radius = 4 } } }
+        assert(sprite:getPixel(6, 4) == 0x0000FFFF and sprite:getPixel(4, 4) == 0)
+
+        -- wrong arguments are errors and change nothing
+        assert(not pcall(app.command.Warp, { grid = {2, 2}, offsets = { {1, 0} } }))
+        assert(not pcall(app.command.Warp, { grid = {1, 2} }))
+        assert(not pcall(app.command.Warp, { grid = {9, 2} }))
+        assert(not pcall(app.command.Warp, { grid = 4 }))
+        assert(not pcall(app.command.Warp, { pins = { { x = 1, y = 1 } } }))
+        assert(sprite:getPixel(6, 4) == 0x0000FFFF)
+        "#,
+    );
+}
+
+#[test]
 fn commands_files_and_sheets() {
     let dir = Dir::new("cmdfiles");
     let mut e = editor(2, 2);

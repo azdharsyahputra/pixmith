@@ -242,6 +242,83 @@ pub fn sheet_import_dialog(app: &mut PixmithApp, ctx: &egui::Context) {
     }
 }
 
+/// What File > Import > Trace Pixel Art asks (the options of `pixmith_trace.h`, `Dialogs/TraceView.swift` on macOS).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceImport {
+    pub path: PathBuf,
+    /// Size range searched for the cell size, in source pixels.
+    pub min_cell: u32,
+    pub max_cell: u32,
+    /// Palette: detect how many colors are needed, or exactly `colors`.
+    pub auto_colors: bool,
+    pub colors: u32,
+    pub remove_background: bool,
+    pub shadow: bool,
+    pub close_outline: bool,
+}
+
+impl TraceImport {
+    pub fn new(path: PathBuf) -> TraceImport {
+        TraceImport {
+            path,
+            min_cell: 3,
+            max_cell: 32,
+            auto_colors: false,
+            colors: 16,
+            remove_background: true,
+            shadow: true,
+            close_outline: false,
+        }
+    }
+
+    /// The options JSON of `pixmith_import_image_ex`.
+    pub fn options_json(&self) -> String {
+        let colors = if self.auto_colors { "\"auto\"".to_string() } else { self.colors.to_string() };
+        format!(
+            "{{\"mode\":\"trace_grid\",\"pitch\":\"auto\",\"min_pitch\":{},\"max_pitch\":{},\"colors\":{colors},\"remove_background\":{},\"shadow\":{},\"close_outline\":{}}}",
+            self.min_cell, self.max_cell, self.remove_background, self.shadow, self.close_outline
+        )
+    }
+}
+
+/// File > Import > Trace Pixel Art… (asks for the options next).
+pub fn import_trace(app: &mut PixmithApp) {
+    if let Some(path) = pick("Trace Pixel Art", "Images", &crate::ui::image_formats::OPEN_EXTENSIONS[3..]) {
+        app.files.trace_import = Some(TraceImport::new(path));
+    }
+}
+
+/// The options question of [`import_trace`], while it is open.
+pub fn trace_import_dialog(app: &mut PixmithApp, ctx: &egui::Context) {
+    use crate::ui::widgets::{self, DialogAction};
+    let Some(mut t) = app.files.trace_import.clone() else { return };
+    let name = t.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let action = widgets::dialog(ctx, "trace-import", 340.0, "Trace Pixel Art", Some(&name), |ui| {
+        widgets::form_row(ui, "Cell size", |ui| {
+            widgets::number_field(ui, "min", &mut t.min_cell, 2..=512, "px", 100.0);
+            widgets::number_field(ui, "max", &mut t.max_cell, 2..=512, "px", 100.0);
+        });
+        t.max_cell = t.max_cell.max(t.min_cell);
+        ui.checkbox(&mut t.auto_colors, "Choose the number of colors");
+        if !t.auto_colors {
+            widgets::form_row(ui, "Colors", |ui| widgets::number_field(ui, "N", &mut t.colors, 1..=256, "", 120.0));
+        }
+        ui.checkbox(&mut t.remove_background, "Remove the background");
+        ui.add_enabled(t.remove_background, egui::Checkbox::new(&mut t.shadow, "Remove the drop shadow"));
+        ui.checkbox(&mut t.close_outline, "Close gaps in the outline");
+        widgets::note(ui, "Finds the pixel grid of AI pixel art (fractional sizes too) and redraws it at real size.");
+        widgets::dialog_buttons(ui, None, Some("Cancel"), "Trace", true)
+    });
+    match action {
+        DialogAction::Primary => {
+            app.files.trace_import = None;
+            present(app, &t.path, Doc::import_trace(&t.path, &t.options_json()));
+        }
+        DialogAction::Cancel => app.files.trace_import = None,
+        _ => app.files.trace_import = Some(t),
+    }
+}
+
 /// File > Import > Sprite Sheet with JSON…
 pub fn import_sheet_with_json(app: &mut PixmithApp) {
     if let Some(path) = pick("Import Sprite Sheet with JSON", "Aseprite JSON", &["json"]) {

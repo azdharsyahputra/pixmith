@@ -26,9 +26,18 @@ impl Doc {
     /// Opens any supported image file (format detected from the content) as a new sprite. `ico_size` picks one size of
     /// an icon; without it the largest opens.
     pub fn import_image(path: &Path, ico_size: Option<u32>) -> Result<Doc, String> {
+        Doc::import_image_with(path, &ico_size.map_or(String::new(), |s| format!("{{\"ico_size\": {s}}}")))
+    }
+
+    /// Opens an image as a new sprite traced onto its pixel grid (`{"mode": "trace_grid", ...}`, see
+    /// `pixmith_trace.h`).
+    pub fn import_trace(path: &Path, options_json: &str) -> Result<Doc, String> {
+        Doc::import_image_with(path, options_json)
+    }
+
+    fn import_image_with(path: &Path, options_json: &str) -> Result<Doc, String> {
         let c = c_path(path)?;
-        let options = CString::new(ico_size.map_or(String::new(), |s| format!("{{\"ico_size\": {s}}}")))
-            .map_err(|_| "invalid options".to_string())?;
+        let options = CString::new(options_json).map_err(|_| "invalid options".to_string())?;
         // SAFETY: both strings are valid for the duration of the call.
         let ptr = unsafe { abi::pixmith_import_image_ex(c.as_ptr(), options.as_ptr()) };
         if ptr.is_null() {

@@ -45,6 +45,7 @@ pub enum Cmd {
     ImportGif,
     ImportPngLayer,
     ImportImage,
+    ImportTrace,
     Script(usize),
     RunScript,
     OpenScriptsFolder,
@@ -61,6 +62,7 @@ pub enum Cmd {
     Paste,
     Delete,
     FreeTransform,
+    Warp,
     Transform(u32),
     Preferences,
     // Select
@@ -251,6 +253,7 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
                         Item(Cmd::ImportGif),
                         Item(Cmd::ImportPngLayer),
                         Item(Cmd::ImportImage),
+                        Item(Cmd::ImportTrace),
                     ],
                 ),
                 sub("Scripts", script_entries),
@@ -268,6 +271,7 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
             Item(Cmd::Delete),
             Sep,
             Item(Cmd::FreeTransform),
+            Item(Cmd::Warp),
             Item(Cmd::Transform(0)),
             Item(Cmd::Transform(1)),
             Item(Cmd::Transform(2)),
@@ -394,6 +398,7 @@ pub fn entries(name: &str, app: &PixmithApp) -> Vec<Entry> {
                 f(DropShadow),
                 f(Despeckle),
                 f(CleanEdges),
+                f(RemoveBackground),
                 Sep,
                 f(LintSprite),
                 Sep,
@@ -485,6 +490,7 @@ impl Cmd {
             Cmd::ImportGif => t("Animated GIF as New Sprite\u{2026}"),
             Cmd::ImportPngLayer => t("PNG as New Layer\u{2026}"),
             Cmd::ImportImage => t("Image (WebP, JPEG, BMP, TGA, ICO, PCX, FLC) as New Sprite\u{2026}"),
+            Cmd::ImportTrace => t("Trace Pixel Art\u{2026}"),
             Cmd::Script(i) => hooks::script_names(app).get(i).cloned().unwrap_or_default(),
             Cmd::RunScript => t("Run Script\u{2026}"),
             Cmd::OpenScriptsFolder => t("Open Scripts Folder"),
@@ -499,6 +505,7 @@ impl Cmd {
             Cmd::Paste => t("Paste"),
             Cmd::Delete => t("Delete"),
             Cmd::FreeTransform => t("Free Transform"),
+            Cmd::Warp => t("Warp\u{2026}"),
             Cmd::Transform(op) => {
                 t(["Flip Horizontal", "Flip Vertical", "Rotate 90\u{b0} Clockwise", "Rotate 90\u{b0} Counterclockwise"]
                     [op.min(3) as usize])
@@ -661,6 +668,7 @@ impl Cmd {
             Cmd::SliceProperties | Cmd::DeleteSlice => hooks::has_selected_slice(app),
             Cmd::UserData(3) => doc.tag_count() > 0,
             Cmd::SnapPixels => doc.color_mode() != 0,
+            Cmd::Warp => !doc.xf_active() && app.selection.warp.is_none(),
             Cmd::ConvertToTilemap => !doc.layer_is_tilemap(tab.layer) && !doc.layer_is_group(tab.layer),
             Cmd::ConvertToNormal | Cmd::TileStamp => doc.layer_is_tilemap(tab.layer),
             Cmd::ShowReference => hooks::has_reference_image(app),
@@ -754,6 +762,7 @@ impl Cmd {
             Cmd::ImportGif => hooks::import_gif_as_sprite(app),
             Cmd::ImportPngLayer => hooks::import_png_as_layer(app),
             Cmd::ImportImage => app.import_image_dialog(),
+            Cmd::ImportTrace => hooks::import_trace(app),
             Cmd::Script(i) => {
                 if let Some(name) = hooks::script_names(app).get(i).cloned() {
                     hooks::run_script(app, &name);
@@ -782,6 +791,7 @@ impl Cmd {
             Cmd::Paste => hooks::paste(app),
             Cmd::Delete => hooks::delete_selection(app),
             Cmd::FreeTransform => hooks::free_transform(app),
+            Cmd::Warp => crate::ui::warp::start(app),
             Cmd::Transform(op) => hooks::transform(app, op),
             Cmd::Preferences => app.menus.open_preferences(),
             Cmd::SelectAll => hooks::select_all(app),

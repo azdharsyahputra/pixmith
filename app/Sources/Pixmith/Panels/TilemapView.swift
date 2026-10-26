@@ -118,8 +118,11 @@ extension SpriteModel {
     /// Other tilesets with the same tile size as the current layer's, which it could switch to.
     var compatibleTilesets: [Int] {
         guard let cur = tilesetIndex else { return [] }
-        let size = tileSize(of: cur)
-        return (0..<tilesetCount).filter { $0 != cur && tileSize(of: $0) == size }
+        let size = tileSize(of: cur), cell = isoCellSize(of: cur)
+        return (0..<tilesetCount).filter {
+            let c = isoCellSize(of: $0)
+            return $0 != cur && tileSize(of: $0) == size && c?.w == cell?.w && c?.h == cell?.h
+        }
     }
 
     func assignTileset(_ ts: Int) {
@@ -155,6 +158,7 @@ extension SpriteModel {
         let state = TilemapState.shared
         // Stamp mode belongs to the painting tools; selection, move, slice, picker and shape tools work as usual.
         guard state.stamp, isTilemapLayer, tool == .pencil || tool == .eraser else { return false }
+        if isIsoLayer { return handleIsoTileMouse(e, at: p, began: began) }
         if e.modifierFlags.contains(.option) {
             let v = pixmith_tile_at(doc, UInt32(layer), UInt32(frame), Int32(p.0), Int32(p.1))
             if v & 0x1FFF_FFFF != 0 { state.select(value: v) }
@@ -169,8 +173,12 @@ extension SpriteModel {
     }
 
     /// Draws tile boundaries over the canvas while a tilemap layer is selected.
-    func drawTileGrid(_ ctx: CGContext, size: CGSize, scale: CGFloat) {
+    func drawTileGrid(_ ctx: CGContext, size: CGSize, scale: CGFloat, dirty: CGRect? = nil) {
         guard let ts = tilesetIndex else { return }
+        if isIsoLayer {
+            drawIsoTileGrid(ctx, size: size, dirty: dirty ?? CGRect(origin: .zero, size: size))
+            return
+        }
         let (tw, th) = tileSize(of: ts)
         let sx = CGFloat(tw) * zoom, sy = CGFloat(th) * zoom
         guard tw > 0, th > 0, sx >= 4, sy >= 4 else { return }
@@ -254,12 +262,19 @@ struct TilemapPanel: View {
     var body: some View {
         if let ts = model.tilesetIndex {
             let (tw, th) = model.tileSize(of: ts)
-            InspectorSection("Tileset", id: "tileset", subtitle: "\(tw)×\(th) · \(model.tileCount(of: ts)) tiles") {
+            let iso = model.isoCellSize(of: ts)
+            InspectorSection("Tileset", id: "tileset",
+                             subtitle: (iso.map { "iso \($0.w)×\($0.h) · " } ?? "") + "\(tw)×\(th) · \(model.tileCount(of: ts)) tiles") {
                 IconButton("plus", help: "Add empty tile", compact: true) { model.addTile() }
                 DSMenuButton(help: "Tilemap layers") { TilemapMenuItems(model: model) }
             } content: {
                 VStack(alignment: .leading, spacing: DS.Space.md) {
+                    if iso != nil {
+                        IsoLayerPanel(model: model)
+                        Rectangle().fill(DSColor.separatorSoft).frame(height: 1)
+                    }
                     tilesetBody(ts, tw: tw, th: th)
+                    if iso != nil { IsoPivotPanel(model: model, ts: ts, tile: state.selected) }
                     AutotilePanel(model: model)
                 }
             }
@@ -287,6 +302,7 @@ struct TilemapPanel: View {
                 DSChip("X", help: "Flip horizontally", isOn: $state.flipX)
                 DSChip("Y", help: "Flip vertically", isOn: $state.flipY)
                 DSChip("D", help: "Flip diagonally (square tiles)", isOn: $state.flipD)
+                    .disabled(model.isoCellSize(of: ts) != nil)
             }
         }
     }
@@ -331,21 +347,88 @@ struct TileSizeSheet: View {
     @State private var width = 16
     @State private var height = 16
     @State private var flipAware = true
+    @State private var isometric = false
+    @State private var cellW = 96
+    @State private var cellH = 48
+    @State private var offsetX = 0
+    @State private var offsetY = 0
+    /// Whether the tile image size still follows the diamond size (tall tiles unlink it).
+    @State private var linked = true
+
+    private var iso: Bool { isometric && !convert }
 
     var body: some View {
         DSDialog(title: convert ? "Convert to Tilemap" : "New Tilemap Layer", primary: convert ? "Convert" : "Create",
-                 width: 320, onPrimary: {
-                     let w = min(max(width, 1), 256), h = min(max(height, 1), 256)
-                     if convert { model.convertToTilemap(tileWidth: w, tileHeight: h, flipAware: flipAware) }
-                     else { model.newTilemapLayer(tileWidth: w, tileHeight: h) }
+                 width: 360, onPrimary: {
+                     if iso {
+                         let cw = IsoGrid.size(min(max(cellW, 4), 256)), ch = IsoGrid.size(min(max(cellH, 4), 256))
+                         model.newIsoTilemapLayer(tileWidth: min(max(width, 1), 512), tileHeight: min(max(height, 1), 512),
+                                                  cellWidth: cw, cellHeight: ch, offsetX: offsetX, offsetY: offsetY)
+                     } else {
+                         let w = min(max(width, 1), 256), h = min(max(height, 1), 256)
+                         if convert { model.convertToTilemap(tileWidth: w, tileHeight: h, flipAware: flipAware) }
+                         else { model.newTilemapLayer(tileWidth: w, tileHeight: h) }
+                     }
                      dismiss()
                  }, onCancel: { dismiss() }) {
-            DSFormRow(label: "Tile width") { DSNumberField("W", value: $width, range: 1...256, unit: "px", width: 120) }
-            DSFormRow(label: "Tile height") { DSNumberField("H", value: $height, range: 1...256, unit: "px", width: 120) }
+            if !convert {
+                DSFormRow(label: "Grid") {
+                    DSSegmented(selection: $isometric, options: [
+                        .init(false, title: "Square", help: "Square cells"),
+                        .init(true, title: "Isometric", help: "2:1 diamond cells, as in Godot's isometric TileMap"),
+                    ])
+                }
+            }
+            if iso {
+                DSFormRow(label: "Layout") {
+                    DSPopup(selection: .constant(0), options: [(0, "Diamond Down")], help: "Godot tile layout", fill: true)
+                }
+                DSFormRow(label: "Cell size") {
+                    DSNumberField("W", value: Binding(get: { cellW }, set: { setCell(w: $0, h: cellH) }), range: 4...256, unit: "px", width: 92,
+                                  help: "Width of the diamond")
+                    DSNumberField("H", value: Binding(get: { cellH }, set: { setCell(w: cellW, h: $0) }), range: 4...256, unit: "px", width: 92,
+                                  help: "Height of the diamond (half the width for a 2:1 tile)")
+                }
+                DSFormRow(label: "Tile image") {
+                    DSNumberField("W", value: Binding(get: { width }, set: { width = $0; linked = false }), range: 1...512, unit: "px", width: 92,
+                                  help: "Width of a tile picture")
+                    DSNumberField("H", value: Binding(get: { height }, set: { height = $0; linked = false }), range: 1...512, unit: "px", width: 92,
+                                  help: "Height of a tile picture. Taller than the diamond for cliffs and trees.")
+                }
+                DSFormRow(label: "Grid offset") {
+                    DSNumberField("X", value: $offsetX, range: -100_000...100_000, unit: "px", width: 92,
+                                  help: "Canvas x of cell (0, 0)'s box")
+                    DSNumberField("Y", value: $offsetY, range: -100_000...100_000, unit: "px", width: 92,
+                                  help: "Canvas y of cell (0, 0)'s box")
+                }
+                DSNote("Cell size and offset start from View Options > Custom Grid > Isometric. Tiles taller than the diamond get their pivot at the bottom; edit it in the Tileset section.")
+            } else {
+                DSFormRow(label: "Tile width") { DSNumberField("W", value: $width, range: 1...256, unit: "px", width: 120) }
+                DSFormRow(label: "Tile height") { DSNumberField("H", value: $height, range: 1...256, unit: "px", width: 120) }
+            }
             if convert {
                 Toggle("Share flipped copies of tiles", isOn: $flipAware).toggleStyle(.checkbox)
             }
         }
+        .onChange(of: isometric) { on in
+            guard on else { return }
+            let s = ViewSettings.shared
+            // The iso grid's size, offset and a flat tile as defaults.
+            cellW = s.isoGridW
+            cellH = s.isoGridH
+            offsetX = s.isoGridX
+            offsetY = s.isoGridY
+            width = cellW
+            height = cellH
+            linked = true
+        }
+    }
+
+    private func setCell(w: Int, h: Int) {
+        let follows = linked && width == cellW && height == cellH
+        cellW = w
+        cellH = h
+        if follows { width = w; height = h }
     }
 }
 

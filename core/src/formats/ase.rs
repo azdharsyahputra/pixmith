@@ -189,6 +189,7 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
                         flags: lflags & !1,
                         user_data: Default::default(),
                         tileset,
+                        offset: (0, 0),
                     });
                 }
                 CHUNK_CEL => {
@@ -269,6 +270,15 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
     let (tilesets, tileset_ids) =
         tilemap::finish_tilesets(raw_tilesets, |d| to_rgba(d, depth, &palette, transparent, false));
     tilemap::resolve_layers(&mut layers, &tileset_ids);
+    let mut tilesets = tilesets;
+    if !tilesets.is_empty() {
+        // Isometric tilemap data rides in the sprite's user data (see `document::isoext`); it must be known
+        // before the tile grids are rendered.
+        let text = crate::document::slices::sprite_text(bytes);
+        if let Some(payload) = text.as_deref().and_then(crate::document::isoext::find) {
+            crate::document::isoext::apply(payload, &mut tilesets, &mut layers);
+        }
+    }
     let mut cels = vec![vec![None; layers.len()]; frame_count];
     let mut links = Vec::new();
     for p in pending {
@@ -329,6 +339,9 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
         color_profile: color_profile.unwrap_or_default(),
     };
     crate::document::slices::attach(bytes, &mut sprite);
+    if let Some(t) = sprite.extra.sprite.text.as_deref().filter(|t| crate::document::isoext::find(t).is_some()) {
+        sprite.extra.sprite.text = crate::document::isoext::without_line(t);
+    }
     // The defaults (1:1 pixels, 16x16 grid at the origin) are stored as zeros so new sprites compare equal.
     sprite.extra.pixel_ratio =
         if pixel_ratio == (1, 1) || pixel_ratio.0 == 0 || pixel_ratio.1 == 0 { (0, 0) } else { pixel_ratio };
@@ -667,6 +680,17 @@ fn linked_cel_body(layer: usize, cel: &Cel, source: usize) -> Vec<u8> {
 /// are written as links. Tileset pixels use the same color mode. Unused tilesets are dropped.
 pub fn write(s: &Sprite) -> Vec<u8> {
     let s = &*tilemap::normalized(s);
+    // Isometric tilemap data travels in the sprite's user data (see `document::isoext`).
+    let with_iso;
+    let s = match crate::document::isoext::line(s) {
+        Some(line) => {
+            let mut c = s.clone();
+            c.extra.sprite.text = Some(crate::document::isoext::with_line(s.extra.sprite.text.as_deref(), &line));
+            with_iso = c;
+            &with_iso
+        }
+        None => s,
+    };
     let mut enc = Encoder::new(s);
     let mut out = header(s.frame_count(), s.width, s.height, enc.depth(), s.palette.len());
     out[28] = s.transparent_index;

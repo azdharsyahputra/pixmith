@@ -277,8 +277,8 @@ fn damaged_and_hostile_input_is_an_error_not_a_panic() {
     assert!(err(b"PXMT\r\n\x1a\n\x01\x00").contains("truncated"));
     // A newer version is refused with a hint, not misread.
     let mut future = good.clone();
-    future[8] = 2;
-    assert!(err(&future).contains("version 2") && err(&future).contains("update Pixmith"));
+    future[8] = 3;
+    assert!(err(&future).contains("version 3") && err(&future).contains("update Pixmith"));
     // A flipped payload byte is caught by the checksum.
     let mut flipped = good.clone();
     let at = flipped.windows(4).position(|w| w == b"SPRT").unwrap() + 40;

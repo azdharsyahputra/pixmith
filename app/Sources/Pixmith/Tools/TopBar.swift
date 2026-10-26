@@ -8,6 +8,7 @@ struct ContextBar: View {
         VStack(spacing: 0) {
             DSToolbar { ToolOptionsBar(model: model) }
             TransformBar(model: model)
+            WarpBar(model: model)
         }
     }
 }

@@ -137,6 +137,47 @@ fn a_filter_sheet_previews_then_applies_one_undo_step() {
 }
 
 #[test]
+fn remove_background_sheet_clears_the_paper_and_is_one_undo_step() {
+    let mut h = harness(|app| {
+        let tab = app.tab_mut();
+        // White paper everywhere, a red dot in the middle.
+        tab.doc.begin_edit("Paper");
+        tab.doc.stroke_begin(0, 0, 16, 16, 0xFFFFFFFF, 64, 0);
+        tab.doc.stroke_end();
+        tab.doc.begin_edit("Dot");
+        tab.doc.stroke_begin(0, 0, 16, 16, 0xFF0000FF, 1, 0);
+        tab.doc.stroke_end();
+        tab.doc.touch();
+        tab.changed();
+    });
+    assert_eq!(pixel(&h, 1, 1), 0xFFFFFFFF);
+    let before = h.state().tab().doc.history_counts().0;
+    h.get_by_label("FX").click();
+    h.run();
+    h.get_by_label_contains("Remove Background").click();
+    h.run();
+    assert!(h.state().menus.filter.is_some());
+    assert!(h.query_by_label_contains("Also remove the drop shadow").is_some());
+    h.key_press(Key::Enter);
+    h.run();
+    assert_eq!(pixel(&h, 1, 1) & 0xFF, 0, "the paper is transparent");
+    assert_eq!(pixel(&h, 16, 16), 0xFF0000FF, "the dot stays");
+    assert_eq!(h.state().tab().doc.history_counts().0, before + 1);
+}
+
+#[test]
+fn trace_pixel_art_dialog_asks_for_its_options_and_cancels() {
+    use pixmith_desktop::ui::menus::hooks::TraceImport;
+    let mut h = harness(|app| app.files.trace_import = Some(TraceImport::new("hero.png".into())));
+    assert!(h.query_by_label_contains("Remove the drop shadow").is_some());
+    assert!(h.query_by_label_contains("Close gaps in the outline").is_some());
+    assert!(h.query_by_label_contains("hero.png").is_some());
+    h.key_press(Key::Escape);
+    h.run();
+    assert!(h.state().files.trace_import.is_none());
+}
+
+#[test]
 fn cancelling_a_filter_leaves_the_sprite_alone() {
     let mut h = harness(red_dot);
     h.get_by_label("FX").click();
@@ -305,4 +346,40 @@ fn recently_opened_files_are_remembered() {
     h.run();
     assert!(h.query_by_label_contains("recent.aseprite").is_some());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn edit_warp_opens_handles_and_apply_is_one_undo_step() {
+    let mut h = harness(red_dot);
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get_by_label_contains("Warp").click();
+    h.run();
+    assert!(h.state().selection.warp.is_some(), "the menu starts a warp session");
+    // The canvas already shows the (identity) preview; move every handle one pixel right, as a drag would.
+    h.state_mut().selection.warp.as_mut().unwrap().warp.offsets.fill((1.0, 0.0));
+    let before = h.state().tab().doc.history_counts().0;
+    assert!(h.state().canvas.preview.is_some(), "the canvas shows the preview while the warp is open");
+    h.key_press(Key::Enter);
+    h.run();
+    assert!(h.state().canvas.preview.is_none());
+    assert!(h.state().selection.warp.is_none());
+    assert_eq!(pixel(&h, 2, 1), 0xFF0000FF);
+    assert_eq!(pixel(&h, 1, 1), 0);
+    assert_eq!(h.state().tab().doc.history_counts().0, before + 1);
+}
+
+#[test]
+fn edit_warp_cancel_changes_nothing() {
+    let mut h = harness(red_dot);
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get_by_label_contains("Warp").click();
+    h.run();
+    h.state_mut().selection.warp.as_mut().unwrap().warp.offsets.fill((3.0, 0.0));
+    h.key_press(Key::Escape);
+    h.run();
+    assert!(h.state().canvas.preview.is_none());
+    assert!(h.state().selection.warp.is_none());
+    assert_eq!(pixel(&h, 1, 1), 0xFF0000FF);
 }

@@ -15,6 +15,7 @@ enum {
     PIXMITH_FILTER_DESPECKLE = 8,           // eight-connected (0/1)
     PIXMITH_FILTER_BLUR = 9,                // none (3x3, alpha-aware)
     PIXMITH_FILTER_SHARPEN = 10,            // none (3x3, alpha-aware)
+    PIXMITH_FILTER_REMOVE_BACKGROUND = 13,  // tolerance 0...255, flags (1 shadow, 2 global), [shadow depth 1...95 percent], [background 0xRRGGBBAA, alpha 0 = detect]; see pixmith_trace.h
     PIXMITH_FILTER_CURVES = 11,             // five curves (RGB master, R, G, B, A), each: point count, then x, y pairs (0...255)
     PIXMITH_FILTER_CLEAN_EDGES = 12,        // all optional, in this order: pass flags (1 halo, 2 despeckle, 4 thin outline,
                                             // 8 lone light pixels; default 7), halo rings (2), halo luma gain (40),

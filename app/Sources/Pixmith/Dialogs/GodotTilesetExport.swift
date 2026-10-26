@@ -139,6 +139,7 @@ struct GodotTilesetExportView: View {
                 DSPopup(selection: $s.tileset, options: (0..<tilesetNames.count).map { ($0, tilesetNames[$0]) },
                         help: "Tileset to export", fill: true)
             }
+            shapeRows
             DSFormRow(label: "Project folder", labelWidth: labelWidth) {
                 TextField("Folder with project.godot", text: $s.projectRoot).dsTextField()
                 Button("Choose…") { chooseRoot() }.buttonStyle(DSBarButtonStyle())
@@ -163,7 +164,8 @@ struct GodotTilesetExportView: View {
             }
             DSFormRow(label: "Collision", labelWidth: labelWidth) {
                 DSPopup(selection: $s.collision, options: [
-                    (0, "None"), (1, "Full tile square"), (2, "Traced from opaque pixels"),
+                    (0, "None"), (1, model.isoCellSize(of: s.tileset) != nil ? "Full diamond" : "Full tile square"),
+                    (2, "Traced from opaque pixels"),
                 ], help: "Physics shape for each tile", fill: true)
             }
             Rectangle().fill(DSColor.separatorSoft).frame(height: 1)
@@ -205,6 +207,32 @@ struct GodotTilesetExportView: View {
                 }
                 .frame(height: 96)
                 .background(RoundedRectangle(cornerRadius: DS.Radius.field).fill(DSColor.recessed))
+            }
+        }
+    }
+
+    /// Tile shape of the chosen tileset: the core writes TILE_SHAPE_ISOMETRIC / DIAMOND_DOWN for an isometric one.
+    @ViewBuilder
+    private var shapeRows: some View {
+        let ts = s.tileset
+        if ts < tilesetNames.count {
+            let (tw, th) = model.tileSize(of: ts)
+            if let cell = model.isoCellSize(of: ts) {
+                DSFormRow(label: "Tile shape", labelWidth: labelWidth) {
+                    DSPopup(selection: .constant(0), options: [(0, "Isometric")], help: "Written as TILE_SHAPE_ISOMETRIC", fill: true)
+                    DSPopup(selection: .constant(0), options: [(0, "Diamond Down")], help: "Written as TILE_LAYOUT_DIAMOND_DOWN", fill: true)
+                }
+                .disabled(true)
+                HStack(spacing: DS.Space.sm) {
+                    Color.clear.frame(width: labelWidth, height: 1)
+                    DSNote("Tile size \(cell.w)×\(cell.h) (the diamond), pictures \(tw)×\(th). Each tile's pivot becomes its texture_origin, and layers become y-sorted TileMapLayer nodes at their grid offset.")
+                    Spacer(minLength: 0)
+                }
+            } else {
+                DSFormRow(label: "Tile shape", labelWidth: labelWidth) {
+                    Text("Square · \(tw)×\(th)").font(DS.Font.body).foregroundStyle(DSColor.textSecondary)
+                    Spacer(minLength: 0)
+                }
             }
         }
     }

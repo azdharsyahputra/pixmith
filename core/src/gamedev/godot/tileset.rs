@@ -93,6 +93,24 @@ const NAMES: [&str; 8] = [
 ];
 /// Direction indexes in the order Godot writes them.
 const GODOT_ORDER: [usize; 8] = [2, 3, 4, 5, 6, 7, 0, 1];
+
+/// Godot peering names of an isometric (`DIAMOND_DOWN`) tile per ring direction. The ring walks the neighbours in
+/// cell space, N = (0, -1), E = (1, 0), S = (0, 1), W = (-1, 0), and the cell axes run down-right (`i`) and
+/// down-left (`j`) on screen, so the ring is turned by 45 degrees: N is the upper right edge, NE the right
+/// corner, E the lower right edge, SE the bottom corner, S the lower left edge, SW the left corner, W the upper
+/// left edge and NW the top corner. (Verified against `TileMapLayer.get_neighbor_cell` in Godot 4.7.2.)
+const NAMES_ISO: [&str; 8] = [
+    "top_right_side",
+    "right_corner",
+    "bottom_right_side",
+    "bottom_corner",
+    "bottom_left_side",
+    "left_corner",
+    "top_left_side",
+    "top_corner",
+];
+/// Direction indexes of an isometric tile in the order Godot writes them (the order of its `CellNeighbor` enum).
+const GODOT_ORDER_ISO: [usize; 8] = [1, 2, 3, 4, 5, 6, 7, 0];
 const DIRS: [(i8, i8); 8] = [(0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +132,9 @@ pub struct Alternative {
 pub struct TileSpec {
     /// Straight-alpha RGBA, `tile_w * tile_h * 4` bytes.
     pub pixels: Vec<u8>,
+    /// Godot `texture_origin`: where the drawn picture sits relative to the cell, in pixels. The picture is
+    /// drawn with its top-left corner at `center - size / 2 - origin`. Zero for square tiles.
+    pub origin: (i32, i32),
     /// Center terrain; `None` = the tile carries no terrain data.
     pub terrain: Option<u8>,
     /// Neighbour terrain per direction index (see module docs).
@@ -124,7 +145,14 @@ pub struct TileSpec {
 
 impl TileSpec {
     pub fn plain(pixels: Vec<u8>) -> Self {
-        TileSpec { pixels, terrain: None, peering: [None; 8], probability: 1.0, alternatives: Vec::new() }
+        TileSpec {
+            pixels,
+            origin: (0, 0),
+            terrain: None,
+            peering: [None; 8],
+            probability: 1.0,
+            alternatives: Vec::new(),
+        }
     }
 
     /// Single-terrain tile from a blob mask: every set bit points at terrain 0.
@@ -143,11 +171,15 @@ impl TileSpec {
 /// Everything about the tileset itself. `tiles` excludes the empty tile 0.
 #[derive(Clone, Debug)]
 pub struct GodotTilesetInput {
+    /// Size of the tile images (the atlas `texture_region_size`).
     pub tile_w: u32,
     pub tile_h: u32,
     pub tiles: Vec<TileSpec>,
     pub terrains: Vec<Terrain>,
     pub mode: TerrainMode,
+    /// `Some((cell_w, cell_h))` for an isometric tileset: `tile_shape = ISOMETRIC`, `tile_layout = DIAMOND_DOWN`
+    /// and `tile_size` is the diamond cell instead of the image size.
+    pub iso: Option<(u32, u32)>,
 }
 
 impl GodotTilesetInput {
@@ -162,7 +194,19 @@ impl GodotTilesetInput {
                 .collect(),
             terrains: vec![Terrain { name: name.to_string(), color }],
             mode,
+            iso: ts.iso.as_ref().map(|i| (i.cell_w, i.cell_h)),
         }
+        .with_origins(ts, skip)
+    }
+
+    /// Fills the tiles' `texture_origin` from the tileset's pivots (tile `k` is tileset tile `k + skip`).
+    fn with_origins(mut self, ts: &Tileset, skip: usize) -> Self {
+        if ts.is_iso() {
+            for (k, t) in self.tiles.iter_mut().enumerate() {
+                t.origin = ts.texture_origin((k + skip) as u32);
+            }
+        }
+        self
     }
 
     fn has_terrain(&self) -> bool {
@@ -212,6 +256,9 @@ pub struct SceneLayer {
     pub opacity: u8,
     /// (cell x, cell y, exported tile index, flip_h, flip_v, transpose)
     pub cells: Vec<(i32, i32, usize, bool, bool, bool)>,
+    /// Isometric layers: the node's `position` (the canvas pixel of cell (0, 0)'s top-left corner). Such nodes
+    /// also get `y_sort_enabled`, so tall tiles overlap the cells behind them like Pixmith draws them.
+    pub iso_position: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -495,6 +542,27 @@ pub fn collision_polygons(pixels: &[u8], tw: u32, th: u32, mode: Collision) -> V
     }
 }
 
+/// Collision polygons of one tile in Godot's tile space (origin = the cell center). Isometric tiles: the full
+/// polygon is the diamond cell, and rectangles of opaque pixels follow the picture's `texture_origin`.
+fn tile_polygons(inp: &GodotTilesetInput, t: &TileSpec, mode: Collision) -> Vec<Poly> {
+    let Some((cw, ch)) = inp.iso else { return collision_polygons(&t.pixels, inp.tile_w, inp.tile_h, mode) };
+    match mode {
+        Collision::None => Vec::new(),
+        Collision::Full => {
+            let (a, b) = (cw as f32 / 2.0, ch as f32 / 2.0);
+            vec![vec![[0.0, -b], [a, 0.0], [0.0, b], [-a, 0.0]]]
+        }
+        Collision::Opaque => {
+            // Picture-centered rectangles move by the origin: the picture's center sits at `-origin`.
+            let (ox, oy) = (-(t.origin.0 as f32), -(t.origin.1 as f32));
+            collision_polygons(&t.pixels, inp.tile_w, inp.tile_h, mode)
+                .into_iter()
+                .map(|p| p.into_iter().map(|[x, y]| [x + ox, y + oy]).collect())
+                .collect()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Text generation
 
@@ -515,9 +583,13 @@ fn write_tile(s: &mut String, inp: &GodotTilesetInput, opts: &Options, polys: &[
             }
             peering = transform_peering(&t.peering, a.flip_h, a.flip_v, a.transpose);
         }
+        if t.origin != (0, 0) {
+            let _ = writeln!(s, "{x}:{y}/{id}/texture_origin = Vector2i({}, {})", t.origin.0, t.origin.1);
+        }
         if let Some(c) = t.terrain {
             let _ = writeln!(s, "{x}:{y}/{id}/terrain_set = 0\n{x}:{y}/{id}/terrain = {c}");
-            for d in GODOT_ORDER {
+            let (order, names) = if inp.iso.is_some() { (GODOT_ORDER_ISO, NAMES_ISO) } else { (GODOT_ORDER, NAMES) };
+            for d in order {
                 let corner = d % 2 == 1;
                 let wanted = match inp.mode {
                     TerrainMode::Blob => true,
@@ -525,7 +597,7 @@ fn write_tile(s: &mut String, inp: &GodotTilesetInput, opts: &Options, polys: &[
                     TerrainMode::Sides => !corner,
                 };
                 if let (true, Some(v)) = (wanted, peering[d]) {
-                    let _ = writeln!(s, "{x}:{y}/{id}/terrains_peering_bit/{} = {v}", NAMES[d]);
+                    let _ = writeln!(s, "{x}:{y}/{id}/terrains_peering_bit/{} = {v}", names[d]);
                 }
             }
         }
@@ -580,13 +652,26 @@ pub fn tres_text(
         let _ = writeln!(s, "texture_region_size = Vector2i({}, {})", inp.tile_w, inp.tile_h);
         for k in 0..page.count {
             let t = &inp.tiles[page.first + k];
-            let polys = collision_polygons(&t.pixels, inp.tile_w, inp.tile_h, opts.collision);
+            let polys = tile_polygons(inp, t, opts.collision);
             write_tile(&mut s, inp, opts, &polys, t, k as u32 % page.cols, k as u32 / page.cols);
         }
         s.push('\n');
     }
     s.push_str("[resource]\n");
-    let _ = writeln!(s, "tile_size = Vector2i({}, {})", inp.tile_w, inp.tile_h);
+    match inp.iso {
+        Some((cw, ch)) => {
+            // TileSet.TILE_SHAPE_ISOMETRIC and TILE_LAYOUT_DIAMOND_DOWN; tile_size is the diamond cell.
+            let _ = writeln!(
+                s,
+                "tile_shape = 1\ntile_layout = {}",
+                crate::document::tilemap::IsoLayout::DiamondDown.godot_value()
+            );
+            let _ = writeln!(s, "tile_size = Vector2i({cw}, {ch})");
+        }
+        None => {
+            let _ = writeln!(s, "tile_size = Vector2i({}, {})", inp.tile_w, inp.tile_h);
+        }
+    }
     if inp.has_terrain() {
         let _ = writeln!(s, "terrain_set_0/mode = {}", inp.mode.godot_value());
         for (i, t) in inp.terrains.iter().enumerate() {
@@ -648,6 +733,12 @@ pub fn tscn_text(
         }
         used.push(name.clone());
         let _ = writeln!(s, "\n[node name=\"{}\" type=\"TileMapLayer\" parent=\".\"]", escape(&name));
+        if let Some((px, py)) = layer.iso_position {
+            if (px, py) != (0, 0) {
+                let _ = writeln!(s, "position = Vector2({px}, {py})");
+            }
+            s.push_str("y_sort_enabled = true\n");
+        }
         if layer.opacity < 255 {
             let _ = writeln!(s, "modulate = Color(1, 1, 1, {})", fmt_unit(layer.opacity as f32 / 255.0));
         }
@@ -893,8 +984,15 @@ pub fn scene_for(s: &Sprite, index: usize, root_name: &str) -> SceneInput {
                 if id < skip || id >= ts.tiles.len() {
                     continue;
                 }
-                let cx = (grid.x.div_euclid(ts.tile_w as i32)) + tx as i32;
-                let cy = (grid.y.div_euclid(ts.tile_h as i32)) + ty as i32;
+                // Isometric grids store their first cell's (i, j); square grids their pixel origin.
+                let (cx, cy) = if ts.is_iso() {
+                    (grid.x + tx as i32, grid.y + ty as i32)
+                } else {
+                    (
+                        (grid.x.div_euclid(ts.tile_w as i32)) + tx as i32,
+                        (grid.y.div_euclid(ts.tile_h as i32)) + ty as i32,
+                    )
+                };
                 cells.push((
                     cx,
                     cy,
@@ -905,7 +1003,12 @@ pub fn scene_for(s: &Sprite, index: usize, root_name: &str) -> SceneInput {
                 ));
             }
         }
-        layers.push(SceneLayer { name: l.name.clone(), opacity: l.opacity, cells });
+        layers.push(SceneLayer {
+            name: l.name.clone(),
+            opacity: l.opacity,
+            cells,
+            iso_position: ts.is_iso().then_some(l.offset),
+        });
     }
     SceneInput { root_name: root_name.to_string(), layers }
 }
@@ -933,14 +1036,20 @@ pub fn export_sprite_with(
                             t.terrain = a.terrain;
                             t.peering = a.peering;
                             t.probability = a.weight.unwrap_or(1.0);
-                            t.alternatives = a.alternatives.clone();
+                            // Flipped copies of isometric tiles are drawn with the cell's flip flags; Godot's
+                            // alternative tiles would need their peering bits mapped through the flip.
+                            if !ts.is_iso() {
+                                t.alternatives = a.alternatives.clone();
+                            }
                         }
                         t
                     })
                     .collect(),
                 terrains: a.terrains,
                 mode: a.mode,
+                iso: ts.iso.as_ref().map(|i| (i.cell_w, i.cell_h)),
             }
+            .with_origins(ts, skip)
         }
         None => {
             let name = if opts.fallback_name.is_empty() { &ts.name } else { &opts.fallback_name };
@@ -1094,5 +1203,7 @@ pub extern "C" fn pixmith_godot_tileset_warning() -> *mut c_char {
     })
 }
 
+#[cfg(test)]
+mod iso_tests;
 #[cfg(test)]
 mod tests;

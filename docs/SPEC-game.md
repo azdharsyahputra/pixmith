@@ -109,6 +109,15 @@ sources/0 = SubResource("src_0")
 2. Collision (opsional, versi berikutnya): `physics_layer_0/...` plus polygon per tile. Koordinat relatif ke tengah tile, bukan pojok kiri atas.
 3. Format `.tres` tidak punya schema resmi dan bisa berubah antar versi Godot. Wajib dites di Godot asli sebelum rilis.
 
+### 1C. TileSet isometrik
+
+Tileset isometrik (diamond 2:1, `core/src/document/iso.rs`) diekspor sebagai `tile_shape = 1` (ISOMETRIC) dan `tile_layout = 5` (DIAMOND_DOWN). `tile_size` adalah ukuran diamond (misal 96x48), `texture_region_size` ukuran gambar tile (misal 96x96 untuk tile yang lebih tinggi dari diamond). Sel `(i, j)` ada di `(x + (i - j) * w/2, y + (i + j) * h/2)`; posisi node `TileMapLayer` = offset grid layer (pojok kiri atas kotak sel (0, 0)), `y_sort_enabled = true`.
+
+- **Pivot tile** = titik di gambar tile (dari pojok kiri atas) yang jatuh di tengah diamond; default `(w/2, h - cell_h/2)` untuk gambar lebih tinggi dari diamond. Godot: `texture_origin = pivot - ukuran/2` (gambar digambar di `tengah sel - ukuran/2 - texture_origin`), ditulis hanya kalau tidak nol.
+- **Peering** mengikuti tetangga sel: N=(0,-1) `top_right_side`, NE=(1,-1) `right_corner`, E=(1,0) `bottom_right_side`, SE=(1,1) `bottom_corner`, S=(0,1) `bottom_left_side`, SW=(-1,1) `left_corner`, W=(-1,0) `top_left_side`, NW=(-1,-1) `top_corner`. Mode Sides memakai sisi, Blob = Match Corners and Sides. Dual-grid (Corners) belum ada di layer isometrik.
+- Flip tile isometrik ditulis sebagai flag sel (bukan tile alternatif).
+- Diverifikasi dengan Godot 4.7.2: hasil render scene sama persis per pixel dengan render Pixmith (lihat `write_godot_sample_project` di `gamedev/godot/tileset/iso_tests.rs`).
+
 ---
 
 ## 2. Auto-tiling

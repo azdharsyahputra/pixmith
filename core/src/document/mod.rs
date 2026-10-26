@@ -1,6 +1,8 @@
 //! In-memory sprite model and editing operations.
 
 pub mod color_mode;
+pub mod iso;
+pub mod isoext;
 pub mod layers;
 pub mod offcanvas;
 pub mod slices;
@@ -51,6 +53,9 @@ pub struct Layer {
     pub user_data: crate::document::slices::UserData,
     /// Index into `Sprite::tilesets` (tilemap layers only).
     pub tileset: u32,
+    /// Isometric tilemap layers only: canvas pixel of the top-left corner of cell (0, 0)'s bounding box.
+    /// Layers of different elevations use different offsets (a ledge half a cell higher is 24 px off).
+    pub offset: (i32, i32),
 }
 
 impl Layer {
@@ -65,6 +70,7 @@ impl Layer {
             flags: 2, // editable
             user_data: Default::default(),
             tileset: 0,
+            offset: (0, 0),
         }
     }
 
@@ -266,6 +272,12 @@ impl Sprite {
             let len = ts.tile_w as usize * ts.tile_h as usize * 4;
             if ts.tiles.iter().any(|t| t.len() != len) {
                 return Err("a tile image does not match its tileset's tile size".into());
+            }
+            if let Some(i) = &ts.iso {
+                let ok = |v: u32| (iso::MIN_SIDE as u32..=iso::MAX_SIDE as u32).contains(&v) && v.is_multiple_of(2);
+                if !ok(i.cell_w) || !ok(i.cell_h) {
+                    return Err("an isometric tileset has a cell size that is not even or out of range".into());
+                }
             }
         }
         let mut outside_bytes = 0usize;

@@ -1043,56 +1043,66 @@ pub fn resize_canvas(e: &mut Editor, nw: i32, nh: i32, ox: i32, oy: i32) -> bool
     }
     e.checkpoint();
     let mut done: std::collections::HashMap<*const Cel, Arc<Cel>> = std::collections::HashMap::new();
-    for cel in e.sprite.cels.iter_mut().flatten().flatten() {
-        // Linked cels share one buffer; convert it once so they stay linked.
-        if let Some(moved) = done.get(&Arc::as_ptr(cel)) {
-            *cel = moved.clone();
-            continue;
-        }
-        let key = Arc::as_ptr(cel);
-        let mut px = vec![0u8; nw as usize * nh as usize * 4];
-        let (x0, x1) = (ox.max(0), (ox + w).min(nw));
-        // The full content (also what lies beyond the old canvas) is placed on the new canvas.
-        let full = if cel.pixels.len() == w as usize * h as usize * 4 && cel.tiles.is_none() {
-            // Content that was cropped away by this resize is kept beyond the new edges, and content
-            // that was beyond the old edges can come into view.
-            let full = cel.full_image(w as usize, h as usize);
-            full.filter(|f| {
-                cel.outside.is_some()
-                    || f.x as i64 + ox as i64 + f.w as i64 > nw as i64
-                    || f.y as i64 + oy as i64 + f.h as i64 > nh as i64
-                    || f.x as i64 + (ox as i64) < 0
-                    || f.y as i64 + (oy as i64) < 0
-            })
-        } else {
-            None
-        };
-        for y in oy.max(0)..(oy + h).min(nh) {
-            if x0 < x1 && cel.pixels.len() == w as usize * h as usize * 4 {
-                let src = px_index(w as u32, x0 - ox, y - oy);
-                let dst = px_index(nw as u32, x0, y);
-                let n = (x1 - x0) as usize * 4;
-                px[dst..dst + n].copy_from_slice(&cel.pixels[src..src + n]);
+    // Isometric tilemaps are addressed in cells: their layer offset moves with the content, not their grid.
+    let iso_layers = crate::document::tilemap::iso_layers(&e.sprite);
+    for row in e.sprite.cels.iter_mut() {
+        for (layer, cel) in row.iter_mut().enumerate() {
+            let Some(cel) = cel else { continue };
+            // Linked cels share one buffer; convert it once so they stay linked.
+            if let Some(moved) = done.get(&Arc::as_ptr(cel)) {
+                *cel = moved.clone();
+                continue;
             }
+            let key = Arc::as_ptr(cel);
+            let mut px = vec![0u8; nw as usize * nh as usize * 4];
+            let (x0, x1) = (ox.max(0), (ox + w).min(nw));
+            // The full content (also what lies beyond the old canvas) is placed on the new canvas.
+            let full = if cel.pixels.len() == w as usize * h as usize * 4 && cel.tiles.is_none() {
+                // Content that was cropped away by this resize is kept beyond the new edges, and content
+                // that was beyond the old edges can come into view.
+                let full = cel.full_image(w as usize, h as usize);
+                full.filter(|f| {
+                    cel.outside.is_some()
+                        || f.x as i64 + ox as i64 + f.w as i64 > nw as i64
+                        || f.y as i64 + oy as i64 + f.h as i64 > nh as i64
+                        || f.x as i64 + (ox as i64) < 0
+                        || f.y as i64 + (oy as i64) < 0
+                })
+            } else {
+                None
+            };
+            for y in oy.max(0)..(oy + h).min(nh) {
+                if x0 < x1 && cel.pixels.len() == w as usize * h as usize * 4 {
+                    let src = px_index(w as u32, x0 - ox, y - oy);
+                    let dst = px_index(nw as u32, x0, y);
+                    let n = (x1 - x0) as usize * 4;
+                    px[dst..dst + n].copy_from_slice(&cel.pixels[src..src + n]);
+                }
+            }
+            // Tile grids move with the content; their pixels are re-rendered below.
+            let tiles = if iso_layers.get(layer).copied().unwrap_or(false) {
+                cel.tiles.clone()
+            } else {
+                crate::document::tilemap::shifted(cel.tiles.as_ref(), ox, oy)
+            };
+            let mut moved = Cel {
+                opacity: cel.opacity,
+                pixels: px,
+                tiles,
+                user_data: cel.user_data.clone(),
+                z_index: cel.z_index,
+                ..Default::default()
+            };
+            if let Some(f) = full {
+                // Fails only for content that would lie too far away for the file format, which is then dropped.
+                let _ = moved.set_full(nw as usize, nh as usize, (f.x + ox, f.y + oy, f.w, f.h), &f.rgba);
+            }
+            let moved = Arc::new(moved);
+            done.insert(key, moved.clone());
+            *cel = moved;
         }
-        // Tile grids move with the content; their pixels are re-rendered below.
-        let tiles = crate::document::tilemap::shifted(cel.tiles.as_ref(), ox, oy);
-        let mut moved = Cel {
-            opacity: cel.opacity,
-            pixels: px,
-            tiles,
-            user_data: cel.user_data.clone(),
-            z_index: cel.z_index,
-            ..Default::default()
-        };
-        if let Some(f) = full {
-            // Fails only for content that would lie too far away for the file format, which is then dropped.
-            let _ = moved.set_full(nw as usize, nh as usize, (f.x + ox, f.y + oy, f.w, f.h), &f.rgba);
-        }
-        let moved = Arc::new(moved);
-        done.insert(key, moved.clone());
-        *cel = moved;
     }
+    crate::document::tilemap::shift_iso_offsets(&mut e.sprite, ox, oy);
     e.sprite.extra.shifted(ox, oy);
     e.sprite.width = nw as u32;
     e.sprite.height = nh as u32;

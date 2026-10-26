@@ -18,8 +18,12 @@ pub type Result<T> = std::result::Result<T, String>;
 
 /// Like PNG's: a non-ASCII byte, a DOS and a Unix line ending and Ctrl-Z catch text-mode transfers.
 pub const MAGIC: [u8; 8] = *b"PXMT\r\n\x1a\n";
-/// The version this code writes and the newest it reads.
-pub const VERSION: u16 = 1;
+/// The newest version this code reads.
+pub const VERSION: u16 = 2;
+/// The version of files that need nothing newer. Version 2 adds isometric tilemaps (`document::isoext`); a file
+/// that has none is still written as version 1, so older Pixmith versions keep reading it, and a file that has
+/// them is refused by older versions instead of being shown wrongly.
+pub const BASE_VERSION: u16 = 1;
 const HEADER_LEN: u64 = 10;
 
 pub const TAG_META: [u8; 4] = *b"META";
@@ -236,7 +240,8 @@ pub fn write_with(s: &Sprite, previous: Option<&Meta>) -> Result<Vec<u8>> {
         .and_then(|t| export::encode_png(&t.rgba, t.width as usize, t.height as usize).ok());
     let mut out = Vec::with_capacity(sprite.len() + thumb.as_ref().map_or(0, Vec::len) + 512);
     out.extend(MAGIC);
-    out.extend(VERSION.to_le_bytes());
+    let version = if crate::document::isoext::needed(s) { VERSION } else { BASE_VERSION };
+    out.extend(version.to_le_bytes());
     put_chunk(&mut out, TAG_META, meta.to_json().as_bytes())?;
     if let Some(t) = &thumb {
         put_chunk(&mut out, TAG_THUMB, t)?;

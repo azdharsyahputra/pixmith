@@ -19,4 +19,5 @@ pub mod title_row;
 pub mod tool_rail;
 pub mod tools;
 pub mod transform;
+pub mod warp;
 pub mod widgets;

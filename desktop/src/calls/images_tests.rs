@@ -148,3 +148,43 @@ fn export_kinds_map_to_formats_the_core_writes() {
     assert!(doc.export_image(Some(9), 1, &dir.join("x.bmp"), "{}").is_err());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+#[allow(clippy::chunks_exact_to_as_chunks)]
+fn trace_import_opens_pseudo_pixel_art_at_real_size() {
+    use crate::ui::menus::hooks::TraceImport;
+    let dir = scratch("trace");
+    // A 12 x 12 sprite of four colors, enlarged by 7.3 with nearest-neighbor sampling (no margin, no soft edges).
+    let colors = [[200u8, 40, 40], [40, 160, 60], [30, 30, 200], [240, 220, 40]];
+    let sprite = |x: usize, y: usize| colors[(x * 7 + y * 13 + x * y) % 4];
+    let (w, h) = (88usize, 88usize);
+    let mut rgba = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let c = sprite(((x as f64 + 0.5) / 7.3) as usize, ((y as f64 + 0.5) / 7.3) as usize);
+            rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    let path = dir.join("pseudo.png");
+    let mut source = pixmith_core::document::Sprite::new(w as u32, h as u32);
+    source.cels[0][0] = Some(std::sync::Arc::new(pixmith_core::document::Cel { pixels: rgba, ..Default::default() }));
+    std::fs::write(&path, pixmith_core::formats::export::frame_png(&source, 0, 1).unwrap()).unwrap();
+
+    let mut t = TraceImport::new(path.clone());
+    t.remove_background = false;
+    t.colors = 4;
+    let json = t.options_json();
+    let parsed = pixmith_core::formats::json::parse(&json).unwrap();
+    pixmith_core::paint::trace::TraceOptions::from_json(&parsed).expect("the dialog writes options the core accepts");
+    let doc = Doc::import_trace(&path, &json).unwrap();
+    assert_eq!((doc.width(), doc.height()), (12, 12));
+    let got = pixels(&doc, 0);
+    for y in 0..12 {
+        for x in 0..12 {
+            let want = sprite(x, y);
+            assert_eq!(&got[(y * 12 + x) * 4..][..4], &[want[0], want[1], want[2], 255], "cell {x},{y}");
+        }
+    }
+    // Options the core refuses come back as an error, not a panic.
+    assert!(Doc::import_trace(&path, "{\"mode\":\"trace_grid\",\"colors\":\"lots\"}").is_err());
+}

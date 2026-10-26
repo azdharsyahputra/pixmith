@@ -455,6 +455,7 @@ struct SelectionCommands: Commands {
             Divider()
             Button("Free Transform") { model.startTransform() }
                 .keyboardShortcut("t")
+            Button("Warp…") { model.startWarp() }
             Button("Flip Horizontal") { model.transform(0) }
             Button("Flip Vertical") { model.transform(1) }
             Button("Rotate 90° Clockwise") { model.transform(2) }

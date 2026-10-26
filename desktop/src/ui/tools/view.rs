@@ -572,6 +572,9 @@ pub struct Scene<'a> {
     pub checker: Option<(Color32, Color32)>,
     /// Pixel grid color from the preferences; `None` uses the view settings.
     pub grid: Option<Color32>,
+    /// The grid of the active isometric tilemap layer; the isometric custom grid follows it instead of the
+    /// settings' cell size and offset.
+    pub iso: Option<iso::Iso>,
 }
 
 impl Scene<'_> {
@@ -727,7 +730,7 @@ pub fn paint_over(painter: &egui::Painter, sc: &Scene) {
         let [r, g, b] = s.custom_grid_color;
         let color =
             Color32::from_rgba_unmultiplied(r, g, b, (s.custom_grid_opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
-        iso::paint(painter, &s.iso(), sc.srect.min, sc.zoom, sc.ppp, vis, color);
+        iso::paint(painter, &sc.iso.unwrap_or_else(|| s.iso()), sc.srect.min, sc.zoom, sc.ppp, vis, color);
     } else if s.custom_grid && s.custom_grid_w > 0 && s.custom_grid_h > 0 {
         let [r, g, b] = s.custom_grid_color;
         let color =

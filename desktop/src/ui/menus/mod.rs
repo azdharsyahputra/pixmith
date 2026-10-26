@@ -170,6 +170,7 @@ pub fn blocked(app: &PixmithApp) -> bool {
         || app.files.prompt.is_some()
         || app.files.new_sheet.is_some()
         || app.files.export.is_some()
+        || app.files.trace_import.is_some()
         || app.projects.has_sheet()
         || app.gamedev.lua.modal_open()
         || app.menus.sheet_open()
@@ -213,7 +214,9 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
     }
     apply_prefs(app);
     hooks::sheet_import_dialog(app, ctx);
+    hooks::trace_import_dialog(app, ctx);
     filters::show(app, ctx);
+    crate::ui::warp::show(app, ctx);
     lint::show(app, ctx);
     if let Some(mut s) = app.menus.canvas_size.take()
         && !sheets::canvas_size(app, ctx, &mut s)

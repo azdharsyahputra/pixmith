@@ -44,6 +44,10 @@
 //! -- Tilemaps (tile indices are 0-based, 0 is the empty tile)
 //! sprite.tilesets[i] -> { name, tileWidth, tileHeight, count, index, getTilePixels(t), setTilePixels(t, px),
 //!                         addTile([px]), duplicateTile(t), deleteTile(t) }
+//! sprite.tilesets[i].isIsometric / cellWidth / cellHeight / layout, :getPivot(t), :setPivot(t [, point]),
+//!                         :getTextureOrigin(t), :setIsometric(cellW, cellH), :setSquare()
+//! layer.isIsometric, layer.gridOffset (Point; isometric tilemap layers), layer:cellAt(x, y) -> i, j,
+//! layer:cellOrigin(i, j) -> Point, layer:pickTile(x, y [, frame]) -> i, j, index, flipX, flipY, diagonal
 //! layer:getTile(x, y [, frame]) -> index, flipX, flipY, diagonal
 //! layer:setTile(x, y, index [, flipX, flipY, diagonal [, frame]])    -- x, y are grid cells
 //!
@@ -109,6 +113,8 @@ mod plugins;
 #[cfg(test)]
 mod session_tests;
 mod sprites;
+#[cfg(test)]
+mod trace_tests;
 
 pub use sprites::{ActiveDoc, NewDocument};
 
@@ -1208,6 +1214,29 @@ impl UserData for LayerH {
             Ok((l.kind == crate::document::tilemap::KIND_TILEMAP && ti < t.0.sprite().tilesets.len())
                 .then(|| TilesetH(t.0.clone(), ti)))
         });
+        f.add_field_method_get("isIsometric", |_, t| {
+            t.get()?;
+            Ok(t.iso_grid().is_some())
+        });
+        // The canvas pixel of the top-left corner of cell (0, 0)'s box on an isometric tilemap layer (nil
+        // elsewhere). Layers at different elevations have offsets that differ by the elevation.
+        f.add_field_method_get("gridOffset", |_, t| {
+            t.get()?;
+            Ok(t.iso_grid().map(|g| geometry::PointV { x: g.x, y: g.y }))
+        });
+        f.add_field_method_set("gridOffset", |_, t, v: Value| {
+            t.get()?;
+            let (x, y) = geometry::point_of(&v).ok_or_else(|| Error::runtime("gridOffset must be a Point"))?;
+            let ok = i32::try_from(x)
+                .ok()
+                .zip(i32::try_from(y).ok())
+                .is_some_and(|o| crate::document::tilemap::set_layer_offset(t.0.sprite(), t.1, o));
+            if ok {
+                Ok(())
+            } else {
+                Err(Error::runtime("gridOffset can only be set on an isometric tilemap layer, to a reasonable point"))
+            }
+        });
         f.add_field_method_get("userData", |_, t| {
             t.get()?;
             Ok(UserDataH::new(&t.0, 1, t.1, 0))
@@ -1354,6 +1383,16 @@ impl UserData for LayerH {
             let (tw, th) = t.tile_size()?;
             let f = take_frame_idx(&t.0, &mut a, false)?;
             let s = t.0.sprite();
+            if t.iso_grid().is_some() {
+                // Isometric layers are addressed by cell (i, j).
+                let v = crate::document::tilemap::tile_in_cell(s, t.1, f, x, y);
+                return Ok((
+                    v & crate::document::tilemap::TILE_ID_MASK,
+                    v & crate::document::tilemap::FLIP_X != 0,
+                    v & crate::document::tilemap::FLIP_Y != 0,
+                    v & crate::document::tilemap::FLIP_D != 0,
+                ));
+            }
             let (px, py) = (x.saturating_mul(tw as i64), y.saturating_mul(th as i64));
             if px < 0 || py < 0 || px >= s.width as i64 || py >= s.height as i64 {
                 return Ok((0u32, false, false, false));
@@ -1390,24 +1429,85 @@ impl UserData for LayerH {
                 let id = u32::try_from(index).ok().filter(|&i| (i as usize) < count).ok_or_else(|| {
                     Error::runtime(format!("tile {index} does not exist in the tileset (0..{})", count - 1))
                 })?;
-                let (px, py) = (x.saturating_mul(tw as i64), y.saturating_mul(th as i64));
-                if px < 0 || py < 0 || px >= s.width as i64 || py >= s.height as i64 {
-                    return Err(Error::runtime(format!("cell {x},{y} is outside the canvas")));
-                }
                 let value = id
                     | if fx == Some(true) { crate::document::tilemap::FLIP_X } else { 0 }
                     | if fy == Some(true) { crate::document::tilemap::FLIP_Y } else { 0 }
                     | if fd == Some(true) { crate::document::tilemap::FLIP_D } else { 0 };
+                if t.iso_grid().is_some() {
+                    if x.abs() > crate::document::iso::MAX_CELL || y.abs() > crate::document::iso::MAX_CELL {
+                        return Err(Error::runtime(format!("cell {x},{y} is too far from the origin")));
+                    }
+                    s.begin_cel_edit(t.1, f);
+                    crate::document::tilemap::stamp_cell(s, t.1, f, x, y, value);
+                    s.flush_links();
+                    return Ok(());
+                }
+                let (px, py) = (x.saturating_mul(tw as i64), y.saturating_mul(th as i64));
+                if px < 0 || py < 0 || px >= s.width as i64 || py >= s.height as i64 {
+                    return Err(Error::runtime(format!("cell {x},{y} is outside the canvas")));
+                }
                 s.begin_cel_edit(t.1, f);
                 crate::document::tilemap::stamp(s, t.1, f, px as i32, py as i32, value);
                 s.flush_links();
                 Ok(())
             }
         });
+
+        // cellAt(x, y) or cellAt(point) -> i, j: the cell containing a canvas pixel. For an isometric layer the
+        // diamond cell of the layer's grid; for a square tilemap the column and row of `pixel / tile size`.
+        m.add_method("cellAt", |_, t, mut a: MultiValue| {
+            let geometry::PointV { x, y } = geometry::take_point(&mut a, "cellAt")?;
+            t.tile_size()?;
+            let (px, py) =
+                (x.clamp(i32::MIN as i64, i32::MAX as i64) as i32, y.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+            crate::document::tilemap::cell_at(t.0.sprite(), t.1, px, py)
+                .ok_or_else(|| Error::runtime("this is not a tilemap layer"))
+        });
+        // cellOrigin(i, j) or cellOrigin(point) -> Point: the canvas pixel of the top-left corner of the cell's box.
+        m.add_method("cellOrigin", |_, t, mut a: MultiValue| {
+            let geometry::PointV { x, y } = geometry::take_point(&mut a, "cellOrigin")?;
+            t.tile_size()?;
+            crate::document::tilemap::cell_origin(t.0.sprite(), t.1, x, y)
+                .map(|(px, py)| geometry::PointV { x: px, y: py })
+                .ok_or_else(|| Error::runtime("this is not a tilemap layer"))
+        });
+        // pickTile(x, y [, frame]) -> i, j, index, flipX, flipY, diagonal: the tile you see at a canvas pixel of an
+        // isometric layer (the front-most tile with a visible pixel there, else the cell's own), or nil.
+        m.add_method("pickTile", |lua, t, mut a: MultiValue| {
+            let geometry::PointV { x, y } = geometry::take_point(&mut a, "pickTile")?;
+            t.tile_size()?;
+            let f = take_frame_idx(&t.0, &mut a, false)?;
+            let (px, py) =
+                (x.clamp(i32::MIN as i64, i32::MAX as i64) as i32, y.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+            match crate::document::tilemap::tile_hit_at(t.0.sprite(), t.1, f, px, py) {
+                Some(((i, j), v)) => mlua::IntoLuaMulti::into_lua_multi(
+                    (
+                        i,
+                        j,
+                        v & crate::document::tilemap::TILE_ID_MASK,
+                        v & crate::document::tilemap::FLIP_X != 0,
+                        v & crate::document::tilemap::FLIP_Y != 0,
+                        v & crate::document::tilemap::FLIP_D != 0,
+                    ),
+                    lua,
+                ),
+                None => Ok(MultiValue::new()),
+            }
+        });
     }
 }
 
 impl LayerH {
+    /// The isometric grid of an isometric tilemap layer.
+    fn iso_grid(&self) -> Option<crate::document::iso::Iso> {
+        let s = self.0.sprite();
+        let l = s.layers.get(self.1)?;
+        if l.kind != crate::document::tilemap::KIND_TILEMAP {
+            return None;
+        }
+        s.tilesets.get(l.tileset as usize)?.iso_grid(l.offset)
+    }
+
     /// Tile size of a tilemap layer's tileset.
     fn tile_size(&self) -> LuaResult<(u32, u32)> {
         let l = self.get()?;
@@ -1917,9 +2017,70 @@ impl UserData for TilesetH {
             t.get()?;
             Ok(t.1 + 1)
         });
+        // Isometric tilesets: tiles sit on diamond cells of cellWidth x cellHeight; the tile images
+        // (tileWidth x tileHeight) may be taller than the diamond.
+        f.add_field_method_get("isIsometric", |_, t| Ok(t.get()?.is_iso()));
+        f.add_field_method_get("cellWidth", |_, t| Ok(t.get()?.iso.as_ref().map(|i| i.cell_w)));
+        f.add_field_method_get("cellHeight", |_, t| Ok(t.get()?.iso.as_ref().map(|i| i.cell_h)));
+        f.add_field_method_get("layout", |_, t| Ok(t.get()?.iso.as_ref().map(|_| "diamond_down")));
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
+        // getPivot(t) -> Point: the point of tile t's image (from its top-left corner) that sits on the center of
+        // the cell's diamond; nil on square tilesets. Defaults to the bottom-aligned center.
+        m.add_method("getPivot", |_, t, i: i64| {
+            let i = t.tile_index(i)?;
+            let ts = t.get()?;
+            Ok(ts.is_iso().then(|| {
+                let (x, y) = ts.pivot(i as u32);
+                geometry::PointV { x: x as i64, y: y as i64 }
+            }))
+        });
+        // setPivot(t [, point]): sets the pivot, or with no point goes back to the default.
+        m.add_method("setPivot", |_, t, (i, p): (i64, Option<Value>)| {
+            let i = t.tile_index(i)?;
+            let pivot = match p {
+                None | Some(Value::Nil) => None,
+                Some(v) => {
+                    let (x, y) = geometry::point_of(&v).ok_or_else(|| Error::runtime("setPivot needs a Point"))?;
+                    Some((
+                        i32::try_from(x).map_err(|_| Error::runtime("pivot out of range"))?,
+                        i32::try_from(y).map_err(|_| Error::runtime("pivot out of range"))?,
+                    ))
+                }
+            };
+            if crate::document::tilemap::set_tile_pivot(t.0.sprite(), t.1, i as u32, pivot) {
+                Ok(())
+            } else {
+                Err(Error::runtime("setPivot: not an isometric tileset, or the pivot is out of range"))
+            }
+        });
+        // getTextureOrigin(t) -> Point: the pivot as Godot's TileData.texture_origin (offset from the image center).
+        m.add_method("getTextureOrigin", |_, t, i: i64| {
+            let i = t.tile_index(i)?;
+            let ts = t.get()?;
+            Ok(ts.is_iso().then(|| {
+                let (x, y) = ts.texture_origin(i as u32);
+                geometry::PointV { x: x as i64, y: y as i64 }
+            }))
+        });
+        // setIsometric(cellWidth, cellHeight) / setSquare(): change the shape of a tileset no layer shows tiles of.
+        m.add_method("setIsometric", |_, t, (w, h): (i64, i64)| {
+            let (w, h) = (u32::try_from(w).ok().filter(|&v| v >= 2), u32::try_from(h).ok().filter(|&v| v >= 2));
+            let (Some(w), Some(h)) = (w, h) else { return Err(Error::runtime("cell sizes must be at least 2")) };
+            if crate::document::tilemap::set_tileset_iso(t.0.sprite(), t.1, Some((w, h))) {
+                Ok(())
+            } else {
+                Err(Error::runtime("this tileset has tiles in use; clear them first"))
+            }
+        });
+        m.add_method("setSquare", |_, t, ()| {
+            if crate::document::tilemap::set_tileset_iso(t.0.sprite(), t.1, None) {
+                Ok(())
+            } else {
+                Err(Error::runtime("this tileset has tiles in use; clear them first"))
+            }
+        });
         m.add_method("getTilePixels", |lua, t, i: i64| {
             let i = t.tile_index(i)?;
             let tile = t.get()?.tiles[i].clone();
@@ -3706,6 +3867,97 @@ mod tests {
         let o = run_src(&mut big, "local ts = sprite.tilesets[1] while true do ts:addTile() end");
         assert!(o.error.unwrap().contains("full"));
         assert_eq!(big.sprite.tilesets[0].tiles.len(), 1, "the failed run left the tileset alone");
+    }
+
+    #[test]
+    fn isometric_tilemaps_expose_grid_offset_pivots_and_cells() {
+        let mut e = Editor::new(Sprite::new(1280, 720));
+        let l = crate::document::tilemap::add_iso_tilemap_layer(&mut e.sprite, 0, 96, 96, 96, 48, (592, 360)) + 1;
+        let o = ok(
+            &mut e,
+            &format!(
+                r#"
+            local layer = sprite.layers[{l}]
+            local ts = layer.tileset
+            assert(layer.isIsometric and ts.isIsometric and not sprite.layers[1].isIsometric)
+            assert(ts.cellWidth == 96 and ts.cellHeight == 48 and ts.layout == "diamond_down")
+            assert(ts.tileWidth == 96 and ts.tileHeight == 96)
+            local go = layer.gridOffset
+            assert(go.x == 592 and go.y == 360)
+            assert(sprite.layers[1].gridOffset == nil)
+            -- pixel <-> cell
+            local i, j = layer:cellAt(640, 384)
+            assert(i == 0 and j == 0)
+            i, j = layer:cellAt(Point(640 + 48, 384 + 24))
+            print(i, j)
+            local o = layer:cellOrigin(2, 1)
+            assert(o.x == 640 and o.y == 432)
+            -- tiles are addressed by cell; the tile is a solid picture
+            local px = {{}}
+            for k = 1, 96 * 96 do px[k] = 0xFF0000FF end
+            local t = ts:addTile(px)
+            layer:setTile(2, 1, t)
+            assert(layer:getTile(2, 1) == t and layer:getTile(0, 0) == 0)
+            -- default pivot: bottom aligned; Godot's texture origin is the offset from the picture center
+            local pv = ts:getPivot(t)
+            assert(pv.x == 48 and pv.y == 72)
+            local to = ts:getTextureOrigin(t)
+            assert(to.x == 0 and to.y == 24)
+            -- the picture of cell (2, 1) has its center at (688, 456): top-left (640, 384)
+            assert(sprite:getPixel(640, 384, {l}) == 0xFF0000FF and sprite:getPixel(640, 383, {l}) == 0)
+            ts:setPivot(t, Point(48, 48))
+            assert(sprite:getPixel(640, 408, {l}) == 0xFF0000FF and sprite:getPixel(640, 407, {l}) == 0)
+            ts:setPivot(t)                     -- back to the default
+            assert(ts:getPivot(t).y == 72)
+            -- what you see at a pixel, on the cliff above the diamond
+            local pi, pj, pt = layer:pickTile(650, 400)
+            print(pi, pj, pt)
+            assert(layer:pickTile(5, 5) == nil)
+            -- elevation: moving the grid moves the pictures
+            layer.gridOffset = Point(592, 336)
+            assert(sprite:getPixel(640, 360, {l}) == 0xFF0000FF and sprite:getPixel(640, 384, {l}) ~= 0)
+            "#
+            ),
+        );
+        assert_eq!(o.messages, vec!["1\t0", "2\t1\t1"]);
+        assert_eq!(e.sprite.layers[l - 1].offset, (592, 336));
+        for bad in [
+            "sprite.layers[1].gridOffset = Point(1, 1)",
+            "sprite.layers[2].gridOffset = 5",
+            "sprite.layers[2].tileset:setPivot(0, Point(1, 1)); sprite.layers[2].tileset:setPivot(99, Point(1, 1))",
+            "sprite.layers[1]:cellAt(1, 1)",
+            "sprite.layers[2].tileset:setSquare()",
+        ] {
+            let o = run_src(&mut e, bad);
+            assert!(o.error.is_some(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn square_tilesets_report_no_isometric_data() {
+        let mut e = Editor::new(Sprite::new(16, 16));
+        let l = crate::document::tilemap::add_tilemap_layer(&mut e.sprite, 0, 8, 8) + 1;
+        ok(
+            &mut e,
+            &format!(
+                r#"
+            local layer = sprite.layers[{l}]
+            local ts = layer.tileset
+            assert(not layer.isIsometric and not ts.isIsometric and ts.cellWidth == nil and ts.layout == nil)
+            assert(layer.gridOffset == nil and ts:getPivot(0) == nil and ts:getTextureOrigin(0) == nil)
+            local i, j = layer:cellAt(9, 17)
+            assert(i == 1 and j == 2)
+            local o = layer:cellOrigin(1, 1)
+            assert(o.x == 8 and o.y == 8)
+            -- an unused tileset can become isometric and back
+            ts:setIsometric(8, 4)
+            assert(ts.isIsometric and ts.cellWidth == 8 and ts.cellHeight == 4)
+            assert(layer.gridOffset.x == 0)
+            ts:setSquare()
+            assert(not ts.isIsometric)
+            "#
+            ),
+        );
     }
 
     #[test]

@@ -80,6 +80,8 @@ pub struct SelectionState {
     pub tolerance: u32,
     pub contiguous: bool,
     pub xf: TransformState,
+    /// Edit > Warp, while its handles are being edited.
+    pub warp: Option<super::warp::WarpSession>,
     pub modify: Option<ModifyDialog>,
     /// Off in tests so they never touch the system clipboard.
     pub system_clipboard: bool,
@@ -111,6 +113,7 @@ impl Default for SelectionState {
             tolerance: 0,
             contiguous: true,
             xf: TransformState::default(),
+            warp: None,
             modify: None,
             system_clipboard: true,
             drag: None,
@@ -139,7 +142,7 @@ impl SelectionState {
 
     /// Whether a selection drag or a transform handle drag is running.
     pub fn dragging(&self) -> bool {
-        self.drag.is_some() || self.xf.dragging()
+        self.drag.is_some() || self.xf.dragging() || self.warp.as_ref().is_some_and(|w| w.dragging())
     }
 
     /// Forgets the drag state of the document being left (`resetSelectionTransients`).
@@ -270,12 +273,17 @@ pub fn select_iso_tile(app: &mut PixmithApp) {
     let clicked = app.selection.last_click.filter(|(d, _)| *d == doc).map(|(_, p)| p);
     match app.canvas.cursor.or(clicked) {
         Some(p) => select_iso_tile_at(app, p, SelMode::Replace),
-        None => app.selection.iso_armed = Some(app.canvas.tools.settings.iso()),
+        None => app.selection.iso_armed = Some(effective_iso(app)),
     }
 }
 
+/// The grid Select > Isometric Tile uses: the active isometric tilemap layer's, else the view settings'.
+fn effective_iso(app: &PixmithApp) -> Iso {
+    crate::ui::tilemap::active_iso(app.tab()).unwrap_or_else(|| app.canvas.tools.settings.iso())
+}
+
 fn select_iso_tile_at(app: &mut PixmithApp, p: (i32, i32), mode: SelMode) {
-    let iso = app.canvas.tools.settings.iso();
+    let iso = effective_iso(app);
     let tab = app.tab_mut();
     tab.playing = false;
     if select_iso_cell(&mut tab.doc, &iso, p, mode) {
@@ -608,6 +616,10 @@ pub fn input(
         sel.last_click = located.map(|l| (doc, l.0));
     }
 
+    // An open warp owns the pointer: its handles come before every tool.
+    if sel.warp.is_some() {
+        return super::warp::input(&mut sel.warp, tab, idle, response, srect, ctx);
+    }
     // A drag in progress keeps the pointer until release.
     if sel.xf.dragging() {
         transform::drag(sel, tab, ctx, located.map(|l| l.1));
@@ -804,6 +816,7 @@ pub fn paint(sel: &SelectionState, tab: &DocTab, tool: Tool, painter: &egui::Pai
         }
     }
     transform::paint_overlay(&sel.xf, tab, tool, painter, srect);
+    super::warp::paint_overlay(&sel.warp, tab, painter, srect);
 }
 
 // ---- Context bar and dialogs ----

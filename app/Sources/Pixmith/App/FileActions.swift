@@ -149,6 +149,31 @@ extension SpriteModel {
         importInBackground("Importing sprite sheet…", source: url) { url.path.withCString { pixmith_import_sheet($0, cw, ch) } }
     }
 
+    /// File > Import > Trace Pixel Art…: opens an image of AI "pseudo-pixel" art as a new sprite redrawn on its real
+    /// pixel grid (`pixmith_import_image_ex` with `{"mode": "trace_grid"}`, see `pixmith_trace.h`).
+    func importTracedPixelArt() {
+        guard !MainWindow.hasSheet else { return }
+        let colors = NSTextField(string: "16")
+        colors.frame.size.width = 70
+        let auto = NSButton(checkboxWithTitle: "Choose the number of colors", target: nil, action: nil)
+        let removeBackground = NSButton(checkboxWithTitle: "Remove the background", target: nil, action: nil)
+        let shadow = NSButton(checkboxWithTitle: "Remove the drop shadow", target: nil, action: nil)
+        let outline = NSButton(checkboxWithTitle: "Close gaps in the outline", target: nil, action: nil)
+        removeBackground.state = .on
+        shadow.state = .on
+        let view = accessoryView([row("Colors", colors), auto, removeBackground, shadow, outline])
+        guard let url = pickFile(ImageFormats.openTypes + [.png, .gif],
+                                 message: "Choose an image of pixel art with soft edges. It is traced onto its pixel grid and opens as a new sprite.",
+                                 accessory: view) else { return }
+        let count = min(max(colors.integerValue, 1), 256)
+        let json = "{\"mode\":\"trace_grid\",\"pitch\":\"auto\",\"colors\":\(auto.state == .on ? "\"auto\"" : String(count)),"
+            + "\"remove_background\":\(removeBackground.state == .on),\"shadow\":\(shadow.state == .on),"
+            + "\"close_outline\":\(outline.state == .on)}"
+        importInBackground("Tracing pixel art…", source: url) {
+            url.path.withCString { p in json.withCString { pixmith_import_image_ex(p, $0) } }
+        }
+    }
+
     func importPNGAsLayer() {
         guard !MainWindow.hasSheet else { return }
         guard let url = pickPNG(message: "Choose a PNG to add as a new layer on the current frame.") else { return }
@@ -313,6 +338,7 @@ struct FileCommands: Commands {
                 Button("Sprite Sheet with JSON…") { model.importSheetWithJSON() }
                 Button("Animated GIF as New Sprite…") { model.importGIFAsSprite() }
                 Button("PNG as New Layer…") { model.importPNGAsLayer() }
+                Button("Trace Pixel Art…") { model.importTracedPixelArt() }
                 Button("Image (WebP, JPEG, BMP, TGA, ICO, PCX, FLC) as New Sprite…") { model.importImageAsSprite() }
             }
         }

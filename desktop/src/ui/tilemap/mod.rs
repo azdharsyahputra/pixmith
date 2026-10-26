@@ -11,6 +11,7 @@
 mod bar;
 mod canvas;
 mod controls;
+mod iso_panel;
 mod sheets;
 mod slices;
 mod tileset;
@@ -23,6 +24,7 @@ pub use slices::slices_section;
 pub use tileset::{MenuAction, apply_menu_action, menu_items, tileset_section};
 
 use crate::app::{DocTab, PixmithApp, Tool};
+use crate::ui::iso::{self, Iso};
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -96,6 +98,96 @@ pub enum Sheet {
     NewLayer,
     Convert,
     Rename,
+}
+
+/// The values of the New Tilemap Layer and Convert to Tilemap sheets.
+///
+/// `iso` is the grid shape: square cells (`tile_w` x `tile_h`) or isometric diamonds (`cell_w` x `cell_h`, layout
+/// Diamond Down) that `tile_w` x `tile_h` tile images, possibly taller than the diamond, sit on. `origin` is the
+/// canvas pixel of the first diamond's bounding box.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SizeForm {
+    pub iso: bool,
+    pub tile_w: u32,
+    pub tile_h: u32,
+    pub cell_w: u32,
+    pub cell_h: u32,
+    pub origin: (i32, i32),
+    pub flip_aware: bool,
+}
+
+impl Default for SizeForm {
+    fn default() -> SizeForm {
+        SizeForm {
+            iso: false,
+            tile_w: 16,
+            tile_h: 16,
+            cell_w: iso::DEFAULT_W as u32,
+            cell_h: iso::DEFAULT_H as u32,
+            origin: (0, 0),
+            flip_aware: true,
+        }
+    }
+}
+
+impl SizeForm {
+    /// Takes the cell size and origin from an isometric grid; flat tiles fill the diamond.
+    pub fn use_grid(&mut self, grid: &Iso) {
+        self.cell_w = grid.w as u32;
+        self.cell_h = grid.h as u32;
+        self.origin = (grid.x as i32, grid.y as i32);
+        self.tile_w = self.cell_w;
+        self.tile_h = self.cell_h;
+    }
+
+    /// Switches the shape. Isometric tile images start at the diamond's size; square ones at 16 x 16.
+    pub fn set_iso(&mut self, on: bool) {
+        if self.iso == on {
+            return;
+        }
+        self.iso = on;
+        if on {
+            self.tile_w = self.cell_w;
+            self.tile_h = self.cell_h;
+        } else {
+            self.tile_w = 16;
+            self.tile_h = 16;
+        }
+    }
+
+    /// Changes the diamond size; tile images that matched the old diamond follow it.
+    pub fn set_cell(&mut self, w: u32, h: u32) {
+        if self.tile_w == self.cell_w {
+            self.tile_w = w;
+        }
+        if self.tile_h == self.cell_h {
+            self.tile_h = h;
+        }
+        self.cell_w = w;
+        self.cell_h = h;
+    }
+
+    /// Tile image size and, for isometric grids, the diamond size after clamping to what the core takes.
+    pub fn tile(&self) -> (u32, u32) {
+        let max = if self.iso { 1024 } else { 256 };
+        (self.tile_w.clamp(1, max), self.tile_h.clamp(1, max))
+    }
+
+    pub fn cell(&self) -> (u32, u32) {
+        (iso::clamp_side(self.cell_w as i32) as u32, iso::clamp_side(self.cell_h as i32) as u32)
+    }
+}
+
+/// The isometric grid of the active layer when it is an isometric tilemap layer: its diamond size at its own
+/// offset. View > Isometric Grid and Select > Isometric Tile follow it.
+pub fn active_iso(tab: &DocTab) -> Option<Iso> {
+    let layer = tab.layer;
+    if !tab.doc.layer_is_iso(layer) {
+        return None;
+    }
+    let cell = tab.doc.tileset_iso_cell(tab.doc.tileset_of_layer(layer)?)?;
+    let (x, y) = tab.doc.layer_grid_offset(layer)?;
+    Some(Iso::new(cell.0 as i32, cell.1 as i32, x, y))
 }
 
 /// What a drag on the canvas is doing for these tools.
@@ -181,9 +273,10 @@ pub struct TilemapState {
     pub flip_y: bool,
     pub flip_d: bool,
     pub sheet: Option<Sheet>,
-    sheet_w: u32,
-    sheet_h: u32,
-    sheet_flip_aware: bool,
+    /// Values of the New Tilemap Layer / Convert sheet.
+    pub form: SizeForm,
+    /// The isometric grid of the view settings (View > Custom Grid), where a new isometric layer starts.
+    pub iso_default: Iso,
     sheet_name: String,
 
     /// While on, canvas clicks use the terrain tools on the current tilemap layer.
@@ -199,6 +292,7 @@ pub struct TilemapState {
     weight_of: Option<(usize, u32, u32)>,
     seed_text: String,
     last_cell: Option<(i32, i32)>,
+    last_iso_cell: Option<(i32, i32)>,
     rect: Option<RectDrag>,
 
     /// Selected slice (view state only) and the sheets.
@@ -223,9 +317,8 @@ impl Default for TilemapState {
             flip_y: false,
             flip_d: false,
             sheet: None,
-            sheet_w: 16,
-            sheet_h: 16,
-            sheet_flip_aware: true,
+            form: SizeForm::default(),
+            iso_default: Iso::new(iso::DEFAULT_W, iso::DEFAULT_H, 0, 0),
             sheet_name: String::new(),
             brush: false,
             terrain_tool: TerrainTool::Paint,
@@ -239,6 +332,7 @@ impl Default for TilemapState {
             weight_of: None,
             seed_text: "0".to_string(),
             last_cell: None,
+            last_iso_cell: None,
             rect: None,
             slice_selected: None,
             slice_sheet: None,
@@ -345,12 +439,13 @@ pub fn inspector_sections(
 
 /// "New Tilemap Layer…" (Tilemap menu, layers menu, Tileset section menu).
 pub fn new_tilemap_layer_sheet(app: &mut PixmithApp) {
-    open_sheet(&mut app.tilemap, Sheet::NewLayer);
+    let grid = active_iso(app.tab());
+    open_sheet(&mut app.tilemap, Sheet::NewLayer, grid);
 }
 
 /// "Convert Layer to Tilemap…". See [`can_convert_to_tilemap`].
 pub fn convert_layer_sheet(app: &mut PixmithApp) {
-    open_sheet(&mut app.tilemap, Sheet::Convert);
+    open_sheet(&mut app.tilemap, Sheet::Convert, None);
 }
 
 /// "Convert Tilemap to Normal Layer".
@@ -371,7 +466,7 @@ pub fn toggle_stamp(app: &mut PixmithApp) {
 
 /// "Rename Tileset…".
 pub fn rename_tileset_sheet(app: &mut PixmithApp) {
-    open_sheet(&mut app.tilemap, Sheet::Rename);
+    open_sheet(&mut app.tilemap, Sheet::Rename, None);
 }
 
 /// The current layer is a tilemap layer (enables "Convert Tilemap to Normal Layer" and "Tile Stamp Mode").
@@ -410,10 +505,22 @@ pub fn user_data_sheet(app: &mut PixmithApp, kind: u32) {
     slices::open_user_sheet(app, kind);
 }
 
-fn open_sheet(tm: &mut TilemapState, sheet: Sheet) {
-    tm.sheet_w = 16;
-    tm.sheet_h = 16;
-    tm.sheet_flip_aware = true;
+/// Opens a size sheet. A new layer is isometric when the active layer is, and starts on its grid (`active`);
+/// otherwise the shape stays as last chosen and an isometric one starts on the view settings' isometric grid.
+/// Converting is square only.
+fn open_sheet(tm: &mut TilemapState, sheet: Sheet, active: Option<Iso>) {
+    let was_iso = tm.form.iso;
+    tm.form = SizeForm::default();
+    if sheet == Sheet::NewLayer {
+        let grid = active.unwrap_or(tm.iso_default);
+        tm.form.use_grid(&grid);
+        if active.is_some() || was_iso {
+            tm.form.iso = true;
+        } else {
+            tm.form.tile_w = 16;
+            tm.form.tile_h = 16;
+        }
+    }
     tm.sheet = Some(sheet);
 }
 

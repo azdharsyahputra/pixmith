@@ -162,6 +162,8 @@ Layer handle fields:
 | `children` | direct children of a group (bottom to top); empty for other layers |
 | `isVisible` | shown on the canvas, i.e. `visible` and every parent group `visible`; assigning sets `visible` |
 | `tileset` | the tileset of a tilemap layer, or `nil` |
+| `isIsometric` | read-only: an isometric tilemap layer (see Isometric tilemaps) |
+| `gridOffset` | read/write `Point` on isometric tilemap layers, `nil` elsewhere: the canvas pixel of cell (0, 0)'s box |
 | `userData` | text and color attached to the layer (see User data); `layer.data` / `layer.color` are shortcuts |
 
 Tilemap layers also have `layer:getTile(x, y [, frame])` and
@@ -259,6 +261,42 @@ images (all cells showing a tile change), exactly like drawing does.
 (the cell whose top-left pixel is `(x * tileWidth, y * tileHeight)`; cells outside the canvas read
 as empty). `layer:setTile(x, y, index [, flipX, flipY, diagonal [, frame]])` places a tile; index 0
 clears the cell. The layer must be a tilemap layer. The diagonal flip only applies to square tiles.
+
+#### Isometric tilemaps
+
+An isometric tileset puts its tile images on 2:1 diamond cells (Godot's `TILE_SHAPE_ISOMETRIC` with
+`TILE_LAYOUT_DIAMOND_DOWN`). Cell `(i, j)` has its bounding box at
+`(gridOffset.x + (i - j) * cellWidth / 2, gridOffset.y + (i + j) * cellHeight / 2)`: `i` runs down-right,
+`j` down-left. Cells are drawn back to front (by `i + j`, then `i`), so a tile image taller than the diamond
+(a cliff, a tuft of grass) overlaps the cells behind it. Tile images are `tileWidth` x `tileHeight`; the diamond
+is `cellWidth` x `cellHeight`. Square tilesets and layers are unaffected by everything in this section.
+
+Tileset fields (`nil` on square tilesets, `false` for `isIsometric`): `isIsometric`, `cellWidth`, `cellHeight`,
+`layout` (`"diamond_down"`). Methods:
+
+- `ts:getPivot(t)` returns a `Point`: the point of tile `t`'s image (pixels from its top-left corner) that sits on
+  the center of the diamond. Unless set, tiles are centered across and, when taller than the diamond,
+  bottom-aligned (pivot `(tileWidth / 2, tileHeight - cellHeight / 2)`), so the diamond is the bottom
+  `cellHeight` rows of the image.
+- `ts:setPivot(t [, point])` sets the pivot (no point restores the default); layers showing the tile are redrawn.
+- `ts:getTextureOrigin(t)` returns the pivot as Godot's `TileData.texture_origin` (offset from the image center);
+  that is what the Godot export writes.
+- `ts:setIsometric(cellWidth, cellHeight)` / `ts:setSquare()` change the shape of a tileset that no layer shows
+  tiles of (an error otherwise).
+
+Layer methods (also work on square tilemap layers, where a cell is `pixel / tile size`):
+
+- `layer:cellAt(x, y)` (or a `Point`) returns `i, j`, the cell that contains the canvas pixel.
+- `layer:cellOrigin(i, j)` returns a `Point`: the canvas pixel of the cell's box (top-left).
+- `layer:pickTile(x, y [, frame])` returns `i, j, index, flipX, flipY, diagonal` for the tile you *see* at a canvas
+  pixel of an isometric layer (the front-most tile whose image has a visible pixel there, else the tile of the cell
+  whose diamond contains it), or nothing when that cell is empty.
+
+On an isometric layer `getTile` / `setTile` take the cell `(i, j)` itself (any integers; the layer's grid grows to
+hold the cell; cells may be negative and may lie outside the canvas, where they are simply not visible).
+Assigning `layer.gridOffset` moves the whole grid, which is how layers at other elevations are placed: a ledge half
+a cell higher is a layer whose offset is `cellHeight / 2` pixels above the floor's. A game map with 96 x 48 cells
+whose floor starts at pixel (592, 360) is `gridOffset = Point(592, 360)`.
 
 ### Slices
 
@@ -538,13 +576,75 @@ closed without a save prompt. A script that fails opens nothing (files it alread
   `ChangePixelFormat{ format = "rgb" | "gray" | "indexed", dithering = "none" | "ordered" }`.
 - Filters on the active cel, limited to the selection: `ReplaceColor{ from, to, tolerance }`, `Outline{ color, place = "outside" | "inside", matrix }`,
   `InvertColor`, `Desaturate`, `BrightnessContrast{ brightness, contrast }` (-100..100), `HueSaturation{ hue, saturation, lightness }`,
-  `Despeckle`, and the Pixmith-specific `CleanEdges{ ... }` (see [Clean Edges and lint](#clean-edges-and-lint)).
+  `Despeckle`, `RemoveBackground{ tolerance, shadow, shadowDepth, global, color }` (see below), and the Pixmith-specific `CleanEdges{ ... }` (see [Clean Edges and lint](#clean-edges-and-lint)).
+- Warp (a pixel-art puppet / mesh warp, Pixmith's own command) of the active cel, limited to the selection:
+  `Warp{ grid = {cols, rows}, offsets = {{dx, dy}, ...}, samples = 4, smooth = false, pins = {{ x, y, dx, dy, radius }, ...} }`.
+  A `cols` x `rows` grid of handles (each 2 to 8, default `{2, 2}`) is spread over the selection bounds (the canvas
+  when nothing is selected); `offsets` has one `{dx, dy}` (or `{dx = , dy = }`) per handle, row by row, and says where the
+  content at that handle goes, in pixels (a missing `offsets` is all zeros). Between handles the displacement is
+  interpolated bilinearly, or with a Catmull-Rom spline when `smooth = true`. Each pin moves the content within `radius`
+  of canvas point (`x`, `y`) by up to (`dx`, `dy`), fading out smoothly. The result is resampled by majority vote: each
+  output pixel is cut into `samples` x `samples` points (1 to 8), each is mapped back to the source, and the most frequent
+  source color wins (transparent counts as a color; a tie goes to a visible color, then to the sample nearest the pixel
+  center), so nothing is blended and no new color appears. Pixels outside the selection are neither read nor changed,
+  and where nothing is mapped the result is transparent. Bad grids, a wrong number of offsets or malformed pins raise an
+  error. Very thin diagonal lines can break under a bend, as a 1 px diagonal covers under half of each output pixel.
+- Pixel-art cleaning: `RemoveBackground{ ... }` and `TraceGrid{ ... }` (see below). Both return a report table.
 - Selection and cels: `SelectAll`, `DeselectMask`, `InvertMask`, `MaskContent`, `Clear`, `ClearCel`.
 - Files: `NewFile{ width, height, colorMode }`, `OpenFile{ filename }`, `SaveFile`, `SaveFileAs{ filename }`,
   `SaveFileCopyAs{ filename }`, `CloseFile`, `DuplicateSprite`, `ExportSpriteSheet{ type = SpriteSheetType.HORIZONTAL | VERTICAL | ROWS | COLUMNS | PACKED,
   textureFilename, dataFilename, columns, rows, shapePadding, borderPadding, extrude }` (a PNG sheet and Aseprite-style JSON; layers
   as shown, all frames; `PACKED` is a square-ish grid; `trim`, `splitLayers`, `tag`, `openGenerated`, ... are ignored).
 - `Refresh` does nothing.
+
+### `RemoveBackground` and `TraceGrid`
+
+For art from AI image tools: "pseudo-pixel" art upscaled with soft edges, a slightly drifting grid, JPEG-like noise, a
+paper-white background and a soft drop shadow.
+
+`app.command.RemoveBackground{ tolerance = 28, shadow = false, shadowDepth = 55, global = false, color = nil }` works on the
+active cel, inside the selection. The background colour is the dominant colour of the image border (or `color`). It is
+removed by a flood fill from the edges through pixels within `tolerance` (0..255 per channel) of it, so equal colours
+enclosed by the figure (eyes, highlights) stay. `global = true` also removes every such pixel inside the figure.
+`shadow = true` also removes a soft shadow: pixels that are the background colour darkened by a common factor (down to
+`shadowDepth` percent darker, in the hue of the background) that connect to the removed background through other such
+pixels. A shadow step that would take more than 60 % of what remains (a grey figure, not a shadow) is skipped and
+reported as `shadowSkipped`. Returns `{ color, background, global, shadow, shadowSkipped, removed }` (pixel counts;
+`color` is the background colour used, absent when the border has no dominant colour).
+
+`app.command.TraceGrid{ pitch = "auto", colors = 16, removeBackground = true, closeOutline = true }` traces the sprite
+onto a real pixel grid. The active cel defines the grid, the palette and the crop; every image cel of the sprite is
+resampled with them, so an animation stays on one grid. The canvas becomes the traced size and the sprite palette the
+traced palette. An RGB sprite is required (no tilemap layers). One undo step.
+
+| Parameter | Meaning |
+| --- | --- |
+| `pitch` | `"auto"` (default), a number, or `{ x, y }`: cell size in source pixels. Fractions are fine (6.5, 7.3). |
+| `minPitch`, `maxPitch` | Range for `"auto"` (default 3 and 32). |
+| `phase` | `{ x, y }` offset of the first cell edge; default: detected. |
+| `separateAxes` | Find x and y pitch independently (default: one pitch for both, which is steadier). |
+| `colors` | A number (k-means palette of that size), `"auto"` (default; the smallest count in `minColors`..`maxColors`, 2..32, that fits), `"keep"` (no quantising), `"palette"` (the sprite's current palette) or a list of colors (snap to those). |
+| `removeBackground` | Remove the background from the traced cells; takes `tolerance`, `shadow`, `shadowDepth`, `global` and `backgroundColor` as above. |
+| `closeOutline` | Close one-pixel breaks in the dark outer outline (a transparent pixel with outline pixels on both sides and figure fill on one side only). |
+| `crop` | Crop to the opaque cells (default true). |
+| `seed` | Seed of the k-means start (default 1; the result is deterministic). |
+
+The grid is found by folding the per-column and per-row edge energy modulo each candidate pitch and keeping the sharpest
+(the scan step keeps the drift over the whole image under half a pixel; of near-ties the largest pitch wins, because
+half the true pitch folds as sharply). Each cell is the per-channel median of its central 60 % (transparent pixels are
+ignored), then the palette and the snap are applied. Returns `{ width, height, pitch = { x, y }, phase = { x, y },
+palette, quality, closedOutline, background }`; `palette` is a list of `Color`, `quality` is 0..1 (how well cells and
+palette explain the source pixels) and `background` is the `RemoveBackground` report. A sprite without edges (flat) has
+no grid and raises an error.
+
+```lua
+local r = app.command.TraceGrid{ pitch = "auto", colors = 16, removeBackground = true, shadow = true, closeOutline = true }
+print(r.pitch[1], r.width, r.height, r.quality)
+```
+
+The same operations exist in the core as `pixmith_trace_grid` / `pixmith_remove_background` (pixmith_trace.h), as the
+filter kind `PIXMITH_FILTER_REMOVE_BACKGROUND`, and as the import mode `{"mode": "trace_grid"}` of
+`pixmith_import_image_ex`.
 
 Every other Aseprite command (`Zoom`, `Cut`, `Copy`, `Paste`, `ShowGrid`, `Options`, ...) raises
 `app.command.X is not available in Pixmith`. File commands ask for permission like the API calls do.

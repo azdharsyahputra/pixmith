@@ -4,7 +4,7 @@
 use super::TilesetSettings;
 use super::form;
 use crate::app::PixmithApp;
-use crate::theme::{Colors, font, metric, radius, space};
+use crate::theme::{self, Colors, font, metric, radius, space};
 use crate::ui::widgets::{self, DialogAction, NumberOpts};
 use eframe::egui::{self, Color32, Sense, Stroke, StrokeKind, Ui, vec2};
 const LABEL_WIDTH: f32 = 96.0;
@@ -16,6 +16,9 @@ pub struct TilesetSheet {
     pub s: TilesetSettings,
     /// "0: Tileset 1", ... for the tileset popup.
     pub names: Vec<String>,
+    /// The diamond cell size of each tileset that is isometric (the export then writes `tile_shape = ISOMETRIC` and
+    /// `tile_layout = DIAMOND_DOWN`).
+    pub iso: Vec<Option<(u32, u32)>>,
     /// The result of the last Preview.
     pub preview: String,
     /// An error or warning from the last export, shown in place of the preview.
@@ -42,7 +45,8 @@ pub fn open(app: &mut PixmithApp) {
     };
     s.tileset = s.tileset.min(count - 1);
     let names = (0..count).map(|i| format!("{i}: {}", tab.doc.tileset_name(i))).collect();
-    app.gamedev.tileset = Some(TilesetSheet { s, names, preview: String::new(), result: None });
+    let iso = (0..count).map(|i| tab.doc.tileset_iso_cell(i)).collect();
+    app.gamedev.tileset = Some(TilesetSheet { s, names, iso, preview: String::new(), result: None });
 }
 
 /// Whether Re-export has saved settings to repeat (`hasGodotExportSettings`).
@@ -126,6 +130,24 @@ fn body(ui: &mut Ui, sheet: &mut TilesetSheet, tileset_name: &str, preview_now: 
             s.tileset = i as u32;
         }
     });
+    let iso = sheet.iso.get(s.tileset as usize).copied().flatten();
+    form::form_row(ui, LABEL_WIDTH, "Tile shape", |ui| {
+        let text = match iso {
+            Some((w, h)) => format!("Isometric (diamond {w}\u{d7}{h})"),
+            None => "Square".to_string(),
+        };
+        ui.label(egui::RichText::new(text).font(theme::ui_font(font::BODY)).color(c.text));
+    });
+    if iso.is_some() {
+        form::form_row(ui, LABEL_WIDTH, "Tile layout", |ui| {
+            ui.label(egui::RichText::new("Diamond Down").font(theme::ui_font(font::BODY)).color(c.text));
+        });
+        widgets::note(
+            ui,
+            "Tiles keep their origin (Godot texture origin). A scene places each isometric layer at its offset \
+             with Y sort on.",
+        );
+    }
     form::form_row(ui, LABEL_WIDTH, "Project folder", |ui| {
         let button = form::bar_button_width(ui, "Choose\u{2026}") + space::SM;
         form::text_field(

@@ -34,6 +34,8 @@ pub struct FilesState {
     pub renaming: Option<(usize, String)>,
     /// File > Import > Sprite Sheet as Frames: the chosen PNG and the cell size being asked for.
     pub sheet_import: Option<(std::path::PathBuf, u32, u32)>,
+    /// File > Import > Trace Pixel Art: the chosen image and the options being asked for.
+    pub trace_import: Option<crate::ui::menus::hooks::TraceImport>,
     /// The "which size of this icon?" question while it is open (`ui/image_formats.rs`).
     pub icon_choice: Option<crate::ui::image_formats::IconChoice>,
 }
@@ -50,6 +52,7 @@ impl Default for FilesState {
             quit_approved: false,
             quit_skip: Vec::new(),
             sheet_import: None,
+            trace_import: None,
             icon_choice: None,
             renaming: None,
             next_revision: 0,

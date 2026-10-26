@@ -103,6 +103,7 @@ The script builds a universal (arm64 + x86_64) app when the Rust toolchain has b
 - Rectangular marquee, magic wand, lasso and polygon lasso; hold Shift to add and Option to subtract; expand, contract, border, invert, select by color.
 - Move, nudge, flip, rotate, cut, copy and paste (floating paste), crop to selection, canvas resize.
 - Free Transform (Cmd-T): scale, rotate, skew and move with a live preview, including a RotSprite-style resampler.
+- Warp (Edit > Warp…): a puppet / mesh warp with a grid of draggable handles and live preview; the result is resampled by majority vote, so there is no blur and no new colors (Lua: `app.command.Warp{...}`).
 - Undo and redo that store only the pixels a step changed (up to 1 GiB of history per document; one step takes well under a millisecond on a 4096 x 4096 canvas), and a History panel (Option-Cmd-Y) that lists named steps and jumps to any of them. Multi-part operations are single undo steps.
 
 **Layers, frames and animation**

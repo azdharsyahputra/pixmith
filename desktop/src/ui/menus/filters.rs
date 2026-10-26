@@ -25,6 +25,7 @@ pub enum FilterKind {
     Outline,
     DropShadow,
     Despeckle,
+    RemoveBackground,
     Blur,
     Sharpen,
     Curves,
@@ -46,6 +47,7 @@ impl FilterKind {
             FilterKind::Outline => "Outline",
             FilterKind::DropShadow => "Drop Shadow",
             FilterKind::Despeckle => "Remove Isolated Pixels",
+            FilterKind::RemoveBackground => "Remove Background",
             FilterKind::Blur => "Blur",
             FilterKind::Sharpen => "Sharpen",
             FilterKind::CleanEdges => "Clean Edges",
@@ -70,6 +72,7 @@ impl FilterKind {
             FilterKind::Sharpen => 10,
             FilterKind::Curves => 11,
             FilterKind::CleanEdges => 12,
+            FilterKind::RemoveBackground => 13,
             FilterKind::Scale => 1000,
             FilterKind::LintSprite => 1001,
         }
@@ -128,6 +131,10 @@ pub struct FilterParams {
     pub shadow_x: i32,
     pub shadow_y: i32,
     pub shadow_color: u32,
+    /// Remove Background: how far from the background color still counts as background, and the two options.
+    pub bg_tolerance: i32,
+    pub bg_shadow: bool,
+    pub bg_global: bool,
     pub curves: CurveSet,
     pub clean: CleanParams,
 }
@@ -211,6 +218,9 @@ impl Default for FilterParams {
             shadow_x: 1,
             shadow_y: 1,
             shadow_color: 0x00000099,
+            bg_tolerance: 28,
+            bg_shadow: true,
+            bg_global: false,
             curves: CurveSet::default(),
             clean: CleanParams::default(),
         }
@@ -230,6 +240,9 @@ impl FilterParams {
             FilterKind::Outline => vec![c(self.outline_color), self.inside as i32, self.eight as i32],
             FilterKind::DropShadow => vec![self.shadow_x, self.shadow_y, c(self.shadow_color)],
             FilterKind::Despeckle => vec![self.eight as i32],
+            FilterKind::RemoveBackground => {
+                vec![self.bg_tolerance, self.bg_shadow as i32 | (self.bg_global as i32) << 1]
+            }
             FilterKind::CleanEdges => self.clean.values(),
             FilterKind::LintSprite
             | FilterKind::Invert
@@ -424,6 +437,12 @@ fn controls(ui: &mut Ui, s: &mut FilterSession) {
         FilterKind::Despeckle => {
             connectivity(ui, &mut p.eight);
             widgets::note(ui, "Clears pixels that have no opaque neighbor.");
+        }
+        FilterKind::RemoveBackground => {
+            value_slider(ui, "bgtol", "Tolerance", &mut p.bg_tolerance, 0..=255);
+            ui.checkbox(&mut p.bg_shadow, "Also remove the drop shadow");
+            ui.checkbox(&mut p.bg_global, "Also remove the same color inside the figure");
+            widgets::note(ui, "The background is the main color of the image border, removed from the edges inwards.");
         }
         FilterKind::Invert => widgets::note(ui, "Inverts the RGB channels, keeping alpha."),
         FilterKind::Desaturate => widgets::note(ui, "Converts colors to grayscale."),
@@ -795,5 +814,16 @@ mod tests {
     fn color_balance_uses_the_channel_offset_filter() {
         assert_eq!(FilterKind::ColorBalance.core_kind(), 5);
         assert_eq!(FilterKind::Curves.core_kind(), 11);
+    }
+
+    #[test]
+    fn remove_background_sends_tolerance_and_option_flags() {
+        assert_eq!(FilterKind::RemoveBackground.core_kind(), 13);
+        let mut p = FilterParams::default();
+        assert_eq!(p.values(FilterKind::RemoveBackground), vec![28, 1]);
+        p.bg_global = true;
+        p.bg_shadow = false;
+        p.bg_tolerance = 40;
+        assert_eq!(p.values(FilterKind::RemoveBackground), vec![40, 2]);
     }
 }

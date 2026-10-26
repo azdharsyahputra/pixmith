@@ -202,12 +202,15 @@ fn icons_hold_the_chosen_sizes_and_open_at_any_of_them() {
     assert_eq!(sizes, vec![(16, 16), (32, 32), (48, 48), (64, 64), (256, 256)]);
     assert_eq!(open(bytes).width, 256, "opens the largest by default");
     for size in [16u32, 32, 48, 64, 256] {
-        let back = raster::sprite_from_image(bytes, &ImportOptions { ico_size: Some(size) }).unwrap();
+        let back =
+            raster::sprite_from_image(bytes, &ImportOptions { ico_size: Some(size), ..Default::default() }).unwrap();
         assert_eq!((back.width, back.height), (size, size));
     }
     // The 48 pixel image is the 6x4 sprite at 8x, centered: its pixel (24, 24) is the sprite's (3, 2) -> transparent,
     // while (0, 0)-> sprite (0, 0) is the red end of the diagonal.
-    let big = raster::sprite_from_image(bytes, &ImportOptions { ico_size: Some(48) }).unwrap().render(0);
+    let big = raster::sprite_from_image(bytes, &ImportOptions { ico_size: Some(48), ..Default::default() })
+        .unwrap()
+        .render(0);
     let at = |x: usize, y: usize| &big[(y * 48 + x) * 4..][..4];
     assert_eq!(at(0, 8), &RED); // sprite (0,0), top margin is 8 rows
     assert_eq!(at(47, 47)[3], 0);

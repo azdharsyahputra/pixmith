@@ -184,7 +184,7 @@ enum CanvasOverlays {
         if s.customGrid {
             let color = NSColor(s.customGridColor).withAlphaComponent(s.customGridOpacity).cgColor
             if s.customGridType == .isometric {
-                IsoGrid.current.stroke(ctx, in: r, dirty: dirty, zoom: m.zoom, color: color)
+                IsoGrid.active(for: m).stroke(ctx, in: r, dirty: dirty, zoom: m.zoom, color: color)
             } else if s.customGridW > 0, s.customGridH > 0 {
                 strokeGrid(ctx, in: r, dirty: dirty, stepX: CGFloat(s.customGridW) * m.zoom,
                            stepY: CGFloat(s.customGridH) * m.zoom,

@@ -5,6 +5,7 @@ use super::controls::{system_green, system_orange};
 use super::{Drag, DragKind, RectDrag, TerrainTool, TilemapState, slices};
 use crate::app::{DocTab, Tool};
 use crate::theme::Colors;
+use crate::ui::iso::{self, Iso};
 use eframe::egui::{self, Color32, Painter, PointerButton, Pos2, Rect, Stroke, StrokeKind, pos2, vec2};
 
 /// What the canvas knows about the pointer this frame.
@@ -125,7 +126,12 @@ fn changed(tab: &mut DocTab) {
 fn stamp_event(tm: &mut TilemapState, tab: &mut DocTab, p: (i32, i32), mods: egui::Modifiers, edit_open: &mut bool) {
     let (layer, frame) = (tab.layer, tab.frame);
     if mods.alt {
-        let v = tab.doc.tile_value_at(layer, frame, p.0, p.1);
+        // Isometric layers pick the tile you see, which for a tall tile may belong to a cell behind the diamond.
+        let v = if tab.doc.layer_is_iso(layer) {
+            tab.doc.tile_hit_at(layer, frame, p.0, p.1).map_or(0, |(_, v)| v)
+        } else {
+            tab.doc.tile_value_at(layer, frame, p.0, p.1)
+        };
         if v & 0x1FFF_FFFF != 0 {
             tm.select_value(v);
         }
@@ -189,6 +195,7 @@ fn terrain_event(
             if began {
                 begin_edit(tab, "Terrain Brush");
                 tm.last_cell = None;
+                tm.last_iso_cell = None;
             }
             let mut points = vec![p];
             if let Some(a) = tm.last_cell
@@ -198,7 +205,16 @@ fn terrain_event(
                 let n = (a.0 - p.0).abs().max((a.1 - p.1).abs());
                 points = (1..=n).map(|k| (a.0 + (p.0 - a.0) * k / n, a.1 + (p.1 - a.1) * k / n)).collect();
             }
+            let iso = tab.doc.layer_is_iso(layer);
             for q in points {
+                if iso {
+                    // The brush works on cells: many pixels of a stroke share one diamond.
+                    let cell = tab.doc.layer_cell_at(layer, q.0, q.1);
+                    if cell == tm.last_iso_cell {
+                        continue;
+                    }
+                    tm.last_iso_cell = cell;
+                }
                 dirty |= tab.doc.paint_terrain_brush(layer, frame, q.0, q.1, t, tm.brush_size, tm.round, ptr.mirror);
             }
             tm.last_cell = Some(p);
@@ -226,16 +242,110 @@ fn finish_terrain(tm: &mut TilemapState, tab: &mut DocTab, ptr: &Pointer) {
 // MARK: Overlays
 
 /// Tile grid, terrain rectangle preview, missing-tile markers and slices, in sprite space scaled by the zoom
-/// (`drawTileGrid`, `drawMissingCells`, `drawSlices`). `srect` is the sprite on screen.
-pub fn canvas_paint(painter: &Painter, tm: &TilemapState, tab: &DocTab, srect: Rect, ppp: f32, dark: bool) {
+/// (`drawTileGrid`, `drawMissingCells`, `drawSlices`). `srect` is the sprite on screen; `cursor` is the sprite
+/// pixel under the pointer.
+pub fn canvas_paint(
+    painter: &Painter,
+    tm: &TilemapState,
+    tab: &DocTab,
+    srect: Rect,
+    ppp: f32,
+    dark: bool,
+    cursor: Option<(i32, i32)>,
+) {
     let c = if dark { Colors::dark() } else { Colors::light() };
     let layer = tab.layer;
     if let Some(ts) = tab.doc.tileset_of_layer(layer) {
-        let (tw, th) = tab.doc.tile_size(ts);
-        tile_grid(painter, tab, srect, ppp, dark, (tw, th));
-        terrain_overlay(painter, tm, tab, srect, dark, (tw, th));
+        if let Some(grid) = super::active_iso(tab) {
+            iso_overlays(painter, tm, tab, srect, ppp, dark, &grid, cursor);
+        } else {
+            let (tw, th) = tab.doc.tile_size(ts);
+            tile_grid(painter, tab, srect, ppp, dark, (tw, th));
+            terrain_overlay(painter, tm, tab, srect, dark, (tw, th));
+        }
     }
     slices::paint(painter, tm, tab, srect, &c);
+}
+
+/// A diamond (or any convex polygon) in sprite pixel coordinates, filled and outlined.
+fn poly(painter: &Painter, srect: Rect, zoom: f32, pts: &[(f64, f64)], fill: Color32, stroke: Stroke) {
+    let screen: Vec<Pos2> = pts.iter().map(|&(x, y)| srect.min + vec2(x as f32, y as f32) * zoom).collect();
+    painter.add(egui::Shape::convex_polygon(screen, fill, stroke));
+}
+
+/// The cells the active tool would change, in the isometric grid: the stamp's cell, the terrain brush's block, or
+/// the cells of the rectangle being dragged.
+fn tool_cells(tm: &TilemapState, tab: &DocTab, cursor: (i32, i32)) -> Vec<(i32, i32)> {
+    let layer = tab.layer;
+    let cell_of = |p: (i32, i32)| tab.doc.layer_cell_at(layer, p.0, p.1);
+    let Some(cell) = cell_of(cursor) else { return Vec::new() };
+    if tm.brush && tab.doc.terrain_mode(layer) >= 0 {
+        return match tm.terrain_tool {
+            TerrainTool::Paint => pixmith_core::gamedev::autotile::brush_cells(cell.0, cell.1, tm.brush_size, tm.round),
+            TerrainTool::Rect => match tm.rect.and_then(|r| Some((cell_of(r.start)?, cell_of(r.end)?))) {
+                Some((a, b)) => pixmith_core::gamedev::autotile::rect_cells(a.0, a.1, b.0, b.1),
+                None => vec![cell],
+            },
+            _ => vec![cell],
+        };
+    }
+    if tm.stamp { vec![cell] } else { Vec::new() }
+}
+
+/// Grid lines of the active isometric layer, the cells under the tool, and cells that use a fallback tile.
+#[allow(clippy::too_many_arguments)]
+fn iso_overlays(
+    painter: &Painter,
+    tm: &TilemapState,
+    tab: &DocTab,
+    srect: Rect,
+    ppp: f32,
+    dark: bool,
+    grid: &Iso,
+    cursor: Option<(i32, i32)>,
+) {
+    let z = tab.zoom;
+    let vis = srect.intersect(painter.clip_rect());
+    if vis.is_positive() && (grid.w as f32 * z >= 4.0) && (grid.h as f32 * z >= 4.0) {
+        iso::paint(painter, grid, srect.min, z, ppp, vis, system_orange(dark).gamma_multiply(0.7));
+    }
+    let painter = painter.with_clip_rect(srect.intersect(painter.clip_rect()));
+    let accent = system_green(dark);
+    let stroke = Stroke::new(1.5, accent);
+    if tm.brush
+        && tm.terrain_tool == TerrainTool::Rect
+        && let Some(r) = tm.rect
+        && let (Some(a), Some(b)) =
+            (tab.doc.layer_cell_at(tab.layer, r.start.0, r.start.1), tab.doc.layer_cell_at(tab.layer, r.end.0, r.end.1))
+    {
+        // A rectangle of cells is a diamond on screen: its corners are corners of the four extreme cells.
+        let (i0, i1, j0, j1) = (a.0.min(b.0) as i64, a.0.max(b.0) as i64, a.1.min(b.1) as i64, a.1.max(b.1) as i64);
+        let pts = [
+            grid.cell_corners((i0, j0))[0],
+            grid.cell_corners((i1, j0))[1],
+            grid.cell_corners((i1, j1))[2],
+            grid.cell_corners((i0, j1))[3],
+        ];
+        let fill = if r.erase { Color32::from_rgba_unmultiplied(255, 69, 58, 50) } else { accent.gamma_multiply(0.25) };
+        poly(&painter, srect, z, &pts, fill, stroke);
+    } else if let Some(cursor) = cursor.filter(|p| in_bounds(tab, *p)) {
+        for cell in tool_cells(tm, tab, cursor) {
+            let pts = grid.cell_corners((cell.0 as i64, cell.1 as i64));
+            poly(&painter, srect, z, &pts, accent.gamma_multiply(0.22), stroke);
+        }
+    }
+    if tab.doc.terrain_mode(tab.layer) >= 0 {
+        let red = if dark { Color32::from_rgb(0xFF, 0x45, 0x3A) } else { Color32::from_rgb(0xFF, 0x3B, 0x30) };
+        let stroke = Stroke::new(2.0, red);
+        let to_screen = |x: f64, y: f64| srect.min + vec2(x as f32, y as f32) * z;
+        for &(x, y) in &tm.cache.missing {
+            let cell = grid.cell_at(x + grid.w as i32 / 2, y + grid.h as i32 / 2);
+            let pts = grid.cell_corners(cell);
+            poly(&painter, srect, z, &pts, Color32::TRANSPARENT, stroke);
+            painter.line_segment([to_screen(pts[0].0, pts[0].1), to_screen(pts[2].0, pts[2].1)], stroke);
+            painter.line_segment([to_screen(pts[1].0, pts[1].1), to_screen(pts[3].0, pts[3].1)], stroke);
+        }
+    }
 }
 
 fn tile_grid(painter: &Painter, tab: &DocTab, srect: Rect, ppp: f32, dark: bool, (tw, th): (u32, u32)) {

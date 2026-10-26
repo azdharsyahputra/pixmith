@@ -592,12 +592,13 @@ fn paint(
         show_grid,
         checker: state.checker,
         grid: state.grid,
+        iso: crate::ui::tilemap::active_iso(tab),
     };
     view::paint_under(painter, &scene);
     view::paint_over(painter, &scene);
 
     selection::paint(sel, tab, tool, painter, srect);
-    crate::ui::tilemap::canvas_paint(painter, tilemap, tab, srect, ppp, dark);
+    crate::ui::tilemap::canvas_paint(painter, tilemap, tab, srect, ppp, dark, state.cursor);
 
     // Mirror guides: pink dashes through the canvas center.
     if state.opts.mirror_x || state.opts.mirror_y {

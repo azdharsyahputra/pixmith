@@ -203,10 +203,12 @@ pub(crate) fn le32(b: &[u8], at: usize) -> Option<u32> {
 }
 
 /// Choices for opening a file.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ImportOptions {
     /// ICO files hold several sizes; this picks the entry whose larger side matches (default: the largest).
     pub ico_size: Option<u32>,
+    /// `"mode": "trace_grid"`: open the first image as pixel art traced onto its grid (see `paint::trace`).
+    pub trace: Option<crate::paint::trace::TraceOptions>,
 }
 
 impl ImportOptions {
@@ -218,8 +220,14 @@ impl ImportOptions {
         if v.as_object().is_none() {
             return Err("the options must be a JSON object".into());
         }
+        let trace = match v.get("mode").and_then(Value::as_str) {
+            None | Some("") | Some("normal") => None,
+            Some("trace_grid") => Some(crate::paint::trace::TraceOptions::from_json(&v)?),
+            Some(other) => return Err(format!("unknown import mode \"{other}\"")),
+        };
         Ok(ImportOptions {
             ico_size: v.get("ico_size").and_then(Value::as_f64).filter(|n| *n >= 1.0).map(|n| n as u32),
+            trace,
         })
     }
 }
@@ -280,6 +288,13 @@ pub fn sprite_from_image(bytes: &[u8], o: &ImportOptions) -> Result<Sprite, Stri
 }
 
 pub fn sprite_from_format(bytes: &[u8], fmt: ImageFormat, o: &ImportOptions) -> Result<Sprite, String> {
+    if let Some(t) = &o.trace {
+        // Pseudo-pixel art is traced from the first image of the file.
+        let d = decode(bytes, fmt, o)?;
+        check_dims(d.width, d.height)?;
+        let first = d.frames.first().ok_or("the file has no frames")?;
+        return crate::paint::trace::sprite_from_trace(first, d.width, d.height, t);
+    }
     match fmt {
         ImageFormat::Png => crate::formats::import::sprite_from_png(bytes),
         ImageFormat::Gif => guard("GIF", || crate::formats::animation::sprite_from_gif(bytes)),

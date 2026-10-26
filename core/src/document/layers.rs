@@ -991,11 +991,11 @@ impl Sprite {
     }
 
     /// Whether a cel of layer `src` may live on layer `dst`.
-    fn cel_fits(&self, src: usize, dst: usize) -> bool {
+    pub(crate) fn cel_fits(&self, src: usize, dst: usize) -> bool {
         let (a, b) = (&self.layers[src], &self.layers[dst]);
         a.is_group() == b.is_group()
             && a.kind == b.kind
-            && (a.kind != crate::document::tilemap::KIND_TILEMAP || a.tileset == b.tileset)
+            && (a.kind != crate::document::tilemap::KIND_TILEMAP || (a.tileset == b.tileset && a.offset == b.offset))
     }
 
     /// Moves (or copies) the cels of a rectangle by `dl` layers and `df` frames. Fails if the target leaves
@@ -1042,7 +1042,9 @@ impl Sprite {
             return false;
         }
         let cels = (frames.0..=frames.1).map(|f| self.cels[f][layers.0..=layers.1].to_vec()).collect();
-        let kinds = (layers.0..=layers.1).map(|l| (self.layers[l].kind, self.layers[l].tileset)).collect();
+        let kinds = (layers.0..=layers.1)
+            .map(|l| (self.layers[l].kind, self.layers[l].tileset, self.layers[l].offset))
+            .collect();
         CLIP.with(|c| *c.borrow_mut() = Some(CelClip { size: (self.width, self.height), cels, kinds, source: None }));
         true
     }
@@ -1069,8 +1071,9 @@ impl Sprite {
                     continue;
                 }
                 let dst = &self.layers[l];
-                let (kind, tileset) = clip.kinds[dl];
-                let tilemap_ok = kind != crate::document::tilemap::KIND_TILEMAP || (!foreign && dst.tileset == tileset);
+                let (kind, tileset, offset) = clip.kinds[dl];
+                let tilemap_ok = kind != crate::document::tilemap::KIND_TILEMAP
+                    || (!foreign && dst.tileset == tileset && dst.offset == offset);
                 let compatible = !dst.is_group() && dst.kind == kind && tilemap_ok;
                 if compatible {
                     self.cels[f][l] = independent_cel(cel);
@@ -1090,7 +1093,7 @@ impl Sprite {
 struct CelClip {
     size: (u32, u32),
     cels: Vec<Vec<Option<Arc<Cel>>>>,
-    kinds: Vec<(u16, u32)>,
+    kinds: Vec<(u16, u32, (i32, i32))>,
     /// `Editor::uid` of the document it was copied from, when copied through the C ABI.
     source: Option<u64>,
 }

@@ -175,6 +175,7 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
         return;
     }
     let c = Colors::of(ctx);
+    let following = crate::ui::tilemap::active_iso(app.tab());
     let PixmithApp { timeline, canvas, .. } = app;
     let tools = &mut canvas.tools;
     let mut open = true;
@@ -236,7 +237,13 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
                         if let Some(i) = card.picker("Type", "grid-type", sel, &names) {
                             s.custom_grid_type = GridType::ALL[i];
                         }
-                        if s.custom_grid_type == GridType::Isometric {
+                        if s.custom_grid_type == GridType::Isometric
+                            && let Some(g) = following
+                        {
+                            let text =
+                                format!("Follows the active tilemap layer: {}\u{d7}{} at {}, {}", g.w, g.h, g.x, g.y);
+                            card.raw_row(|ui| widgets::note(ui, &text));
+                        } else if s.custom_grid_type == GridType::Isometric {
                             card.pair("iso-size", ("Tile W", &mut s.iso_grid_w), ("Tile H", &mut s.iso_grid_h));
                             card.pair("iso-offset", ("X offset", &mut s.iso_grid_x), ("Y offset", &mut s.iso_grid_y));
                         } else {
