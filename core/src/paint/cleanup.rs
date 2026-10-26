@@ -726,7 +726,8 @@ impl LintList {
 /// The report of one cel.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LintReport {
-    /// Light, grayish pixels on the two outermost rings (paper halo).
+    /// Light, grayish pixels on the outside of the sprite (paper halo): touching the transparent outside, or
+    /// one ring in behind such a pixel. Light fill inside a dark outline is not listed.
     pub light_edge: LintList,
     /// Enclosed transparent areas.
     pub holes: LintList,
@@ -782,7 +783,15 @@ pub fn lint_cel(px: &[u8], w: usize, h: usize, o: &LintOptions, palette: &[[u8; 
         if p[3] < 255 {
             r.semi_transparent.push(i, w, 1, cap);
         }
-        if depth[i] <= 2 && halo_like(p, &o.halo) {
+        // Paper halo sits outside the outline: a light pixel touching the outside, or a second-ring light
+        // pixel right behind one. A light fill behind a dark outline is the drawing, not a halo.
+        let halo_edge = halo_like(p, &o.halo)
+            && (depth[i] == 1
+                || (depth[i] == 2
+                    && N4.iter().any(|&d| {
+                        nb(w, h, x, y, d).is_some_and(|j| depth[j] == 1 && halo_like(&px[j * 4..j * 4 + 4], &o.halo))
+                    })));
+        if halo_edge {
             r.light_edge.push(i, w, 1, cap);
         }
         if depth[i] == 1 && !outline[i] && !N8.iter().any(|&d| nb(w, h, x, y, d).is_some_and(|j| outline[j])) {
@@ -1536,6 +1545,19 @@ mod tests {
         let r = lint_cel(&px, w, h, &o, &[]);
         assert_eq!(r.light_edge.count, 12);
         assert_eq!(r.light_edge.items.len(), 3);
+    }
+
+    #[test]
+    fn lint_light_edge_ignores_light_fill_inside_a_dark_outline() {
+        // A cream body behind a dark outline is the drawing, not paper.
+        let (px, w, h) = art(&[".......", ".KKKKK.", ".KWWWK.", ".KWWWK.", ".KWWWK.", ".KKKKK.", "......."], KEY);
+        assert_eq!(lint_cel(&px, w, h, &LintOptions::default(), &[]).light_edge.count, 0);
+        // The same body with paper around the outline: only the paper is listed.
+        let (px, w, h) =
+            art(&[".........", ".PPPPPPP.", ".PKKKKKP.", ".PKWWWKP.", ".PKKKKKP.", ".PPPPPPP.", "........."], KEY);
+        let r = lint_cel(&px, w, h, &LintOptions::default(), &[]);
+        assert_eq!(r.light_edge.count, 20);
+        assert!(r.light_edge.items.iter().all(|i| i.x == 1 || i.x == 7 || i.y == 1 || i.y == 5));
     }
 
     #[test]

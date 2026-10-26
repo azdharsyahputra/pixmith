@@ -680,7 +680,7 @@ app.command.CleanEdges{ halo = true, despeckle = 4, holes = 2, thinOutline = tru
 `total`; each entry has `layer` and `frame` (1-based), `layerName`, `total`, and these categories, each
 `{ count, items = { { x, y, size }, ... } }` with 0-based pixel coordinates (for an area, its first pixel in scan order):
 
-- `light_edge`: light, grayish pixels on the two outermost rings (paper halo).
+- `light_edge`: light, grayish pixels on the outside of the sprite (paper halo): touching the transparent outside, or one ring in behind such a pixel. Light fill inside a dark outline is not listed.
 - `holes`: enclosed transparent areas.
 - `specks`: small pieces detached from the body.
 - `no_outline`: edge pixels that are not outline colour and have no outline pixel next to them.
