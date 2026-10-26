@@ -198,13 +198,7 @@ fn build_palette(counts: KeyMap<u32>, any_alpha: bool) -> Palette {
 }
 
 /// Palette indices of one frame; only the pixels that differ from `prev_rgba` are looked up again.
-fn index_frame(
-    rgba: &[u8],
-    prev: Option<(&[u8], &[u8])>,
-    w: usize,
-    h: usize,
-    pal: &Palette,
-) -> Vec<u8> {
+fn index_frame(rgba: &[u8], prev: Option<(&[u8], &[u8])>, w: usize, h: usize, pal: &Palette) -> Vec<u8> {
     let mut idx = prev.map_or_else(|| vec![0u8; w * h], |(_, i)| i.to_vec());
     let mut last = (u32::MAX, 0u8);
     for_changed(prev.map(|p| p.0), rgba, w, |i, px| {
@@ -336,7 +330,8 @@ fn encode<'a>(
 
     // Plan: the rectangle of each frame, then write.
     let mut out = Vec::new();
-    let mut enc = Encoder::new(&mut out, (w * scale) as u16, (h * scale) as u16, &pal.bytes).map_err(|e| e.to_string())?;
+    let mut enc =
+        Encoder::new(&mut out, (w * scale) as u16, (h * scale) as u16, &pal.bytes).map_err(|e| e.to_string())?;
     if let Some(r) = repeat {
         enc.set_repeat(r).map_err(|e| e.to_string())?;
     }
@@ -363,7 +358,8 @@ fn encode<'a>(
             for x in r.x0..r.x1 {
                 let v = f.idx[y * w + x];
                 // Unchanged pixels let the picture underneath show through, except where it was just cleared.
-                let same = slot && prev_idx.is_some_and(|p| p[y * w + x] == v) && !cleared.is_some_and(|c| c.contains(x, y));
+                let same =
+                    slot && prev_idx.is_some_and(|p| p[y * w + x] == v) && !cleared.is_some_and(|c| c.contains(x, y));
                 let v = if same { 0 } else { v };
                 row.extend(std::iter::repeat_n(v, scale));
             }
@@ -669,9 +665,8 @@ mod tests {
         let (w, h) = (32, 32);
         let mut frames = Vec::new();
         for f in 0..4usize {
-            let mut px: Vec<u8> = (0..w * h)
-                .flat_map(|i| [(i % 32 * 8) as u8, (i / 32 * 8) as u8, ((i * 7) % 251) as u8, 255])
-                .collect();
+            let mut px: Vec<u8> =
+                (0..w * h).flat_map(|i| [(i % 32 * 8) as u8, (i / 32 * 8) as u8, ((i * 7) % 251) as u8, 255]).collect();
             if f % 2 == 1 {
                 px[(5 * w + 5) * 4 + 3] = 0;
             }
@@ -732,7 +727,8 @@ mod tests {
     #[test]
     fn opaque_pixels_that_turn_transparent_are_cleared() {
         // A 6x1 strip: a block moves right, then vanishes, then reappears elsewhere.
-        let px = |v: &[u8]| -> Vec<u8> { v.iter().flat_map(|&c| if c == 0 { [0; 4] } else { [c, 0, 0, 255] }).collect() };
+        let px =
+            |v: &[u8]| -> Vec<u8> { v.iter().flat_map(|&c| if c == 0 { [0; 4] } else { [c, 0, 0, 255] }).collect() };
         let frames = vec![
             px(&[1, 1, 0, 0, 0, 0]),
             px(&[0, 1, 1, 0, 0, 0]),

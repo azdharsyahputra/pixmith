@@ -2,7 +2,9 @@
 //! BMP, TGA, ICO, PCX and FLI/FLC images) without the app.
 
 use pixmith_core::document::{Sprite, Tag};
-use pixmith_core::formats::export_plan::{render_outputs, render_outputs_warn, EncodeOptions, ExportOptions, Format, LayerMode, Trim};
+use pixmith_core::formats::export_plan::{
+    render_outputs, render_outputs_warn, EncodeOptions, ExportOptions, Format, LayerMode, Trim,
+};
 use pixmith_core::formats::raster::{self, ImageFormat, ImageOptions};
 use pixmith_core::formats::sheet::{json_str, Layout, Options};
 use pixmith_core::formats::{gif, pxmt};

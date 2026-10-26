@@ -1138,7 +1138,10 @@ pub fn trace_sprite(s: &mut Sprite, layer: usize, frame: usize, o: &TraceOptions
     let Some(rect) = rect else { return Err("nothing is left after removing the background".into()) };
     let (rw, rh) = (rect.2, rect.3);
     if !s.cels_fit_budget(rw as u64, rh as u64) {
-        return Err(format!("the traced sprite would need too much memory: {}", s.cel_budget_note(rw as u64, rh as u64)));
+        return Err(format!(
+            "the traced sprite would need too much memory: {}",
+            s.cel_budget_note(rw as u64, rh as u64)
+        ));
     }
     let active_ptr = Arc::as_ptr(cel);
     let active_pixels = crop_cells(&t.cells, nx, rect);

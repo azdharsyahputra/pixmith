@@ -238,7 +238,11 @@ mod tests {
     fn finish_job(app: &mut PixmithApp) {
         let ctx = egui::Context::default();
         for _ in 0..2000 {
+            // Inside a frame, so a progress window that shows up on a slow machine can lay out its text.
+            ctx.begin_pass(egui::RawInput::default());
             crate::ui::lua_dialog::show(app, &ctx);
+            // No painter here: drop the font atlas uploads the frame asked for.
+            ctx.end_pass().textures_delta.clear();
             if !app.job_running() && app.gamedev.lua.sessions().next().is_none() {
                 return;
             }
@@ -325,6 +329,24 @@ mod tests {
         assert_eq!(app.tab().doc.frame_count(), 2);
         assert_eq!(app.tab().frame, 1);
         assert!(app.gamedev.notice.is_none(), "the selection line is not shown");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_script_slower_than_the_progress_delay_still_finishes() {
+        // Runs longer than PROGRESS_AFTER on any machine, so the progress sheet is laid out inside `finish_job`.
+        let dir = scratch("slow");
+        let file = dir.join("slow.lua");
+        std::fs::write(
+            &file,
+            "local t = os.clock() while os.clock() - t < 0.8 do end sprite:setPixel(1, 1, 0xFF0000FF)",
+        )
+        .unwrap();
+        let mut app = PixmithApp::default();
+        app.run_script_at(&file);
+        finish_job(&mut app);
+        assert!(app.error.is_none());
+        assert!(app.tab().doc.is_dirty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
