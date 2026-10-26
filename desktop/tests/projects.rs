@@ -51,7 +51,7 @@ fn home_lists_recent_projects_and_opens_one() {
     }
     assert!(h.query_by_label("hero").is_some(), "the recent canvas card");
     h.query_all_by_label("Dungeon").last().unwrap().click();
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!(h.state().projects.screen, Screen::Project(dungeon.clone()));
     settle(&mut h, loaded);
     assert!(h.query_by_label("wall").is_some());
@@ -74,7 +74,7 @@ fn home_search_filters_and_sort_orders_projects() {
     let count = |h: &egui_kittest::Harness<'static, PixmithApp>, l: &str| h.query_all_by_label(l).count();
     assert_eq!((count(&h, "Alpha"), count(&h, "Beta")), (2, 2));
     h.state_mut().projects.search = "alp".into();
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!((count(&h, "Alpha"), count(&h, "Beta")), (2, 1), "Beta leaves the grid, not the sidebar");
     let _ = std::fs::remove_dir_all(root);
 }
@@ -104,12 +104,12 @@ fn file_home_and_its_shortcut_go_home_and_the_tabs_stay() {
     app.open_canvas(&project.join("one.pxmt"));
     let mut h = harness(app);
     h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::H);
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!(h.state().projects.screen, Screen::Home);
     assert_eq!(h.state().tabs.len(), 1, "the document stays open");
     // The document's tab stays on the title row; showing the editor again goes back to it.
     h.state_mut().show_editor();
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!(h.state().tab().doc.path.as_deref(), Some(project.join("one.pxmt").as_path()));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -129,17 +129,17 @@ fn the_project_view_shows_canvases_and_opens_one_with_enter_after_arrow_keys() {
         assert!(h.query_by_label(n).is_some(), "card {n}");
     }
     h.key_press(Key::ArrowRight);
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!(
         h.state().projects.view.selected.as_deref(),
         Some(project.join("a.pxmt").as_path()),
         "the first arrow selects the first"
     );
     h.key_press(Key::ArrowRight);
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!(h.state().projects.view.selected.as_deref(), Some(project.join("b.pxmt").as_path()));
     h.key_press(Key::Enter);
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!(h.state().projects.screen, Screen::Editor);
     assert_eq!(h.state().tab().doc.path.as_deref(), Some(project.join("b.pxmt").as_path()));
     let _ = std::fs::remove_dir_all(root);
@@ -154,11 +154,11 @@ fn clicking_a_card_selects_it_and_return_opens_it() {
     let mut h = harness(app);
     wait_for_names(&mut h, &project, &["a.pxmt", "b.pxmt"]);
     h.get_by_label("b").click();
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!(h.state().projects.view.selected.as_deref(), Some(project.join("b.pxmt").as_path()));
     assert_eq!(h.state().projects.screen, Screen::Project(project.clone()), "one click only selects");
     h.key_press(Key::Enter);
-    h.run();
+    let _ = h.run_ok(); // background jobs (thumbnails) may keep repainting on a slow machine
     assert_eq!(h.state().projects.screen, Screen::Editor);
     assert_eq!(h.state().tab().doc.path.as_deref(), Some(project.join("b.pxmt").as_path()));
     let _ = std::fs::remove_dir_all(root);

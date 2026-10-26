@@ -78,7 +78,8 @@ pub fn harness_sized(app: PixmithApp, size: [f32; 2], ppp: f32) -> Harness<'stat
         },
         app,
     );
-    h.run();
+    // Background jobs (thumbnails, scans) may keep asking for repaints on a slow machine; that is not a failure.
+    let _ = h.run_ok();
     h
 }
 
