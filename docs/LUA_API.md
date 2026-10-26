@@ -631,9 +631,14 @@ traced palette. An RGB sprite is required (no tilemap layers). One undo step.
 
 The grid is found by folding the per-column and per-row edge energy modulo each candidate pitch and keeping the sharpest
 (the scan step keeps the drift over the whole image under half a pixel; of near-ties the largest pitch wins, because
-half the true pitch folds as sharply). Each cell is the per-channel median of its central 60 % (transparent pixels are
+half the true pitch folds as sharply). Soft AI sheets drift and jitter, so no single fold of the whole image lines up
+(it is flat). When the whole-image fold is weak, the pitch (up to 16) is searched in overlapping 96 px tiles instead:
+every tile has its own phase, and the candidate whose Fourier power stands out most against its neighbouring pitches
+wins. A grid that is present but weak (soft or drifting edges) is returned anyway, with a `warning` in the result (check
+the quality, or pass `pitch`). Only an image without edges ("no edges to line up") or one whose best pitch is
+indistinguishable from noise ("grid too weak (best pitch ≈ N, concentration X); pass pitch") raises an error. Each cell is the per-channel median of its central 60 % (transparent pixels are
 ignored), then the palette and the snap are applied. Returns `{ width, height, pitch = { x, y }, phase = { x, y },
-palette, quality, closedOutline, background }`; `palette` is a list of `Color`, `quality` is 0..1 (how well cells and
+palette, quality, closedOutline, background, warning }`; `warning` is only present for a weak grid; `palette` is a list of `Color`, `quality` is 0..1 (how well cells and
 palette explain the source pixels) and `background` is the `RemoveBackground` report. A sprite without edges (flat) has
 no grid and raises an error.
 
@@ -675,16 +680,17 @@ app.command.CleanEdges{ halo = true, despeckle = 4, holes = 2, thinOutline = tru
 
 `app.lint{ ... }` reads the sprite and returns the findings without changing anything. Options: `frames`
 (`"all"` / `"layers"`), `speck` (size of a detached speck, default 4), `list` (positions listed per category, default
-64; the counts are always complete), `palette = true` (also report colours missing from the palette), and
+64; the counts are always complete), `palette = true` (also report colours missing from the palette), `strayTolerance` (default 48, see `strays`),
+`categories` (a list of the category names below; only those are reported, the others come back empty), and
 `outlineColor` / `outlineTolerance` / `outlineLuma` as above. The result is an array with one entry per cel plus
 `total`; each entry has `layer` and `frame` (1-based), `layerName`, `total`, and these categories, each
 `{ count, items = { { x, y, size }, ... } }` with 0-based pixel coordinates (for an area, its first pixel in scan order):
 
-- `light_edge`: light, grayish pixels on the outside of the sprite (paper halo): touching the transparent outside, or one ring in behind such a pixel. Light fill inside a dark outline is not listed.
+- `light_edge`: paper halo, exactly the pixels the default `CleanEdges` halo pass would remove (it reuses that pass: light, grayish, lighter than what is behind, in a group, on the outer rings). Light detail just inside an outline (a cream cuff) is not listed, so lint and `CleanEdges` never disagree. `halo` thresholds are the ones of `CleanEdges`.
 - `holes`: enclosed transparent areas.
 - `specks`: small pieces detached from the body.
 - `no_outline`: edge pixels that are not outline colour and have no outline pixel next to them.
-- `strays`: pixels that differ from all their neighbours (isolated pixels are `specks`).
+- `strays`: a lone off pixel in a flat area. It differs from every neighbour by more than `strayTolerance` (largest channel difference, default 48; 0 means any difference) while its neighbours (at least three solid) are alike: three quarters of them lie within half the tolerance of one another. Texture, dither and noise are therefore not strays (a textured 40-colour walk sheet used to list 52,639). It stays on by default because a flat-area stray is a real defect; use `categories` to leave it out. Isolated pixels are `specks`.
 - `semi_transparent`: pixels with 0 < alpha < 255.
 - `off_palette`: colours not in the palette (only with `palette = true`).
 

@@ -337,8 +337,18 @@ fn ring_depth(solid: &[bool], outside: &[bool], w: usize, h: usize, limit: u32) 
 /// every pixel behind it (or sits in front of another candidate). Candidates must form a group, and each one
 /// is removed only while it touches the outside and is a simple point. Returns whether anything changed.
 pub fn remove_halo(px: &mut [u8], w: usize, h: usize, o: &HaloOptions) -> bool {
+    let doomed = halo_pixels(px, w, h, o);
+    for &i in &doomed {
+        clear(px, i);
+    }
+    !doomed.is_empty()
+}
+
+/// The pixels `remove_halo` removes with these options, without changing anything. Lint reports exactly this
+/// list as `light_edge`, so the two never disagree.
+pub fn halo_pixels(px: &[u8], w: usize, h: usize, o: &HaloOptions) -> Vec<usize> {
     if o.rings == 0 || px.len() != w * h * 4 {
-        return false;
+        return Vec::new();
     }
     let mut solid = solid_mask(px);
     let mut outside = outside_mask(&solid, w, h);
@@ -378,7 +388,7 @@ pub fn remove_halo(px: &mut [u8], w: usize, h: usize, o: &HaloOptions) -> bool {
         }
     }
 
-    let mut changed = false;
+    let mut doomed = Vec::new();
     for _ in 0..o.rings {
         let ring: Vec<usize> = (0..w * h)
             .filter(|&i| {
@@ -390,16 +400,16 @@ pub fn remove_halo(px: &mut [u8], w: usize, h: usize, o: &HaloOptions) -> bool {
             if simple(&solid, w, h, i % w, i / w) {
                 solid[i] = false;
                 outside[i] = true;
-                clear(px, i);
+                doomed.push(i);
                 any = true;
             }
         }
-        changed |= any;
         if !any {
             break;
         }
     }
-    changed
+    doomed.sort_unstable();
+    doomed
 }
 
 // ---- Despeckle ---------------------------------------------------------------------------
@@ -683,8 +693,34 @@ pub struct LintOptions {
     pub check_palette: bool,
     /// How to recognise the outline, for "pixels with no outline neighbour".
     pub outline: ThinOptions,
-    /// Thresholds of "light" pixels on the outline ring.
+    /// The halo rules `light_edge` uses: the same options as the Clean Edges halo pass, so lint lists exactly
+    /// what that pass would remove.
     pub halo: HaloOptions,
+    /// A stray differs from every neighbour by more than this (largest channel difference, 0..=255), and its
+    /// neighbours are alike (see `LintReport::strays`). 0 means "any difference".
+    pub stray_tolerance: u32,
+    /// Categories to report, as a bit mask over `LINT_CATEGORIES` (bit 0 `light_edge`, ...). Unselected
+    /// categories come back empty.
+    pub categories: u32,
+}
+
+/// The lint category names in report order (the bit of `LintOptions::categories` is the index).
+pub const LINT_CATEGORIES: [&str; 7] =
+    ["light_edge", "holes", "specks", "no_outline", "strays", "semi_transparent", "off_palette"];
+/// Every category.
+pub const ALL_LINT_CATEGORIES: u32 = (1 << LINT_CATEGORIES.len()) - 1;
+
+/// The bit mask of the named categories; an unknown name is an error that lists the valid ones.
+pub fn lint_category_mask<S: AsRef<str>>(names: &[S]) -> Result<u32, String> {
+    let mut mask = 0;
+    for n in names {
+        let n = n.as_ref();
+        let Some(bit) = LINT_CATEGORIES.iter().position(|c| *c == n) else {
+            return Err(format!("unknown lint category \"{n}\"; use {}", LINT_CATEGORIES.join(", ")));
+        };
+        mask |= 1 << bit;
+    }
+    Ok(mask)
 }
 
 impl Default for LintOptions {
@@ -695,6 +731,8 @@ impl Default for LintOptions {
             check_palette: false,
             outline: ThinOptions::default(),
             halo: HaloOptions::default(),
+            stray_tolerance: 48,
+            categories: ALL_LINT_CATEGORIES,
         }
     }
 }
@@ -726,8 +764,8 @@ impl LintList {
 /// The report of one cel.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LintReport {
-    /// Light, grayish pixels on the outside of the sprite (paper halo): touching the transparent outside, or
-    /// one ring in behind such a pixel. Light fill inside a dark outline is not listed.
+    /// Paper halo: exactly the pixels the default Clean Edges halo pass would remove (light, grayish, lighter than
+    /// what is behind them, in a group, on the outer rings). Light detail inside an outline is not listed.
     pub light_edge: LintList,
     /// Enclosed transparent areas.
     pub holes: LintList,
@@ -735,7 +773,9 @@ pub struct LintReport {
     pub specks: LintList,
     /// Edge pixels that are not outline and have no outline pixel next to them.
     pub no_outline: LintList,
-    /// Single pixels that differ from all eight neighbours (isolated pixels are specks, not strays).
+    /// A lone off pixel in a flat area: it differs from all its neighbours by more than `stray_tolerance` while
+    /// the neighbours (at least three solid ones) are alike, so texture, dither and noise are not strays.
+    /// Isolated pixels are specks, not strays.
     pub strays: LintList,
     /// Pixels with 0 < alpha < 255.
     pub semi_transparent: LintList,
@@ -771,8 +811,11 @@ pub fn lint_cel(px: &[u8], w: usize, h: usize, o: &LintOptions, palette: &[[u8; 
     let cap = o.max_list;
     let solid = solid_mask(px);
     let outside = outside_mask(&solid, w, h);
-    let depth = ring_depth(&solid, &outside, w, h, o.halo.rings.max(2));
+    let depth = ring_depth(&solid, &outside, w, h, 1);
     let outline = outline_mask(px, &o.outline);
+    for i in halo_pixels(px, w, h, &o.halo) {
+        r.light_edge.push(i, w, 1, cap);
+    }
 
     for i in 0..w * h {
         if !solid[i] {
@@ -783,33 +826,10 @@ pub fn lint_cel(px: &[u8], w: usize, h: usize, o: &LintOptions, palette: &[[u8; 
         if p[3] < 255 {
             r.semi_transparent.push(i, w, 1, cap);
         }
-        // Paper halo sits outside the outline: a light pixel touching the outside, or a second-ring light
-        // pixel right behind one. A light fill behind a dark outline is the drawing, not a halo.
-        let halo_edge = halo_like(p, &o.halo)
-            && (depth[i] == 1
-                || (depth[i] == 2
-                    && N4.iter().any(|&d| {
-                        nb(w, h, x, y, d).is_some_and(|j| depth[j] == 1 && halo_like(&px[j * 4..j * 4 + 4], &o.halo))
-                    })));
-        if halo_edge {
-            r.light_edge.push(i, w, 1, cap);
-        }
         if depth[i] == 1 && !outline[i] && !N8.iter().any(|&d| nb(w, h, x, y, d).is_some_and(|j| outline[j])) {
             r.no_outline.push(i, w, 1, cap);
         }
-        let mut neighbours = 0;
-        let mut unlike = true;
-        for d in N8 {
-            if let Some(j) = nb(w, h, x, y, d) {
-                if solid[j] {
-                    neighbours += 1;
-                }
-                if px[j * 4..j * 4 + 4] == *p {
-                    unlike = false;
-                }
-            }
-        }
-        if neighbours > 0 && unlike {
+        if is_stray(px, w, h, x, y, o.stray_tolerance as i32) {
             r.strays.push(i, w, 1, cap);
         }
         if o.check_palette && p[3] > 0 && !palette.iter().any(|c| c[3] > 0 && c[..3] == p[..3]) {
@@ -827,7 +847,53 @@ pub fn lint_cel(px: &[u8], w: usize, h: usize, o: &LintOptions, palette: &[[u8; 
             r.specks.push(m.iter().copied().min().unwrap_or(0), w, m.len(), cap);
         }
     }
+    let keep = |bit: usize| o.categories & (1 << bit) != 0;
+    for (bit, list) in [
+        &mut r.light_edge,
+        &mut r.holes,
+        &mut r.specks,
+        &mut r.no_outline,
+        &mut r.strays,
+        &mut r.semi_transparent,
+        &mut r.off_palette,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !keep(bit) {
+            *list = LintList::default();
+        }
+    }
     r
+}
+
+/// Largest per-channel difference (alpha included) of two pixels.
+fn pixel_distance(a: &[u8], b: &[u8]) -> i32 {
+    (0..4).map(|c| (a[c] as i32 - b[c] as i32).abs()).max().unwrap_or(0)
+}
+
+/// Whether the pixel differs from all its in-bounds neighbours by more than `tol` and sits in a flat area: of its
+/// solid neighbours (at least three) three quarters lie within `tol / 2` of one of them.
+fn is_stray(px: &[u8], w: usize, h: usize, x: usize, y: usize, tol: i32) -> bool {
+    let p = &px[(y * w + x) * 4..][..4];
+    let mut solid_nb: Vec<&[u8]> = Vec::with_capacity(8);
+    for d in N8 {
+        if let Some(j) = nb(w, h, x, y, d) {
+            let q = &px[j * 4..j * 4 + 4];
+            if pixel_distance(p, q) <= tol {
+                return false;
+            }
+            if q[3] > 0 {
+                solid_nb.push(q);
+            }
+        }
+    }
+    if solid_nb.len() < 3 {
+        return false;
+    }
+    let alike =
+        solid_nb.iter().map(|a| solid_nb.iter().filter(|b| pixel_distance(a, b) <= tol / 2).count()).max().unwrap_or(0);
+    alike * 4 >= solid_nb.len() * 3
 }
 
 /// The report of one cel of a sprite.
@@ -881,7 +947,8 @@ pub fn lint_text(cels: &[CelLint]) -> String {
 
 /// Lint options from an FFI parameter block (all optional, missing ones keep their defaults): 0 speck size,
 /// 1 list cap per category, 2 check palette (0/1), 3 outline max luma, 4 fixed outline colour on/off,
-/// 5 its colour (0xRRGGBBAA), 6 its tolerance.
+/// 5 its colour (0xRRGGBBAA), 6 its tolerance, 7 stray tolerance (48), 8 category bit mask (all; bit 0 light_edge,
+/// in `LINT_CATEGORIES` order).
 pub fn lint_options_from_params(p: &[i32]) -> LintOptions {
     let int = |i: usize, d: u32, max: u32| p.get(i).map_or(d, |&v| v.clamp(0, max as i32) as u32);
     let mut o = LintOptions::default();
@@ -893,6 +960,10 @@ pub fn lint_options_from_params(p: &[i32]) -> LintOptions {
         let c = (p.get(5).copied().unwrap_or(0) as u32).to_be_bytes();
         o.outline.color = Some([c[0], c[1], c[2]]);
         o.outline.tolerance = int(6, 0, 255);
+    }
+    o.stray_tolerance = int(7, o.stray_tolerance, 255);
+    if let Some(&m) = p.get(8) {
+        o.categories = (m as u32) & ALL_LINT_CATEGORIES;
     }
     o
 }
@@ -1535,15 +1606,16 @@ mod tests {
         px[(5 * w + 3) * 4..(5 * w + 3) * 4 + 4].copy_from_slice(&odd);
         let r = lint_cel(&px, w, h, &o, &pal);
         assert_eq!(r.off_palette.items, vec![LintItem { x: 3, y: 5, size: 1 }]);
-        assert!(r.strays.items.iter().any(|s| (s.x, s.y) == (3, 5)), "the odd pixel is also a stray");
     }
 
     #[test]
     fn lint_lists_are_capped_but_counts_are_complete() {
-        let (px, w, h) = art(&["......", ".PPPP.", ".PPPP.", ".PPPP.", "......"], KEY);
+        let (px, w, h) =
+            art(&["........", ".PPPPPP.", ".PKKKKP.", ".PKKKKP.", ".PKKKKP.", ".PPPPPP.", "........"], KEY);
         let o = LintOptions { max_list: 3, ..Default::default() };
         let r = lint_cel(&px, w, h, &o, &[]);
-        assert_eq!(r.light_edge.count, 12);
+        assert_eq!(r.light_edge.count, 18);
+        assert_eq!(halo_removed(&px, w, h).len(), 18);
         assert_eq!(r.light_edge.items.len(), 3);
     }
 
@@ -1558,6 +1630,126 @@ mod tests {
         let r = lint_cel(&px, w, h, &LintOptions::default(), &[]);
         assert_eq!(r.light_edge.count, 20);
         assert!(r.light_edge.items.iter().all(|i| i.x == 1 || i.x == 7 || i.y == 1 || i.y == 5));
+    }
+
+    /// Pixels the default halo pass removes, as sorted indices.
+    fn halo_removed(px: &[u8], w: usize, h: usize) -> Vec<usize> {
+        let mut out = px.to_vec();
+        remove_halo(&mut out, w, h, &HaloOptions::default());
+        (0..w * h).filter(|&i| out[i * 4..i * 4 + 4] != px[i * 4..i * 4 + 4]).collect()
+    }
+
+    fn listed(r: &LintReport) -> Vec<usize> {
+        let mut v: Vec<usize> = r.light_edge.items.iter().map(|i| (i.y * 12 + i.x) as usize).collect();
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn lint_light_edge_is_exactly_what_clean_edges_would_remove() {
+        // Cream cuff (W) pixels: a 2x2 patch just inside the outline, and two pixels that sit in a gap of the
+        // outline and so touch the outside. Clean Edges keeps all of them (too small a group to be a halo).
+        let cuff = [
+            "............",
+            "..KKKKKKKK..",
+            ".KRRRRRRRRK.",
+            ".KRRRRRRRWW.",
+            ".KRRRWWRRRK.",
+            ".KRRRWWRRRK.",
+            ".KRRRRRRRRK.",
+            "..KKKKKKKK..",
+            "............",
+            "............",
+            "............",
+            "............",
+        ];
+        let (px, w, h) = art(&cuff, KEY);
+        let r = lint_cel(&px, w, h, &LintOptions::default(), &[]);
+        assert!(halo_removed(&px, w, h).is_empty(), "clean_edges keeps the cuff");
+        assert_eq!(r.light_edge.count, 0, "lint agrees: {:?}", r.light_edge.items);
+        // The same figure inside real paper halo: the paper is listed, and again exactly what would be removed.
+        let (px, w, h) = art(
+            &[
+                "..PPPPPPPP..",
+                ".PKKKKKKKKP.",
+                "PKRRRRRRRRKP",
+                "PKRRRRRRRRKP",
+                "PKRRRRRRRRKP",
+                "PKRRRRRRRRKP",
+                ".PKKKKKKKKP.",
+                "..PPPPPPPP..",
+                "............",
+                "............",
+                "............",
+                "............",
+            ],
+            KEY,
+        );
+        let r = lint_cel(&px, w, h, &LintOptions::default(), &[]);
+        assert!(r.light_edge.count >= 20, "paper halo is listed ({})", r.light_edge.count);
+        assert_eq!(listed(&r), halo_removed(&px, w, h));
+        // After cleaning, nothing is left to list.
+        let clean = clean_edges(&px, w, h, &CleanEdgesOptions { halo: Some(Default::default()), ..Default::default() });
+        assert_eq!(lint_cel(&clean, w, h, &LintOptions::default(), &[]).light_edge.count, 0);
+    }
+
+    #[test]
+    fn lint_strays_ignore_texture_but_find_a_lone_pixel_in_a_flat_area() {
+        // A noisy texture: every pixel differs a little from its neighbours, never by more than the tolerance.
+        let (w, h) = (16, 16);
+        let mut px = Vec::new();
+        let mut seed = 7u32;
+        for _ in 0..w * h {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let v = 100 + (seed >> 28) as u8 * 2; // 100..=130
+            px.extend_from_slice(&[v, v, 90, 255]);
+        }
+        let r = lint_cel(&px, w, h, &LintOptions::default(), &[]);
+        assert_eq!(r.strays.count, 0, "texture noise is not a stray");
+        // A hard two-colour checker is texture too: neighbours are not alike.
+        let mut checker = Vec::new();
+        for i in 0..w * h {
+            let c = if (i % w + i / w) % 2 == 0 { [20u8, 30, 200, 255] } else { [220, 210, 20, 255] };
+            checker.extend_from_slice(&c);
+        }
+        assert_eq!(lint_cel(&checker, w, h, &LintOptions::default(), &[]).strays.count, 0);
+        // A flat area with one off pixel: found.
+        let mut flat: Vec<u8> = (0..w * h).flat_map(|_| [60u8, 120, 60, 255]).collect();
+        flat[(8 * w + 8) * 4..][..4].copy_from_slice(&[200, 40, 40, 255]);
+        let r = lint_cel(&flat, w, h, &LintOptions::default(), &[]);
+        assert_eq!(r.strays.items, vec![LintItem { x: 8, y: 8, size: 1 }]);
+        // A tiny difference is below the tolerance, and tolerance 0 brings it back.
+        flat[(8 * w + 8) * 4..][..4].copy_from_slice(&[70, 120, 60, 255]);
+        assert_eq!(lint_cel(&flat, w, h, &LintOptions::default(), &[]).strays.count, 0);
+        let exact = LintOptions { stray_tolerance: 0, ..Default::default() };
+        assert_eq!(lint_cel(&flat, w, h, &exact, &[]).strays.count, 1);
+    }
+
+    #[test]
+    fn lint_categories_select_what_is_reported() {
+        let (px, w, h) = art(
+            &[
+                "..........",
+                "..PPPPPP..",
+                "..PKKKKP..",
+                "..PKKKKP..",
+                "..PKKKKP..",
+                "..PPPPPP..",
+                "..........",
+                ".........K",
+            ],
+            KEY,
+        );
+        let all = lint_cel(&px, w, h, &LintOptions::default(), &[]);
+        assert!(all.light_edge.count > 0 && all.specks.count > 0);
+        let only = LintOptions { categories: lint_category_mask(&["specks"]).unwrap(), ..Default::default() };
+        let r = lint_cel(&px, w, h, &only, &[]);
+        assert_eq!((r.light_edge.count, r.specks.count), (0, 1));
+        assert!(lint_category_mask(&["nope"]).unwrap_err().contains("light_edge"));
+        // The C ABI block: tolerance at 7, mask at 8; missing entries keep the defaults.
+        assert_eq!(lint_options_from_params(&[]).categories, ALL_LINT_CATEGORIES);
+        let o = lint_options_from_params(&[4, 64, 0, 70, 0, 0, 0, 10, 0b10]);
+        assert_eq!((o.stray_tolerance, o.categories), (10, 2));
     }
 
     #[test]

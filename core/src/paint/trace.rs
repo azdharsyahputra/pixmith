@@ -32,6 +32,23 @@ const MAX_PIXELS: usize = 1 << 26;
 const CELL_MARGIN: f64 = 0.2;
 /// A fold must concentrate the edge energy at least this many times better than a flat profile to count as a grid.
 const MIN_CONCENTRATION: f64 = 1.6;
+/// Soft AI sheets drift and jitter, so no single fold of the whole image lines up. Their grid is searched in
+/// overlapping tiles of this many source pixels (stride half of it), each with its own phase.
+const TILE: usize = 96;
+const TILE_STEP: usize = 48;
+/// Largest pitch the tile search covers (a tile must hold at least six cells).
+const TILE_MAX_PITCH: f64 = 16.0;
+/// At most this many tiles are scored (more are subsampled evenly).
+const MAX_TILES: usize = 2500;
+/// Tile search: the mean normalised power at the best pitch against the median over all pitches. At or above
+/// `STRONG_RATIO` the grid is trusted, between `WEAK_RATIO` and it the result carries a warning, below it the
+/// pitch is noise.
+const STRONG_RATIO: f64 = 3.0;
+const WEAK_RATIO: f64 = 1.25;
+/// ... plus this over the square root of the number of tile profiles (few tiles make noise peaks taller).
+const WEAK_RATIO_SPREAD: f64 = 4.0;
+/// Whole-image concentration (1 is flat) at which a fold is reported as a weak grid rather than as nothing.
+const WEAK_CONCENTRATION: f64 = 1.3;
 /// Pitches within this share of the best score are ties; the largest of them wins (sub-multiples tie with the truth).
 const TIE: f64 = 0.9;
 /// Work allowed for the Lloyd iterations of one k-means run (distance evaluations).
@@ -127,13 +144,15 @@ pub struct TraceResult {
     /// Size of the full grid in cells before cropping.
     pub grid_cells: (usize, usize),
     pub closed_outline: usize,
+    /// Set when the grid was found but is weak (soft or drifting edges): check the result or pass `pitch`.
+    pub warning: Option<String>,
 }
 
 impl TraceResult {
     pub fn to_json(&self) -> Value {
         let n = |v: f64| Value::Num((v * 1000.0).round() / 1000.0);
         let hex = |c: &[u8; 4]| Value::Str(format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]));
-        Value::Obj(vec![
+        let mut fields = vec![
             ("width".into(), Value::Num(self.width as f64)),
             ("height".into(), Value::Num(self.height as f64)),
             ("pitch".into(), Value::Arr(vec![n(self.pitch.0), n(self.pitch.1)])),
@@ -147,7 +166,11 @@ impl TraceResult {
             ),
             ("closed_outline".into(), Value::Num(self.closed_outline as f64)),
             ("background".into(), self.background.to_json()),
-        ])
+        ];
+        if let Some(w) = &self.warning {
+            fields.push(("warning".into(), Value::Str(w.clone())));
+        }
+        Value::Obj(fields)
     }
 }
 
@@ -260,24 +283,73 @@ struct Profile {
     len: usize,
 }
 
-fn profiles(rgba: &[u8], w: usize, h: usize) -> (Profile, Profile) {
+/// Edge profiles of overlapping tiles: `x` holds the column profile of every tile, `y` the row profile (both with the
+/// noise floor subtracted). Tiles with almost no edges are left out.
+#[derive(Default)]
+struct Tiles {
+    x: Vec<Vec<f32>>,
+    y: Vec<Vec<f32>>,
+}
+
+fn profiles(rgba: &[u8], w: usize, h: usize) -> (Profile, Profile, Tiles) {
     let q = premultiplied(rgba);
     let mut dx = vec![0f32; w + 1];
     let mut dy = vec![0f32; h + 1];
+    // Half-tile bands: column sums per band of rows, row sums per band of columns.
+    let (bh, bw) = (h / TILE_STEP + 1, w / TILE_STEP + 1);
+    let mut cs = vec![0f32; bh * w];
+    let mut rs = vec![0f32; bw * h];
     let diff =
         |a: usize, b: usize| -> f32 { (0..4).map(|c| q[a * 4 + c].abs_diff(q[b * 4 + c])).max().unwrap_or(0) as f32 };
     for y in 0..h {
         for x in 0..w {
             let i = y * w + x;
             if x > 0 {
-                dx[x] += diff(i, i - 1);
+                let d = diff(i, i - 1);
+                dx[x] += d;
+                cs[(y / TILE_STEP) * w + x] += d;
             }
             if y > 0 {
-                dy[y] += diff(i, i - w);
+                let d = diff(i, i - w);
+                dy[y] += d;
+                rs[(x / TILE_STEP) * h + y] += d;
             }
         }
     }
-    (sparse(dx, w), sparse(dy, h))
+    let mut tiles = Tiles::default();
+    if w >= TILE && h >= TILE {
+        let (nx, ny) = ((w - TILE) / TILE_STEP + 1, (h - TILE) / TILE_STEP + 1);
+        let skip = (nx * ny).div_ceil(MAX_TILES).max(1);
+        let floor_off = |v: &mut Vec<f32>| -> bool {
+            let raw: f32 = v.iter().sum();
+            if raw < (TILE * TILE) as f32 {
+                return false;
+            }
+            let mut sorted = v[1..].to_vec();
+            sorted.sort_by(f32::total_cmp);
+            let floor = sorted[sorted.len() / 2];
+            v.iter_mut().for_each(|e| *e = (*e - floor).max(0.0));
+            v.iter().any(|&e| e > 0.0)
+        };
+        for ty in (0..ny).step_by(skip) {
+            for tx in (0..nx).step_by(skip) {
+                let (x0, y0) = (tx * TILE_STEP, ty * TILE_STEP);
+                let mut col: Vec<f32> = (0..TILE)
+                    .map(|i| cs[(y0 / TILE_STEP) * w + x0 + i] + cs[(y0 / TILE_STEP + 1).min(bh - 1) * w + x0 + i])
+                    .collect();
+                let mut row: Vec<f32> = (0..TILE)
+                    .map(|i| rs[(x0 / TILE_STEP) * h + y0 + i] + rs[(x0 / TILE_STEP + 1).min(bw - 1) * h + y0 + i])
+                    .collect();
+                if floor_off(&mut col) {
+                    tiles.x.push(col);
+                }
+                if floor_off(&mut row) {
+                    tiles.y.push(row);
+                }
+            }
+        }
+    }
+    (sparse(dx, w), sparse(dy, h), tiles)
 }
 
 /// Subtracts the noise floor (the median) and keeps the non-zero entries.
@@ -412,39 +484,122 @@ fn phase_for(pr: &Profile, p: f64) -> f64 {
     (at * bw).rem_euclid(p)
 }
 
+/// Searches the pitch in tiles: for every candidate the Fourier power of each tile's edge profile (normalised by its
+/// energy, so a tile with edges at random positions scores 1 on average) is averaged. Every tile may have its own
+/// phase and the grid may drift between tiles, which is how soft AI sheets behave. Returns the pitch and the ratio of
+/// its score to the median score of the candidates around it.
+fn tile_scan(sets: &[&Vec<Vec<f32>>], min: f64, max: f64) -> Option<(f64, f64, f64)> {
+    let max = max.min(TILE_MAX_PITCH);
+    if max < min {
+        return None;
+    }
+    let n: usize = sets.iter().map(|s| s.len()).sum();
+    if n == 0 {
+        return None;
+    }
+    let rel = 0.4 / TILE as f64;
+    let mut ps = Vec::new();
+    let mut p = min;
+    while p <= max * (1.0 + 1e-9) {
+        ps.push(p);
+        p *= 1.0 + rel;
+    }
+    let mut score = vec![0.0f64; ps.len()];
+    for prof in sets.iter().flat_map(|s| s.iter()) {
+        let energy: f64 = prof.iter().map(|&v| (v as f64) * (v as f64)).sum();
+        if energy <= 0.0 {
+            continue;
+        }
+        for (k, &p) in ps.iter().enumerate() {
+            let th = std::f64::consts::TAU / p;
+            let (rc, rs) = (th.cos(), th.sin());
+            let (mut c, mut s) = ((-th / 2.0).cos(), (-th / 2.0).sin());
+            let (mut re, mut im) = (0.0, 0.0);
+            for &v in prof.iter() {
+                re += v as f64 * c;
+                im += v as f64 * s;
+                (c, s) = (c * rc - s * rs, c * rs + s * rc);
+            }
+            score[k] += (re * re + im * im) / energy;
+        }
+    }
+    // Each candidate is compared with the median score of the candidates within a factor 1.35 around it, so a sharp
+    // peak stands out while the broad rise of the score toward large pitches (few cells per tile) does not.
+    let half = (0.3 / (1.0 + rel).ln()).round() as usize;
+    let mut ratios = Vec::with_capacity(ps.len());
+    for k in 0..ps.len() {
+        let mut near: Vec<f64> = score[k.saturating_sub(half)..(k + half + 1).min(ps.len())].to_vec();
+        near.sort_by(f64::total_cmp);
+        let med = near[near.len() / 2] / n as f64;
+        ratios.push(if med > 0.0 { score[k] / n as f64 / med } else { 0.0 });
+    }
+    let samples: Vec<(f64, f64)> = ps.iter().copied().zip(ratios).collect();
+    let (p, r) = pick_pitch(&samples)?;
+    Some((p, r, WEAK_RATIO + WEAK_RATIO_SPREAD / (n as f64).sqrt()))
+}
+
+/// A detected grid and, when it is weak, a warning for the caller.
+struct Detected {
+    grid: Grid,
+    warning: Option<String>,
+}
+
 /// Finds the cell size and the phase of the pseudo-pixel grid.
 pub fn detect_grid(rgba: &[u8], w: usize, h: usize, pitch: &Pitch, separate_axes: bool) -> Result<Grid, String> {
     check_image(rgba, w, h)?;
-    let (px, py) = profiles(rgba, w, h);
-    detect_with(&px, &py, pitch, separate_axes)
+    let (px, py, tiles) = profiles(rgba, w, h);
+    detect_with(&px, &py, &tiles, pitch, separate_axes).map(|d| d.grid)
 }
 
-fn detect_with(px: &Profile, py: &Profile, pitch: &Pitch, separate: bool) -> Result<Grid, String> {
-    let no_grid = || "no pixel grid found: the image has no edges to line up".to_string();
+fn detect_with(px: &Profile, py: &Profile, tiles: &Tiles, pitch: &Pitch, separate: bool) -> Result<Detected, String> {
+    if px.total <= 0.0 && py.total <= 0.0 {
+        return Err("no pixel grid found: the image has no edges to line up".to_string());
+    }
+    let mut warnings: Vec<String> = Vec::new();
     let (pitch_x, pitch_y) = match *pitch {
         Pitch::Fixed(x, y) => (x, y),
         Pitch::Auto { min, max } => {
-            let find = |set: &[&Profile]| -> Result<f64, String> {
+            let mut find = |set: &[&Profile], tl: &[&Vec<Vec<f32>>]| -> Result<f64, String> {
                 let samples = scan(set, min, max, 0.5);
-                let (p, _) = pick_pitch(&samples).ok_or_else(no_grid)?;
                 let best = samples.iter().map(|s| s.1).fold(0.0, f64::max);
-                if best * p < MIN_CONCENTRATION * set.len() as f64 {
-                    return Err(no_grid());
+                let global = pick_pitch(&samples).map(|(p, _)| (p, best * p / set.len() as f64));
+                if let Some((p, c)) = global {
+                    if c >= MIN_CONCENTRATION {
+                        return Ok(refine(set, p));
+                    }
                 }
-                Ok(refine(set, p))
+                let tiled = tile_scan(tl, min, max);
+                let weak = |p: f64, c: f64, what: &str| {
+                    format!("weak pixel grid: best pitch ≈ {p:.2} ({what} {c:.2}); check the result or pass pitch")
+                };
+                match (tiled, global) {
+                    (Some((p, r, _)), _) if r >= STRONG_RATIO => Ok(p),
+                    (_, Some((p, c))) if c >= WEAK_CONCENTRATION => {
+                        warnings.push(weak(p, c, "concentration"));
+                        Ok(refine(set, p))
+                    }
+                    (Some((p, r, gate)), _) if r >= gate => {
+                        warnings.push(weak(p, r, "tile contrast"));
+                        Ok(p)
+                    }
+                    (t, g) => {
+                        let p = t.map(|t| t.0).or(g.map(|g| g.0)).unwrap_or(min);
+                        let c = g.map_or(0.0, |g| g.1);
+                        Err(format!("grid too weak (best pitch ≈ {p:.1}, concentration {c:.2}); pass pitch"))
+                    }
+                }
             };
             if separate {
-                (find(&[px])?, find(&[py])?)
+                (find(&[px], &[&tiles.x])?, find(&[py], &[&tiles.y])?)
             } else {
-                let p = find(&[px, py])?;
+                let p = find(&[px, py], &[&tiles.x, &tiles.y])?;
                 (p, p)
             }
         }
     };
-    if px.total <= 0.0 && py.total <= 0.0 {
-        return Err(no_grid());
-    }
-    Ok(Grid { pitch: (pitch_x, pitch_y), phase: (phase_for(px, pitch_x), phase_for(py, pitch_y)) })
+    warnings.dedup();
+    let grid = Grid { pitch: (pitch_x, pitch_y), phase: (phase_for(px, pitch_x), phase_for(py, pitch_y)) };
+    Ok(Detected { grid, warning: (!warnings.is_empty()).then(|| warnings.join("; ")) })
 }
 
 fn check_image(rgba: &[u8], w: usize, h: usize) -> Result<(), String> {
@@ -886,6 +1041,7 @@ struct Traced {
     background: BgStats,
     closed: usize,
     quality: f32,
+    warning: Option<String>,
 }
 
 fn bounds(cells: &[u8], nx: usize, ny: usize) -> Option<(usize, usize, usize, usize)> {
@@ -914,8 +1070,8 @@ fn crop_cells(cells: &[u8], nx: usize, r: (usize, usize, usize, usize)) -> Vec<u
 fn trace_full(rgba: &[u8], w: usize, h: usize, o: &TraceOptions) -> Result<Traced, String> {
     o.validate()?;
     check_image(rgba, w, h)?;
-    let (px, py) = profiles(rgba, w, h);
-    let mut grid = detect_with(&px, &py, &o.pitch, o.separate_axes)?;
+    let (px, py, tiles) = profiles(rgba, w, h);
+    let Detected { mut grid, warning } = detect_with(&px, &py, &tiles, &o.pitch, o.separate_axes)?;
     if let Some((fx, fy)) = o.phase {
         grid.phase = (fx.rem_euclid(grid.pitch.0), fy.rem_euclid(grid.pitch.1));
     }
@@ -931,7 +1087,7 @@ fn trace_full(rgba: &[u8], w: usize, h: usize, o: &TraceOptions) -> Result<Trace
     let closed = if o.close_outline { close_outline(&mut cells, nx, ny) } else { 0 };
     let mad = lattice.fit_error(rgba, w, &cells);
     let quality = (1.0 - mad / 30.0).clamp(0.0, 1.0) as f32;
-    Ok(Traced { cells, size: (nx, ny), lattice, grid, palette, background, closed, quality })
+    Ok(Traced { cells, size: (nx, ny), lattice, grid, palette, background, closed, quality, warning })
 }
 
 /// Traces an RGBA image onto its pixel grid. See the module documentation for the steps.
@@ -953,6 +1109,7 @@ pub fn trace_grid(rgba: &[u8], w: usize, h: usize, o: &TraceOptions) -> Result<T
         origin: (rect.0, rect.1),
         grid_cells: (nx, ny),
         closed_outline: t.closed,
+        warning: t.warning,
     })
 }
 
@@ -1047,6 +1204,7 @@ pub fn trace_sprite(s: &mut Sprite, layer: usize, frame: usize, o: &TraceOptions
         origin: (rect.0, rect.1),
         grid_cells: (nx, ny),
         closed_outline: t.closed,
+        warning: t.warning,
     })
 }
 

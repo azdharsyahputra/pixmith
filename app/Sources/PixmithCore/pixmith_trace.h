@@ -32,5 +32,6 @@ char *pixmith_remove_background(PixmithDoc *doc, uint32_t layer, uint32_t frame,
 //             "crop": true,                        crop to the opaque cells
 //             "seed": 1}                           k-means seed (same seed, same palette)
 //   report:  {"width", "height", "pitch": [x, y], "phase": [x, y], "palette": ["#rrggbb", ...], "quality": 0...1,
-//             "origin": [x, y], "grid_cells": [w, h], "closed_outline": n, "background": {...}}
+//             "origin": [x, y], "grid_cells": [w, h], "closed_outline": n, "background": {...},
+//             "warning": "..." (only when the grid is weak: check the quality or pass pitch)}
 char *pixmith_trace_grid(PixmithDoc *doc, uint32_t layer, uint32_t frame, const char *options_json);

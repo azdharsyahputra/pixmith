@@ -115,6 +115,8 @@ struct Look {
     sigma: f64,
     noise: f64,
     shadow: bool,
+    /// 1 keeps the colours; less pulls them toward grey (AI art with washed-out edges).
+    contrast: f64,
 }
 
 fn render(s: &Sprite, look: &Look) -> Render {
@@ -180,7 +182,7 @@ fn render(s: &Sprite, look: &Look) -> Render {
     let mut rgba = Vec::with_capacity(w * h * 4);
     for p in img {
         for c in p {
-            rgba.push((c + rng.signed() * look.noise).round().clamp(0.0, 255.0) as u8);
+            rgba.push((128.0 + (c - 128.0) * look.contrast + rng.signed() * look.noise).round().clamp(0.0, 255.0) as u8);
         }
         rgba.push(255);
     }
@@ -188,7 +190,7 @@ fn render(s: &Sprite, look: &Look) -> Render {
 }
 
 fn default_look() -> Look {
-    Look { pitch: (7.3, 7.3), origin: (25.6, 21.1), sigma: 0.9, noise: 6.0, shadow: true }
+    Look { pitch: (7.3, 7.3), origin: (25.6, 21.1), sigma: 0.9, noise: 6.0, shadow: true, contrast: 1.0 }
 }
 
 fn dist(a: [u8; 4], b: [u8; 4]) -> f64 {
@@ -272,6 +274,76 @@ fn survives_heavier_blur_and_noise() {
     assert_eq!((t.width, t.height), (30, 32));
     let share = match_share(&s, &t.rgba, t.width, t.height, 40.0);
     assert!(share >= 0.95, "{:.1}%", share * 100.0);
+}
+
+/// Soft AI-like sheets: small non-integer pitch, heavy blur, low contrast and noise. The whole-image fold is weak
+/// here, the tile search has to carry the detection.
+#[test]
+fn finds_the_pitch_of_soft_low_contrast_edges() {
+    let auto = |min: f64, max: f64| TraceOptions { pitch: Pitch::Auto { min, max }, ..cleaning() };
+    for (pitch, origin, sigma, noise, contrast) in
+        [(4.0, (5.3, 9.6), 1.1, 7.0, 0.5), (6.4, (13.7, 2.9), 1.5, 8.0, 0.45), (4.0, (1.1, 3.7), 1.3, 10.0, 0.4)]
+    {
+        let s = Sprite::new(40, 40);
+        let r = render(&s, &Look { pitch: (pitch, pitch), origin, sigma, noise, contrast, shadow: false });
+        let g = detect_grid(&r.rgba, r.w, r.h, &Pitch::Auto { min: 3.0, max: 32.0 }, false).unwrap();
+        assert!((g.pitch.0 - pitch).abs() <= 0.1, "pitch {:?} for {pitch}", g.pitch);
+        let t = trace_grid(&r.rgba, r.w, r.h, &auto(3.0, 32.0)).unwrap();
+        assert!((t.pitch.0 - pitch).abs() <= 0.1, "traced pitch {:?} for {pitch}", t.pitch);
+        assert!(t.quality > 0.5, "quality {} for {pitch}", t.quality);
+        assert!(
+            t.width.abs_diff(40) <= 3 && t.height.abs_diff(40) <= 3,
+            "size {}x{} for pitch {pitch}",
+            t.width,
+            t.height
+        );
+    }
+}
+
+#[test]
+fn a_noise_image_is_too_weak_not_a_grid() {
+    let mut rng = Rng(0x1234_5678_9ABC_DEF1);
+    let (w, h) = (200, 200);
+    let mut px = Vec::with_capacity(w * h * 4);
+    for _ in 0..w * h {
+        let v = (128.0 + rng.signed() * 60.0) as u8;
+        px.extend_from_slice(&[v, v, v, 255]);
+    }
+    let e = detect_grid(&px, w, h, &Pitch::Auto { min: 3.0, max: 32.0 }, false).unwrap_err();
+    assert!(e.contains("too weak") && e.contains("pass pitch"), "{e}");
+    let flat = vec![200u8; 64 * 64 * 4];
+    let e = detect_grid(&flat, 64, 64, &Pitch::Auto { min: 3.0, max: 32.0 }, false).unwrap_err();
+    assert!(e.contains("no edges"), "{e}");
+}
+
+/// Reads the real AI sheets when they exist (`cargo test -p pixmith-core --test trace real_ai -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn real_ai_sheets_report_their_pitch() {
+    let root = "/Users/csadeveloper/inn/inn-assets/reference";
+    for (file, want) in
+        [("mc_v4/walk_ref/ref_walk_S.png", 4.0), ("mc_v4/ref_sheet.png", 4.0), ("moosling_v3/ref_sheet.png", 6.4)]
+    {
+        let path = format!("{root}/{file}");
+        let Ok(f) = std::fs::File::open(&path) else { continue };
+        let mut dec = png::Decoder::new(f);
+        dec.set_transformations(png::Transformations::EXPAND);
+        let mut rd = dec.read_info().unwrap();
+        let mut buf = vec![0; rd.output_buffer_size()];
+        let info = rd.next_frame(&mut buf).unwrap();
+        let (w, h) = (info.width as usize, info.height as usize);
+        let rgba: Vec<u8> = match info.color_type {
+            png::ColorType::Rgba => buf[..w * h * 4].to_vec(),
+            png::ColorType::Rgb => buf[..w * h * 3].chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+            other => panic!("{other:?}"),
+        };
+        let opts = TraceOptions { colors: Colors::Auto { min: 2, max: 32 }, ..TraceOptions::default() };
+        let t = trace_grid(&rgba, w, h, &opts).unwrap();
+        println!(
+            "{file}: pitch {:.3} x {:.3} (expected {want}), quality {:.3}, warning {:?}",
+            t.pitch.0, t.pitch.1, t.quality, t.warning
+        );
+    }
 }
 
 #[test]

@@ -46,7 +46,8 @@ bool pixmith_curve_lut(const int32_t *xy, size_t n, uint8_t *out);
 
 // Sprite Lint (read only). Reports problems of the cels chosen by `target` (as above) without changing the
 // document. `params` (all optional, in this order): speck size (4), positions listed per category (64), check
-// palette (0/1), outline max luma (70), fixed outline color on (0/1), its color, its tolerance.
+// palette (0/1), outline max luma (70), fixed outline color on (0/1), its color, its tolerance, stray tolerance (48),
+// category bit mask (all; bit 0 light_edge, then holes, specks, no_outline, strays, semi_transparent, off_palette).
 // Returns NULL on a bad argument; otherwise text to release with pixmith_string_free: a line "cel <layer> <frame>"
 // (0-based) starts a cel; a line "<category> <count>" starts a category (light_edge, holes, specks, no_outline,
 // strays, semi_transparent, off_palette); the lines below it are "x y size".

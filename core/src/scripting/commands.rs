@@ -779,7 +779,7 @@ fn remove_background_command(lua: &Lua, a: &Ctx, p: &Params) -> LuaResult<Table>
 
 /// `app.command.TraceGrid{ pitch = "auto", colors = 16, removeBackground = true, closeOutline = true, ... }`: traces
 /// the sprite onto the pixel grid found in the active cel (see docs/LUA_API.md). Returns
-/// `{ width, height, pitch = {x, y}, phase = {x, y}, palette, quality, background, closedOutline }`.
+/// `{ width, height, pitch = {x, y}, phase = {x, y}, palette, quality, background, closedOutline, warning }` (`warning` only for a weak grid).
 fn trace_grid_command(lua: &Lua, a: &Ctx, p: &Params) -> LuaResult<Table> {
     let o = trace_options(a, p)?;
     let (l, f) = drawable(a)?;
@@ -796,6 +796,9 @@ fn trace_grid_command(lua: &Lua, a: &Ctx, p: &Params) -> LuaResult<Table> {
     t.set("quality", r.quality)?;
     t.set("closedOutline", r.closed_outline)?;
     t.set("background", bg_report(lua, &r.background)?)?;
+    if let Some(w) = &r.warning {
+        t.set("warning", w.as_str())?;
+    }
     Ok(t)
 }
 
@@ -1292,7 +1295,7 @@ fn clean_edges_command(a: &Ctx, p: &Params) -> LuaResult<()> {
 /// `app.lint{ frames, speck, list, palette, ... }`: reads the active sprite and returns a table of findings per
 /// cel; it changes nothing. See docs/LUA_API.md.
 fn lint_function(lua: &Lua, root: &Rc<Ctx>, p: Params) -> LuaResult<Table> {
-    use crate::paint::cleanup::{lint_sprite, LintList, LintOptions};
+    use crate::paint::cleanup::{lint_category_mask, lint_sprite, LintList, LintOptions};
     let a = active_ctx(root);
     if a.doc.closed.get() || !a.has_doc.get() {
         return Err(Error::runtime("app.lint: there is no active sprite"));
@@ -1307,6 +1310,13 @@ fn lint_function(lua: &Lua, root: &Rc<Ctx>, p: Params) -> LuaResult<Table> {
         o.max_list = v.clamp(0, 100_000) as usize;
     }
     o.check_palette = p.flag("palette").unwrap_or(false);
+    if let Some(v) = p.int("strayTolerance") {
+        o.stray_tolerance = v.clamp(0, 255) as u32;
+    }
+    if let Value::Table(t) = p.get("categories") {
+        let names = t.sequence_values::<String>().collect::<LuaResult<Vec<_>>>()?;
+        o.categories = lint_category_mask(&names).map_err(|m| Error::runtime(format!("app.lint: {m}")))?;
+    }
     outline_options(&p, &mut o.outline)?;
     let cels = lint_sprite(a.sprite(), &o, cleanup_target(&p), l, f);
     let out = lua.create_table()?;
