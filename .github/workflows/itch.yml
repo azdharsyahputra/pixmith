@@ -1,0 +1,54 @@
+name: Publish to itch.io
+
+# Pushes the release downloads to itch.io (azdharsyahputra/pixmith) with butler, one channel per platform. Runs after
+# "Release desktop builds" succeeds, when every asset is on the release, or by hand for an existing tag.
+on:
+  workflow_run:
+    workflows: [Release desktop builds]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish (for example v0.5.2)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  itch:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+      TARGET: azdharsyahputra/pixmith
+    steps:
+      - name: Pick the tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RUN_REF: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          tag="$INPUT_TAG"
+          [ -z "$tag" ] && case "$RUN_REF" in v*) tag="$RUN_REF" ;; esac
+          [ -z "$tag" ] && tag=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "Publishing $tag"
+      - name: Download the release assets
+        run: |
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D dist \
+            -p Pixmith-mac.dmg -p Pixmith-windows-setup.exe -p Pixmith-linux.tar.gz
+          ls -l dist
+      - name: Install butler
+        run: |
+          curl -fsSL -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip -q butler.zip -d butler
+          chmod +x butler/butler
+          butler/butler -V
+      - name: Push
+        run: |
+          v="${TAG#v}"
+          butler/butler push dist/Pixmith-mac.dmg "$TARGET:mac" --userversion "$v"
+          butler/butler push dist/Pixmith-windows-setup.exe "$TARGET:windows" --userversion "$v"
+          butler/butler push dist/Pixmith-linux.tar.gz "$TARGET:linux" --userversion "$v"
