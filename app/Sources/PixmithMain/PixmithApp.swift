@@ -3,11 +3,36 @@ import SwiftUI
 @testable import PixmithKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Files that arrived before the window existed.
+    private var pendingOpens: [URL] = []
+    private var launched = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Files from Finder, the Dock or `open` arrive as an Open Documents event. SwiftUI's own handler looks for a
+        // scene to take the file, finds none for the single main Window, and closes that window, which quits the app.
+        // Taking the event here first keeps the window and opens the file in a tab.
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(handleOpenDocuments(_:withReply:)),
+            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEOpenDocuments))
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Prefs.applyAppearance()
         LiveServer.shared.applyPreference()
         // Scripts that enabled extensions contribute load as plugins.
         PluginHost.shared.syncExtensions()
+        launched = true
+        let urls = pendingOpens
+        pendingOpens = []
+        if !urls.isEmpty { DispatchQueue.main.async { self.open(urls) } }
+    }
+
+    @objc private func handleOpenDocuments(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
+        guard let list = event.paramDescriptor(forKeyword: keyDirectObject) else { return }
+        let urls = list.numberOfItems == 0
+            ? [list.fileURLValue].compactMap { $0 }
+            : (1...list.numberOfItems).compactMap { list.atIndex($0)?.fileURLValue }
+        if launched { open(urls) } else { pendingOpens += urls }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -17,6 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Files and project folders from Finder, the Dock or `open`; opening one skips the Home screen.
     func application(_ application: NSApplication, open urls: [URL]) {
+        open(urls)
+    }
+
+    private func open(_ urls: [URL]) {
+        NSApp.activate(ignoringOtherApps: true)
         urls.forEach { SpriteModel.shared.requestOpen($0) }
     }
 
