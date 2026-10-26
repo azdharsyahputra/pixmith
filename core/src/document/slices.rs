@@ -96,8 +96,8 @@ pub struct Slice {
     pub name: String,
     pub nine_patch: bool,
     pub has_pivot: bool,
-    /// First frame the pivot applies to (only meaningful with `has_pivot`). Frames before it have no pivot. The
-    /// .aseprite format stores one pivot flag per slice, so a file always loads with 0.
+    /// First frame the pivot applies to. Frames before it have no pivot. Always 0 without `has_pivot`. The .aseprite
+    /// format has one pivot flag per slice, so this rides in the slice chunk's reserved dword (Aseprite ignores it).
     pub pivot_from: u32,
     /// Sorted by frame, one key per frame.
     pub keys: Vec<SliceKey>,
@@ -155,7 +155,7 @@ impl Extra {
         let at = at as u32;
         for s in &mut self.slices {
             s.keys.iter_mut().filter(|k| k.frame >= at).for_each(|k| k.frame += 1);
-            if s.pivot_from >= at {
+            if s.has_pivot && s.pivot_from >= at {
                 s.pivot_from += 1;
             }
         }
@@ -178,7 +178,9 @@ impl Extra {
         for s in &mut self.slices {
             s.keys.iter_mut().for_each(|k| k.frame = new_index(k.frame));
             s.keys.sort_by_key(|k| k.frame);
-            s.pivot_from = new_index(s.pivot_from);
+            if s.has_pivot {
+                s.pivot_from = new_index(s.pivot_from);
+            }
         }
     }
 
@@ -212,7 +214,9 @@ impl Extra {
         for s in &mut self.slices {
             let Some(&tail) = s.keys.last() else { continue };
             s.keys.retain(|k| k.frame <= last);
-            s.pivot_from = s.pivot_from.min(last);
+            if s.has_pivot {
+                s.pivot_from = s.pivot_from.min(last);
+            }
             if s.keys.is_empty() {
                 s.keys.push(SliceKey { frame: last, ..tail });
             }
@@ -224,7 +228,9 @@ impl Extra {
         let i = i as u32;
         for s in &mut self.slices {
             s.keys.iter_mut().filter(|k| k.frame > i).for_each(|k| k.frame -= 1);
-            s.pivot_from = s.pivot_from.saturating_sub((s.pivot_from > i) as u32);
+            if s.has_pivot {
+                s.pivot_from = s.pivot_from.saturating_sub((s.pivot_from > i) as u32);
+            }
             // Keys that now share a frame: the later one wins.
             let mut seen: Vec<SliceKey> = Vec::new();
             for k in s.keys.drain(..) {
@@ -327,7 +333,7 @@ fn slice_body(s: &Slice) -> Vec<u8> {
     let mut b = Vec::new();
     put_u32(&mut b, s.keys.len() as u32);
     put_u32(&mut b, if s.nine_patch { SLICE_NINE_PATCH } else { 0 } | if s.has_pivot { SLICE_PIVOT } else { 0 });
-    put_u32(&mut b, 0);
+    put_u32(&mut b, if s.has_pivot { s.pivot_from } else { 0 });
     put_str(&mut b, &s.name);
     for k in &s.keys {
         put_u32(&mut b, k.frame);
@@ -353,13 +359,16 @@ fn parse_slice(body: &[u8]) -> Option<Slice> {
     let mut c = Cursor { buf: body, pos: 0 };
     let n = c.u32()?;
     let flags = c.u32()?;
-    c.u32()?;
+    let reserved = c.u32()?;
     let mut s = Slice {
         name: c.string()?,
         nine_patch: flags & SLICE_NINE_PATCH != 0,
         has_pivot: flags & SLICE_PIVOT != 0,
         ..Default::default()
     };
+    if s.has_pivot {
+        s.pivot_from = reserved;
+    }
     for _ in 0..n {
         let mut k = SliceKey { frame: c.u32()?, ..Default::default() };
         k.bounds = Rect { x: c.i32()?, y: c.i32()?, w: c.u32()?, h: c.u32()? };
@@ -1030,6 +1039,29 @@ mod tests {
         assert!(
             parse_slice(&slice_body(&Slice { keys: vec![SliceKey::default()], ..Default::default() })[..10]).is_none()
         );
+    }
+
+    #[test]
+    fn pivot_from_survives_the_file_and_frame_moves_leave_pivotless_slices_alone() {
+        let mut s = rich_sprite();
+        let key = |frame| SliceKey { frame, bounds: rect(0, 0, 2, 2), pivot: (1, 1), ..Default::default() };
+        s.extra.slices.push(Slice {
+            name: "late".into(),
+            has_pivot: true,
+            pivot_from: 1,
+            keys: vec![key(0), key(1)],
+            ..Default::default()
+        });
+        s.extra.slices.push(Slice {
+            name: "none".into(),
+            keys: vec![SliceKey { pivot: (0, 0), ..key(0) }],
+            ..Default::default()
+        });
+        assert_eq!(ase::read(&ase::write(&s)).unwrap().extra, s.extra);
+        s.extra.frame_moved(0, 1);
+        assert_eq!(s.extra.slices[0].pivot_from, 0);
+        assert_eq!(s.extra.slices[1].pivot_from, 0);
+        assert_eq!(ase::read(&ase::write(&s)).unwrap().extra, s.extra);
     }
 
     #[test]

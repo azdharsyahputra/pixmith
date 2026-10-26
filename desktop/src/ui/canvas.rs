@@ -262,6 +262,7 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
     let busy = matches!(state.gesture, Some(Gesture::Tool(_)));
     let CanvasState { tools, .. } = &mut *state;
     tools.onion.prepare(&ctx, tab, &tools.settings, timeline.onion_skin, busy);
+    tools.diff.prepare(&ctx, tab, &tools.settings, timeline.frame_diff, busy);
     paint(state, sel, tilemap, tab, *tool, &ui.painter_at(rect), &c, *dark, rect, srect, ppp, timeline.show_grid);
     crate::ui::gamedev::tween_canvas::paint(&gamedev.tween, tab, &ui.painter_at(rect), &c, srect);
     if response.hovered() {
@@ -580,6 +581,7 @@ fn paint(
         settings: &state.tools.settings,
         reference: state.tools.reference.as_ref(),
         onion: &state.tools.onion,
+        diff: &state.tools.diff,
         sprite: state.preview.as_ref().or(state.texture.as_ref()).map(|t| t.id()),
         area,
         srect,
@@ -637,7 +639,11 @@ fn paint(
         Some((cx, cy)) if (0..w).contains(&cx) && (0..h).contains(&cy) => format!("{cx}, {cy}"),
         _ => "\u{2013}".to_string(),
     };
-    widgets::overlay_chip(painter, c, Pos2::new(x, top), Some(egui_phosphor::regular::CURSOR), &position);
+    x += widgets::overlay_chip(painter, c, Pos2::new(x, top), Some(egui_phosphor::regular::CURSOR), &position);
+    if let Some(d) = state.tools.diff.stats {
+        x += space::XS + 2.0;
+        widgets::overlay_chip(painter, c, Pos2::new(x, top), None, &d.chip());
+    }
 }
 
 /// Keyboard: tool keys, `[` / `]` brush size, undo and redo.

@@ -663,6 +663,7 @@ fn pivot_section(ui: &mut Ui, st: &mut TweenState, tab: &mut DocTab) {
             st.center_pivot(tab);
         }
     });
+    parent_row(ui, tab);
     for (flag, title) in [
         (0u32, "RotSprite rotation (off = nearest, faster)"),
         (1, "Snap scale to integer"),
@@ -683,6 +684,34 @@ fn pivot_section(ui: &mut Ui, st: &mut TweenState, tab: &mut DocTab) {
             );
         });
     }
+}
+
+/// "Parent": the layer this one follows (thigh -> shin -> boot). The list leaves out the layer itself, its
+/// descendants and groups it cannot be linked with, so no cycle can be picked.
+fn parent_row(ui: &mut Ui, tab: &mut DocTab) {
+    let layer = tab.layer;
+    let current = tab.doc.tween_parent(layer);
+    let mut ids: Vec<Option<u32>> = vec![None];
+    let mut titles: Vec<String> = vec!["None".to_string()];
+    for l in (0..tab.doc.layer_count()).rev() {
+        if current == Some(l) || tab.doc.tween_can_parent(layer, l) {
+            ids.push(Some(l));
+            titles.push(format!("{} \u{b7} {}", l + 1, tab.doc.layer_name(l)));
+        }
+    }
+    let selected = ids.iter().position(|p| *p == current).unwrap_or(0);
+    let names: Vec<&str> = titles.iter().map(String::as_str).collect();
+    let mut chosen = None;
+    form::form_row(ui, FORM_LABEL, "Parent", |ui| {
+        chosen = widgets::ds_popup(ui, "parent", selected, &names, None, true, "Follow another layer's motion");
+    });
+    if let Some(i) = chosen
+        && ids[i] != current
+        && tab.doc.tween_set_parent(layer, ids[i])
+    {
+        tab.changed();
+    }
+    widgets::note(ui, "The pivot and keys are relative to the parent. Bake All keeps parents and children together.");
 }
 
 fn canvas_section(ui: &mut Ui, st: &mut TweenState) {

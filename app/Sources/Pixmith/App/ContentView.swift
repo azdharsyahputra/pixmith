@@ -78,6 +78,7 @@ private struct LayerID: Identifiable { let id: Int }
 struct CanvasArea: View {
     @ObservedObject var model: SpriteModel
     @ObservedObject private var info = StatusInfo.shared
+    @ObservedObject private var settings = ViewSettings.shared
 
     private var position: String? {
         guard let c = info.cursor, (0..<model.width).contains(c.x), (0..<model.height).contains(c.y) else { return nil }
@@ -90,6 +91,9 @@ struct CanvasArea: View {
                 HStack(spacing: DS.Space.xs + 2) {
                     DSOverlayChip(text: "\(model.width) × \(model.height)")
                     DSOverlayChip(symbol: "cursorarrow", text: position ?? "–")
+                    if model.frameDiff, let diff = FrameDiffCache.shared.entry(model) {
+                        DSOverlayChip(text: diff.chip)
+                    }
                 }
                 .padding(.leading, DS.Space.md)
                 .padding(.bottom, DS.Space.sm + 2)

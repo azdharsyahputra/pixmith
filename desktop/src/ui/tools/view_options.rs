@@ -1,4 +1,4 @@
-//! The View Options window: onion skin, tiled mode, pixel grid, custom grid and reference image
+//! The View Options window: onion skin, frame difference, tiled mode, pixel grid, custom grid and reference image
 //! (`ViewOptionsWindow.swift`). A floating window of grouped sections, 380 pt wide.
 
 use super::view::{GridType, ReferencePlacement, TiledMode};
@@ -208,6 +208,12 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
                         card.slider("Opacity", &mut s.onion_opacity, (0.05, 0.8));
                         card.slider("Falloff", &mut s.onion_falloff, (0.1, 1.0));
                         card.toggle("Tint past red, future blue", &mut s.onion_tint);
+                    });
+                    section(ui, "Frame Difference", |card| {
+                        card.toggle("Enabled", &mut timeline.frame_diff);
+                        card.slider("Opacity", &mut s.diff_opacity, (0.1, 1.0));
+                        card.toggle("Active layer only", &mut s.diff_active_layer);
+                        card.toggle("Compare first frame with last", &mut s.diff_wrap);
                     });
                     section(ui, "Tiled Mode", |card| {
                         let names: Vec<&str> = TiledMode::ALL.iter().map(|m| m.title()).collect();

@@ -158,6 +158,24 @@ extension SpriteModel {
         if pixmith_tween_set_flag(doc, UInt32(layer), flag, on) { labelLastStep("Tween Option"); changed() }
     }
 
+    /// The tween parent (rig link) of the active layer, if any.
+    var tweenParent: Int? {
+        let p = pixmith_tween_get_parent(doc, UInt32(layer))
+        return p >= 0 ? Int(p) : nil
+    }
+
+    /// Layers the active layer can follow: not itself, no descendant, no group it contains or sits in.
+    var tweenParentCandidates: [Int] {
+        let cur = tweenParent
+        return (0..<layerCount).reversed().filter { $0 == cur || pixmith_tween_can_parent(doc, UInt32(layer), UInt32($0)) }
+    }
+
+    func tweenSetParent(_ parent: Int?) {
+        if pixmith_tween_set_parent(doc, UInt32(layer), Int32(parent ?? -1)) {
+            labelLastStep("Set Tween Parent"); changed()
+        }
+    }
+
     var tweenWarning: String? {
         guard let p = pixmith_tween_warning_text(doc, UInt32(layer)) else { return nil }
         defer { pixmith_string_free(p) }
@@ -494,6 +512,16 @@ struct TweenView: View {
                     .buttonStyle(DSBarButtonStyle())
                 Spacer(minLength: 0)
             }
+            DSFormRow(label: "Parent", labelWidth: 84) {
+                Picker("Parent", selection: Binding(get: { model.tweenParent ?? -1 },
+                                                    set: { model.tweenSetParent($0 < 0 ? nil : $0) })) {
+                    Text("None").tag(-1)
+                    ForEach(model.tweenParentCandidates, id: \.self) { Text("\($0 + 1) \u{00B7} \(model.layerName($0))").tag($0) }
+                }
+                .labelsHidden()
+                Spacer(minLength: 0)
+            }
+            DSNote("Follows the parent's motion; pivot and keys are relative to it. Bake All keeps the rig together.")
             Toggle("RotSprite rotation (off = nearest, faster)", isOn: Binding(get: { model.tweenFlag(0) },
                                                                               set: { model.tweenSetFlag(0, $0) }))
                 .toggleStyle(.checkbox).font(DS.Font.body)

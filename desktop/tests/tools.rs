@@ -592,6 +592,47 @@ mod ui {
     }
 
     #[test]
+    fn frame_difference_tints_and_counts_the_pixels_that_moved() {
+        let mut h = harness();
+        {
+            let tab = h.state_mut().tab_mut();
+            let layer = tab.doc.layer_count() - 1;
+            tab.doc.begin_edit("Draw");
+            for x in 2..5 {
+                tab.doc.stroke_begin(layer, 0, x, 3, RED, 1, 0);
+                tab.doc.stroke_end();
+            }
+            let last = tab.doc.frame_count() - 1;
+            tab.doc.add_frame(last, true);
+            // Frame 2 is a copy of frame 1 with the row shifted: move one pixel away and one in.
+            tab.doc.stroke_begin(layer, 1, 2, 3, 0, 1, 0);
+            tab.doc.stroke_end();
+            tab.doc.stroke_begin(layer, 1, 5, 3, RED, 1, 0);
+            tab.doc.stroke_end();
+            tab.frame = 1;
+            tab.changed();
+        }
+        h.run_ok();
+        assert!(h.state().canvas.tools.diff.stats.is_none(), "nothing is computed while the view is off");
+        h.state_mut().timeline.frame_diff = true;
+        h.run_ok();
+        let d = h.state().canvas.tools.diff.stats.expect("a comparison");
+        assert_eq!((d.changed, d.appeared, d.disappeared, d.reference), (0, 1, 1, Some(0)));
+        assert_eq!(d.chip(), "Diff 2 px: 0 changed, 1 new, 1 gone");
+        // The first frame compares with the last one only when asked to.
+        h.state_mut().tab_mut().frame = 0;
+        h.state_mut().tab_mut().changed();
+        h.run_ok();
+        assert_eq!(h.state().canvas.tools.diff.stats.map(|d| d.reference), Some(Some(1)));
+        h.state_mut().canvas.tools.settings.diff_wrap = false;
+        h.run_ok();
+        assert_eq!(h.state().canvas.tools.diff.stats.map(|d| (d.reference, d.total())), Some((None, 0)));
+        h.state_mut().timeline.frame_diff = false;
+        h.run_ok();
+        assert!(h.state().canvas.tools.diff.stats.is_none());
+    }
+
+    #[test]
     fn reference_image_loads_and_clears() {
         let dir = std::env::temp_dir().join(format!("pixmith-ref-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

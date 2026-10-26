@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Floating panel with onion skin, tiling, grid and reference image options (View > View Options…).
+/// Floating panel with onion skin, frame difference, tiling, grid and reference image options (View > View Options…).
 final class ViewOptionsController {
     static let shared = ViewOptionsController()
     private var panel: NSPanel?
@@ -38,6 +38,12 @@ struct ViewOptionsView: View {
                 slider("Opacity", $s.onionOpacity, 0.05...0.8)
                 slider("Falloff", $s.onionFalloff, 0.1...1)
                 Toggle("Tint past red, future blue", isOn: $s.onionTint)
+            }
+            Section("Frame Difference") {
+                Toggle("Enabled", isOn: $model.frameDiff)
+                slider("Opacity", $s.diffOpacity, 0.1...1)
+                Toggle("Active layer only", isOn: $s.diffActiveLayer)
+                Toggle("Compare first frame with last", isOn: $s.diffWrap)
             }
             Section("Tiled Mode") {
                 Picker("Mode", selection: $s.tiled) {

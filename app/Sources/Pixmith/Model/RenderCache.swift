@@ -121,6 +121,9 @@ final class RenderCache {
     private var tinted: [Key: CGImage] = [:]
     /// Renders performed (full or partial), for diagnostics and tests.
     private(set) var renderCount = 0
+    /// Bumped whenever a frame's pixels may have changed, so results derived from them (the frame difference) know
+    /// when to be computed again.
+    private(set) var generation = 0
     private var doc: OpaquePointer?
     private var size = (w: 0, h: 0)
     private var pending = ViewChange.none
@@ -155,6 +158,7 @@ final class RenderCache {
         var r = [Int32](repeating: 0, count: 4)
         let kind = pixmith_take_dirty_rect(m.doc, &frame, &r)
         if m.doc != doc || size != (w, h) || kind == 2 {
+            generation &+= 1
             buffers.removeAll()
             tinted.removeAll()
             doc = m.doc
@@ -163,6 +167,7 @@ final class RenderCache {
             return
         }
         guard kind == 1 else { return }
+        generation &+= 1
         let f = Int(frame)
         tinted = tinted.filter { $0.key.frame != f }
         let change = ViewChange.rect(frame: f, x: Int(r[0]), y: Int(r[1]), w: Int(r[2]), h: Int(r[3]))

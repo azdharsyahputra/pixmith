@@ -87,6 +87,8 @@ pub enum Filter {
     Convolve(Kernel),
     /// Lookup tables for R, G, B and A, already combined with the master (RGB) curve.
     Curves(Box<[[u8; 256]; 4]>),
+    /// Halo removal, despeckle and outline thinning (see `paint::cleanup`).
+    CleanEdges(crate::paint::cleanup::CleanEdgesOptions),
 }
 
 pub const KIND_REPLACE_COLOR: u32 = 0;
@@ -101,6 +103,7 @@ pub const KIND_DESPECKLE: u32 = 8;
 pub const KIND_BLUR: u32 = 9;
 pub const KIND_SHARPEN: u32 = 10;
 pub const KIND_CURVES: u32 = 11;
+pub const KIND_CLEAN_EDGES: u32 = 12;
 
 /// Most control points accepted per curve.
 const MAX_CURVE_POINTS: usize = 64;
@@ -184,6 +187,37 @@ fn curves_from_params(p: &[i32]) -> Option<Filter> {
     Some(Filter::Curves(Box::new(luts)))
 }
 
+/// The parameter block of Clean Edges (all optional, in this order; missing ones keep their defaults):
+/// 0 pass flags (1 halo, 2 despeckle, 4 thin outline, 8 lone light pixels; default 7), 1 halo rings,
+/// 2 halo luma gain, 3 halo max saturation %, 4 despeckle min size, 5 hole size, 6 outline max thickness,
+/// 7 outline max luma, 8 fixed outline colour on/off, 9 its colour (0xRRGGBBAA), 10 its tolerance.
+fn clean_edges_from_params(p: &[i32]) -> crate::paint::cleanup::CleanEdgesOptions {
+    use crate::paint::cleanup::*;
+    let int = |i: usize, d: u32, max: u32| p.get(i).map_or(d, |&v| v.clamp(0, max as i32) as u32);
+    let flags = p.first().copied().unwrap_or(7);
+    let mut halo = HaloOptions::default();
+    halo.rings = int(1, halo.rings, 8);
+    halo.min_luma_gain = int(2, halo.min_luma_gain, 255);
+    halo.max_saturation = int(3, halo.max_saturation, 100);
+    let mut d = DespeckleOptions::default();
+    d.min_size = if flags & 2 != 0 { int(4, d.min_size, 1024) } else { 0 };
+    d.hole_size = int(5, d.hole_size, 1024);
+    d.lone_light = flags & 8 != 0;
+    let mut t = ThinOptions::default();
+    t.max_thickness = int(6, t.max_thickness, 16);
+    t.max_luma = int(7, t.max_luma, 255);
+    if p.get(8).is_some_and(|&v| v != 0) {
+        let c = (p.get(9).copied().unwrap_or(0) as u32).to_be_bytes();
+        t.color = Some([c[0], c[1], c[2]]);
+        t.tolerance = int(10, 0, 255);
+    }
+    CleanEdgesOptions {
+        halo: (flags & 1 != 0).then_some(halo),
+        despeckle: (d.min_size > 0 || d.hole_size > 0 || d.lone_light).then_some(d),
+        thin_outline: (flags & 4 != 0).then_some(t),
+    }
+}
+
 impl Filter {
     /// Builds a filter from an FFI kind id and integer parameters (colors are 0xRRGGBBAA bit
     /// patterns). Returns `None` for an unknown kind or too few parameters.
@@ -206,6 +240,7 @@ impl Filter {
             KIND_BLUR => Filter::Convolve(Kernel::Blur),
             KIND_SHARPEN => Filter::Convolve(Kernel::Sharpen),
             KIND_CURVES => return curves_from_params(p),
+            KIND_CLEAN_EDGES => Filter::CleanEdges(clean_edges_from_params(p)),
             _ => return None,
         })
     }
@@ -255,6 +290,7 @@ impl Filter {
             Filter::Curves(ref l) => map_pixels(src, |p| {
                 [l[0][p[0] as usize], l[1][p[1] as usize], l[2][p[2] as usize], l[3][p[3] as usize]]
             }),
+            Filter::CleanEdges(ref o) => crate::paint::cleanup::clean_edges(src, w, h, o),
         }
     }
 }
@@ -524,7 +560,7 @@ pub fn apply(
 
 /// Undoes `apply`'s changes outside `mask`, so a non-rectangular selection limits a filter the way the rectangle does.
 /// Returns whether any pixel still differs from `old`.
-fn restrict_to_mask(next: &mut Sprite, old: &Sprite, mask: &crate::paint::selection::Selection) -> bool {
+pub(crate) fn restrict_to_mask(next: &mut Sprite, old: &Sprite, mask: &crate::paint::selection::Selection) -> bool {
     let w = next.width as usize;
     let mut changed = false;
     // (filtered cel, its masked result): cels that share a buffer keep sharing.

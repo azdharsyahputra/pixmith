@@ -222,6 +222,8 @@ struct TimelineHeader: View {
             DSGroupDivider()
             DSChip(symbol: "repeat", help: "Loop tag: play inside the tag that contains the current frame", isOn: $model.loopTags)
             DSChip(symbol: "square.3.layers.3d", help: "Onion skin (options in View > View Options)", isOn: $model.onionSkin)
+            DSChip(symbol: "plusminus.circle", help: "Frame difference: tint the pixels that differ from the previous frame (options in View > View Options)",
+                   isOn: $model.frameDiff)
             DSChip(symbol: "grid", help: "Pixel grid", isOn: $model.showGrid)
             Spacer(minLength: DS.Space.sm)
             IconButton("plus.square", help: "New frame", shortcut: "⌥⌘N") { model.addFrame(duplicate: false) }

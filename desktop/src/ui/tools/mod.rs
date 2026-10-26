@@ -34,6 +34,7 @@ pub struct ToolsState {
     pub draw: draw::DrawState,
     pub text: text::TextState,
     pub onion: view::OnionCache,
+    pub diff: view::DiffCache,
     pub reference: Option<view::Reference>,
     pub view_options_open: bool,
     pub preview: preview::PreviewState,

@@ -1,4 +1,4 @@
-//! View-only state and the canvas layers it controls: onion skin, tiled mode, pixel and custom grids, the
+//! View-only state and the canvas layers it controls: onion skin, frame difference, tiled mode, pixel and custom grids, the
 //! reference image (`ViewSettings.swift`, `CanvasOverlays.swift`, `RenderCache.swift`'s tinted frames).
 //!
 //! Nothing here is saved in the `.aseprite` file. The settings persist between runs in a small text file next to
@@ -150,8 +150,8 @@ pub enum OnionTint {
     Future,
 }
 
-/// Everything the View Options window edits (`ViewSettings`). The on/off switches of the onion skin and the
-/// pixel grid live in the timeline state, like `SpriteModel.onionSkin` / `showGrid`.
+/// Everything the View Options window edits (`ViewSettings`). The on/off switches of the onion skin, the frame
+/// difference and the pixel grid live in the timeline state, like `SpriteModel.onionSkin` / `showGrid`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewSettings {
     pub onion_past: u32,
@@ -159,6 +159,12 @@ pub struct ViewSettings {
     pub onion_opacity: f64,
     pub onion_falloff: f64,
     pub onion_tint: bool,
+    /// Opacity of the frame-difference tint.
+    pub diff_opacity: f64,
+    /// Compare only the active layer instead of the composite of the visible layers.
+    pub diff_active_layer: bool,
+    /// The first frame is compared with the last one (a looping animation); otherwise it has nothing to compare with.
+    pub diff_wrap: bool,
     pub tiled: TiledMode,
     pub grid_color: [u8; 3],
     pub grid_opacity: f64,
@@ -194,6 +200,9 @@ impl Default for ViewSettings {
             onion_opacity: 0.3,
             onion_falloff: 0.6,
             onion_tint: false,
+            diff_opacity: 0.65,
+            diff_active_layer: false,
+            diff_wrap: true,
             tiled: TiledMode::None,
             // `Prefs.Default.gridColor` is 0x0000001F: black, and the 12% opacity below.
             grid_color: [0, 0, 0],
@@ -242,6 +251,9 @@ impl ViewSettings {
             format!("onionOpacity={}", self.onion_opacity),
             format!("onionFalloff={}", self.onion_falloff),
             format!("onionTint={}", self.onion_tint),
+            format!("diffOpacity={}", self.diff_opacity),
+            format!("diffActiveLayer={}", self.diff_active_layer),
+            format!("diffWrap={}", self.diff_wrap),
             format!("tiled={}", self.tiled.key()),
             format!("gridColor={}", hex(self.grid_color)),
             format!("gridOpacity={}", self.grid_opacity),
@@ -275,6 +287,9 @@ impl ViewSettings {
                 "onionOpacity" => self.onion_opacity = f.unwrap_or(self.onion_opacity),
                 "onionFalloff" => self.onion_falloff = f.unwrap_or(self.onion_falloff),
                 "onionTint" => self.onion_tint = b.unwrap_or(self.onion_tint),
+                "diffOpacity" => self.diff_opacity = f.unwrap_or(self.diff_opacity).clamp(0.1, 1.0),
+                "diffActiveLayer" => self.diff_active_layer = b.unwrap_or(self.diff_active_layer),
+                "diffWrap" => self.diff_wrap = b.unwrap_or(self.diff_wrap),
                 "tiled" => self.tiled = TiledMode::from_key(v).unwrap_or(self.tiled),
                 "gridColor" => self.grid_color = parse_hex(v).unwrap_or(self.grid_color),
                 "gridOpacity" => self.grid_opacity = f.unwrap_or(self.grid_opacity),
@@ -444,6 +459,97 @@ impl OnionCache {
     }
 }
 
+// MARK: Frame difference cache
+
+/// The frame-difference tint of the current frame as a texture, and what it found.
+#[derive(Default)]
+pub struct DiffCache {
+    key: Option<DiffKey>,
+    texture: Option<TextureHandle>,
+    /// What the last comparison found; `None` while the view is off or the frame has nothing to compare with.
+    pub stats: Option<DiffStats>,
+    /// The texture to draw this frame.
+    shown: Option<TextureId>,
+    mask: Vec<u8>,
+}
+
+/// What a comparison was made for: `(document, revision, frame, width, height, layer, wrap)`.
+type DiffKey = (usize, u64, u32, u32, u32, Option<u32>, bool);
+
+/// Pixel counts of a frame difference (`pixmith_core::render::diff::PixmithFrameDiff`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiffStats {
+    pub changed: u32,
+    pub appeared: u32,
+    pub disappeared: u32,
+    /// The frame compared against, `None` when the frame has no previous one.
+    pub reference: Option<u32>,
+}
+
+impl DiffStats {
+    pub fn total(&self) -> u32 {
+        self.changed + self.appeared + self.disappeared
+    }
+
+    /// Text of the canvas status chip.
+    pub fn chip(&self) -> String {
+        match (self.reference, self.total()) {
+            (None, _) => "Diff: no previous frame".to_string(),
+            (Some(_), 0) => "Diff: no change".to_string(),
+            (Some(_), n) => {
+                format!("Diff {n} px: {} changed, {} new, {} gone", self.changed, self.appeared, self.disappeared)
+            }
+        }
+    }
+}
+
+impl DiffCache {
+    /// Compares the current frame with the previous one when the view is `on` and keeps the tint as a texture.
+    /// While `busy` (a stroke is being drawn) the last result is kept even if the document moved on.
+    pub fn prepare(&mut self, ctx: &egui::Context, tab: &DocTab, s: &ViewSettings, on: bool, busy: bool) {
+        self.shown = None;
+        if !on {
+            self.stats = None;
+            self.key = None;
+            return;
+        }
+        let layer = s.diff_active_layer.then_some(tab.layer);
+        let (w, h) = (tab.doc.width(), tab.doc.height());
+        let key = (tab.doc.raw() as usize, tab.revision, tab.frame, w, h, layer, s.diff_wrap);
+        let same_doc = self.key.is_some_and(|k| k.0 == key.0 && k.3 == w && k.4 == h);
+        if self.key != Some(key) && !(busy && same_doc && self.texture.is_some()) {
+            self.key = Some(key);
+            let found = tab.doc.frame_diff(tab.frame, layer, s.diff_wrap, &mut self.mask);
+            self.stats = found.map(|d| DiffStats {
+                changed: d.changed,
+                appeared: d.appeared,
+                disappeared: d.disappeared,
+                reference: (d.reference_frame >= 0).then_some(d.reference_frame as u32),
+            });
+            if self.stats.is_some_and(|d| d.total() > 0) {
+                let mut rgba = vec![0u8; self.mask.len() * 4];
+                for (p, &k) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(&self.mask) {
+                    if k != 0 {
+                        let c = DIFF_COLORS[(k - 1).min(2) as usize];
+                        p.copy_from_slice(&[c[0], c[1], c[2], 255]);
+                    }
+                }
+                let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                match &mut self.texture {
+                    Some(t) => t.set(image, egui::TextureOptions::NEAREST),
+                    None => self.texture = Some(ctx.load_texture("frame-diff", image, egui::TextureOptions::NEAREST)),
+                }
+            }
+        }
+        if self.stats.is_some_and(|d| d.total() > 0) {
+            self.shown = self.texture.as_ref().map(|t| t.id());
+        }
+    }
+}
+
+/// Magenta for changed pixels, green for pixels that appeared, red for pixels that disappeared.
+pub const DIFF_COLORS: [[u8; 3]; 3] = pixmith_core::render::diff::DEFAULT_COLORS;
+
 // MARK: Painting
 
 /// What the canvas tells the view layers about the current frame.
@@ -451,6 +557,7 @@ pub struct Scene<'a> {
     pub settings: &'a ViewSettings,
     pub reference: Option<&'a Reference>,
     pub onion: &'a OnionCache,
+    pub diff: &'a DiffCache,
     /// Texture of the current frame.
     pub sprite: Option<TextureId>,
     /// The visible canvas area and the center sprite's rectangle in it.
@@ -573,6 +680,12 @@ pub fn paint_under(painter: &egui::Painter, sc: &Scene) {
     if let Some(tex) = sc.sprite {
         for t in &tiles {
             painter.image(tex, *t, unit_uv(), Color32::WHITE);
+        }
+    }
+    if let Some(tex) = sc.diff.shown {
+        let tint = Color32::from_white_alpha((s.diff_opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
+        for t in &tiles {
+            painter.image(tex, *t, unit_uv(), tint);
         }
     }
     if s.tiled != TiledMode::None {
@@ -703,6 +816,29 @@ mod tests {
         let mut back = ViewSettings::default();
         back.apply_text(&s.to_text());
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn frame_difference_settings_round_trip_and_clamp() {
+        let d = ViewSettings::default();
+        assert_eq!((d.diff_opacity, d.diff_active_layer, d.diff_wrap), (0.65, false, true));
+        let s = ViewSettings { diff_opacity: 0.4, diff_active_layer: true, diff_wrap: false, ..Default::default() };
+        let mut back = ViewSettings::default();
+        back.apply_text(&s.to_text());
+        assert_eq!(back, s);
+        back.apply_text("diffOpacity=7\ndiffWrap=zebra");
+        assert_eq!((back.diff_opacity, back.diff_wrap), (1.0, false), "clamped; malformed keeps the value");
+    }
+
+    #[test]
+    fn diff_chip_text() {
+        let none = DiffStats::default();
+        assert_eq!(none.chip(), "Diff: no previous frame");
+        let same = DiffStats { reference: Some(0), ..Default::default() };
+        assert_eq!(same.chip(), "Diff: no change");
+        let some = DiffStats { changed: 3, appeared: 5, disappeared: 4, reference: Some(0) };
+        assert_eq!(some.total(), 12);
+        assert_eq!(some.chip(), "Diff 12 px: 3 changed, 5 new, 4 gone");
     }
 
     #[test]

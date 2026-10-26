@@ -167,6 +167,27 @@ Layer handle fields:
 Tilemap layers also have `layer:getTile(x, y [, frame])` and
 `layer:setTile(x, y, index [, flipX, flipY, diagonal [, frame]])`; see Tilemaps.
 
+### Tween rig (parented layers)
+
+Pixmith's per-layer tween (keys for x, y, rotation, scale and opacity, a pivot) can be chained: a layer may have a **tween parent**, and its transform at a frame is the parent's transform composed with its own. Rotating a thigh moves the knee, and the shin, whose pivot is the knee, rotates about the moved knee. Opacity is not inherited. A child without keys of its own simply follows its parent; frames outside the key range of the layer and all its ancestors show the layer's own cels. Cels are resampled by nearest neighbor (RotSprite for turns that are not multiples of 90 degrees), never blended.
+
+- `layer.tweenParent` (read/write): the parent layer handle or `nil`. Assigning a layer (handle, number or name) links, `nil` unlinks. It raises an error for a cycle (including a layer being its own ancestor), for tilemap layers, and for a group and a layer inside it. The link is stored in the layer's user data, so it survives layer moves and file saves.
+- `layer:setTweenKey(prop, frame, value [, ease])` adds or replaces a key. `prop` is `"x"`, `"y"`, `"rotation"` (degrees, clockwise), `"scaleX"`, `"scaleY"` or `"opacity"` (0..1); `ease` is `"linear"` (default), `"hold"`, `"inQuad"`, `"outQuad"`, `"inOutQuad"`, `"inOutCubic"`, `"outBack"` or `"outBounce"`. The layer's cel at its first key frame is the source image.
+- `layer:setTweenPivot(x, y)` sets the pivot in canvas coordinates (pixel corners; in the rest pose, i.e. the child's own space); `layer:setTweenPivot(nil)` goes back to the center of the content.
+- `layer:tweenTransform([frame])` returns `nil` when neither the layer nor an ancestor has keys, else a table: `matrix` and `local` (six numbers `a, b, c, d, e, f` with `x' = a*x + c*y + e`, `y' = b*x + d*y + f`; `matrix` includes the parents, `local` is the layer's own transform), `rotation` (degrees, of the composed matrix), `scaleX`, `scaleY` and `pivotX`, `pivotY` (where the layer's own pivot is on the canvas).
+- `layer:tweenMap([frame,] x, y)` returns the canvas position of a rest-pose point at that frame (an error if the layer is not tweened).
+
+```lua
+local thigh, shin = sprite.layers[1], sprite.layers[2]
+thigh:setTweenPivot(48, 30)   shin:setTweenPivot(48, 42)   -- hip and knee
+shin.tweenParent = thigh
+for f, deg in ipairs({ 0, 20, 0, -20 }) do thigh:setTweenKey("rotation", f, deg) end
+for f, deg in ipairs({ 0, -30, 0, 10 }) do shin:setTweenKey("rotation", f, deg) end
+local t = shin:tweenTransform(2)       -- t.pivotX, t.pivotY: where the knee is at frame 2
+```
+
+Baking (turning the animation into real cels) is a UI command (Bake / Bake All): it renders every layer from the unchanged document before writing anything, so parents' motion reaches their children whatever the order, and writes parents before children. Baking a child alone uses its composed transform and detaches it; a layer that still has children cannot be baked in place without `keep source` (use Bake All).
+
 ### Frames
 
 - `sprite:newFrame([copy])` appends a frame after the last one (empty, or a copy of it when `copy` is true);
@@ -316,6 +337,25 @@ undo step.
   see Events.
 - `app.undoLabel(text)` names the undo step (default "Script"). `app.transaction([label,] fn)` runs `fn` and undoes
   its changes if it raises; `app.undo()` / `app.redo()` step through what the script did so far (see `app.command`).
+- `app.frameDiff{ frame=, layer=, wrap=, mask= }` tells which pixels a frame changed compared with the frame before
+  it (the "frame-difference view" of the editor), to find parts that did not move with the rest of a character.
+  `frame` (1-based number or frame handle) defaults to the active frame; `layer` (number, name or layer handle)
+  restricts the comparison to one layer's cel (hidden layers count; a missing cel is transparent), otherwise the
+  composite of the visible layers is compared (reference layers left out). The frame before frame 1 is the last
+  frame when `wrap` is true (the default; right for looping animations) and none when `wrap=false`; a one-frame
+  sprite never has one. Returns `{ frame, previous, layer, changed, appeared, disappeared, total, bounds, mask }`:
+  `previous` is the 1-based frame compared against (`nil` when there is none, and then every count is 0);
+  `appeared` counts pixels that were transparent and are not, `disappeared` the other way round, `changed` pixels
+  that are not transparent in either frame but differ in color or alpha (the color of a fully transparent pixel never
+  counts); `total` is their sum; `bounds` is a `Rectangle` around all of them (`nil` when none differ).
+  With `mask=true`, `mask` is an `Image` the size of the sprite: opaque magenta (`changed`), green (`appeared`) or
+  red (`disappeared`) where a pixel differs, transparent elsewhere. It is read-only and changes nothing.
+  ```lua
+  for f = 1, #sprite.frames do
+    local d = app.frameDiff{ frame = f, layer = "Body" }
+    if d.total > 0 then print(f, d.changed, d.appeared, d.disappeared, d.bounds) end
+  end
+  ```
 - `app.refresh()` does nothing (there is nothing to redraw while a script runs).
 - `app.version` is a `Version` object (`app.version.major`, `tostring(app.version)`, comparable with `<`, `<=`, `==`);
   `Version("1.3-rc1")`, `Version(1, 3, 0)` and `Version{ major=, minor=, patch= }` create them. `app.apiVersion` is the
@@ -498,7 +538,7 @@ closed without a save prompt. A script that fails opens nothing (files it alread
   `ChangePixelFormat{ format = "rgb" | "gray" | "indexed", dithering = "none" | "ordered" }`.
 - Filters on the active cel, limited to the selection: `ReplaceColor{ from, to, tolerance }`, `Outline{ color, place = "outside" | "inside", matrix }`,
   `InvertColor`, `Desaturate`, `BrightnessContrast{ brightness, contrast }` (-100..100), `HueSaturation{ hue, saturation, lightness }`,
-  `Despeckle`.
+  `Despeckle`, and the Pixmith-specific `CleanEdges{ ... }` (see [Clean Edges and lint](#clean-edges-and-lint)).
 - Selection and cels: `SelectAll`, `DeselectMask`, `InvertMask`, `MaskContent`, `Clear`, `ClearCel`.
 - Files: `NewFile{ width, height, colorMode }`, `OpenFile{ filename }`, `SaveFile`, `SaveFileAs{ filename }`,
   `SaveFileCopyAs{ filename }`, `CloseFile`, `DuplicateSprite`, `ExportSpriteSheet{ type = SpriteSheetType.HORIZONTAL | VERTICAL | ROWS | COLUMNS | PACKED,
@@ -508,6 +548,52 @@ closed without a save prompt. A script that fails opens nothing (files it alread
 
 Every other Aseprite command (`Zoom`, `Cut`, `Copy`, `Paste`, `ShowGrid`, `Options`, ...) raises
 `app.command.X is not available in Pixmith`. File commands ask for permission like the API calls do.
+
+## Clean Edges and lint
+
+Pixmith-specific tools for tidying sprites traced from reference art (they are not part of Aseprite's API). They are
+also in the app: **FX > Clean Edges...** and **FX > Lint Sprite...**. Preserving small interior features (a 1-2 px
+eye, a 1 px highlight, a 1 px finger touching the outline) is the main requirement: nothing is ever removed unless it
+is reachable from the outside of the sprite, and every removed pixel must be a "simple point" (taking it away
+cannot split the sprite, open a hole or merge holes).
+
+`app.command.CleanEdges{ ... }` works on the active cel, limited to the selection, and is one undo step. Without any
+pass option every pass runs with its defaults; otherwise only the passes you name run.
+
+| Option | Meaning |
+| --- | --- |
+| `halo = true` or `{ rings = 2 }` | Remove light, grayish "paper halo" pixels from the outer rings (default 2). A pixel qualifies when it is light (luma >= 110) and grayish (saturation <= 30%), has pixels behind it that are at least 40 luma darker and not less colourful, and belongs to a connected group of 3 or more. `haloGain` and `haloSaturation` change the thresholds. |
+| `despeckle = 4` | Remove 8-connected pieces smaller than 4 pixels that touch the outside of the sprite, as long as a bigger piece exists. A small piece sealed inside the body (a pupil in a socket) is kept. |
+| `holes = 2` | Fill enclosed transparent areas smaller than 2 pixels with the surrounding colour. Off unless given: a transparent eye or window is a hole too. |
+| `lightSpecks = true` | Also replace a lone light, grayish pixel whose 8 neighbours are all much darker. Off unless given: a 1 px highlight inside a dark eye looks exactly like this. |
+| `thinOutline = true` or `{ thickness = 3 }` | Thin a dark outer outline that is 2 to `thickness` pixels thick to 1 pixel, keeping the pixels next to the body. Outlines thicker than `thickness` (and dark masses such as hair) are left alone. `outlineColor` (with `outlineTolerance`) names the outline colour; otherwise pixels with luma <= `outlineLuma` (default 70) are outline. The outline stays 8-connected and closed, nothing detaches, and notches that a 2x 3x3 closing would fill are restored. |
+| `frames = "all"` / `"layers"` | Apply to every frame of the layer / every layer of the frame instead of the active cel. |
+
+```lua
+app.command.CleanEdges{ halo = true, despeckle = 4, holes = 2, thinOutline = true, frames = "all" }
+```
+
+`app.lint{ ... }` reads the sprite and returns the findings without changing anything. Options: `frames`
+(`"all"` / `"layers"`), `speck` (size of a detached speck, default 4), `list` (positions listed per category, default
+64; the counts are always complete), `palette = true` (also report colours missing from the palette), and
+`outlineColor` / `outlineTolerance` / `outlineLuma` as above. The result is an array with one entry per cel plus
+`total`; each entry has `layer` and `frame` (1-based), `layerName`, `total`, and these categories, each
+`{ count, items = { { x, y, size }, ... } }` with 0-based pixel coordinates (for an area, its first pixel in scan order):
+
+- `light_edge`: light, grayish pixels on the two outermost rings (paper halo).
+- `holes`: enclosed transparent areas.
+- `specks`: small pieces detached from the body.
+- `no_outline`: edge pixels that are not outline colour and have no outline pixel next to them.
+- `strays`: pixels that differ from all their neighbours (isolated pixels are `specks`).
+- `semi_transparent`: pixels with 0 < alpha < 255.
+- `off_palette`: colours not in the palette (only with `palette = true`).
+
+```lua
+local r = app.lint{ frames = "all" }
+for _, cel in ipairs(r) do
+  print(cel.frame, cel.holes.count, cel.specks.count, cel.light_edge.count)
+end
+```
 
 ## Enumerations
 

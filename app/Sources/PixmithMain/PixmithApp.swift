@@ -133,6 +133,7 @@ struct PixmithCommands: Commands {
             Button("Zoom In") { model.zoom = min(64, model.zoom * 2) }.keyboardShortcut("=")
             Button("Zoom Out") { model.zoom = max(1, model.zoom / 2) }.keyboardShortcut("-")
             Toggle("Onion Skin", isOn: $model.onionSkin)
+            Toggle("Frame Difference", isOn: $model.frameDiff)
             Toggle("Grid", isOn: $model.showGrid).keyboardShortcut("'")
         }
     }

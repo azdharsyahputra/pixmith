@@ -28,6 +28,8 @@ pub enum FilterKind {
     Blur,
     Sharpen,
     Curves,
+    CleanEdges,
+    LintSprite,
     Scale,
 }
 
@@ -46,6 +48,8 @@ impl FilterKind {
             FilterKind::Despeckle => "Remove Isolated Pixels",
             FilterKind::Blur => "Blur",
             FilterKind::Sharpen => "Sharpen",
+            FilterKind::CleanEdges => "Clean Edges",
+            FilterKind::LintSprite => "Lint Sprite",
             FilterKind::Scale => "Scale Sprite",
         }
     }
@@ -65,7 +69,9 @@ impl FilterKind {
             FilterKind::Blur => 9,
             FilterKind::Sharpen => 10,
             FilterKind::Curves => 11,
+            FilterKind::CleanEdges => 12,
             FilterKind::Scale => 1000,
+            FilterKind::LintSprite => 1001,
         }
     }
 }
@@ -123,6 +129,65 @@ pub struct FilterParams {
     pub shadow_y: i32,
     pub shadow_color: u32,
     pub curves: CurveSet,
+    pub clean: CleanParams,
+}
+
+/// The Clean Edges sheet: which passes run and their thresholds (`pixmith_filters.h`, `PIXMITH_FILTER_CLEAN_EDGES`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanParams {
+    pub halo: bool,
+    pub rings: i32,
+    pub gain: i32,
+    pub specks: bool,
+    pub min_size: i32,
+    pub holes: bool,
+    pub hole_size: i32,
+    pub light: bool,
+    pub thin: bool,
+    pub thickness: i32,
+    pub luma: i32,
+    pub fixed_color: bool,
+    pub color: u32,
+}
+
+impl Default for CleanParams {
+    fn default() -> CleanParams {
+        CleanParams {
+            halo: true,
+            rings: 2,
+            gain: 40,
+            specks: true,
+            min_size: 4,
+            holes: false,
+            hole_size: 2,
+            light: false,
+            thin: true,
+            thickness: 3,
+            luma: 70,
+            fixed_color: false,
+            color: 0x000000FF,
+        }
+    }
+}
+
+impl CleanParams {
+    /// The parameter block of the core call.
+    pub fn values(&self) -> Vec<i32> {
+        let flags = self.halo as i32 | (self.specks as i32) << 1 | (self.thin as i32) << 2 | (self.light as i32) << 3;
+        vec![
+            flags,
+            self.rings,
+            self.gain,
+            30,
+            self.min_size,
+            if self.holes { self.hole_size } else { 0 },
+            self.thickness,
+            self.luma,
+            self.fixed_color as i32,
+            self.color as i32,
+            0,
+        ]
+    }
 }
 
 impl Default for FilterParams {
@@ -147,6 +212,7 @@ impl Default for FilterParams {
             shadow_y: 1,
             shadow_color: 0x00000099,
             curves: CurveSet::default(),
+            clean: CleanParams::default(),
         }
     }
 }
@@ -164,7 +230,9 @@ impl FilterParams {
             FilterKind::Outline => vec![c(self.outline_color), self.inside as i32, self.eight as i32],
             FilterKind::DropShadow => vec![self.shadow_x, self.shadow_y, c(self.shadow_color)],
             FilterKind::Despeckle => vec![self.eight as i32],
-            FilterKind::Invert
+            FilterKind::CleanEdges => self.clean.values(),
+            FilterKind::LintSprite
+            | FilterKind::Invert
             | FilterKind::Desaturate
             | FilterKind::Blur
             | FilterKind::Sharpen
@@ -361,8 +429,41 @@ fn controls(ui: &mut Ui, s: &mut FilterSession) {
         FilterKind::Desaturate => widgets::note(ui, "Converts colors to grayscale."),
         FilterKind::Blur => widgets::note(ui, "3x3 blur that ignores transparent pixels' color."),
         FilterKind::Sharpen => widgets::note(ui, "3x3 sharpen that ignores transparent pixels' color."),
-        FilterKind::Scale => {}
+        FilterKind::CleanEdges => clean_controls(ui, &mut p.clean),
+        FilterKind::Scale | FilterKind::LintSprite => {}
     }
+}
+
+/// The Clean Edges controls: a checkbox per pass, with its thresholds below while it is on.
+fn clean_controls(ui: &mut Ui, c: &mut CleanParams) {
+    ui.checkbox(&mut c.halo, "Remove paper halo (light, grayish outer pixels)");
+    if c.halo {
+        value_slider(ui, "ce_rings", "Rings", &mut c.rings, 1..=4);
+        value_slider(ui, "ce_gain", "Lighter than inside by", &mut c.gain, 10..=120);
+    }
+    ui.checkbox(&mut c.specks, "Remove detached specks");
+    if c.specks {
+        value_slider(ui, "ce_min", "Smaller than (px)", &mut c.min_size, 2..=32);
+    }
+    ui.checkbox(&mut c.holes, "Fill tiny enclosed holes");
+    if c.holes {
+        value_slider(ui, "ce_hole", "Smaller than (px)", &mut c.hole_size, 2..=16);
+    }
+    ui.checkbox(&mut c.light, "Replace lone light pixels inside dark areas");
+    ui.checkbox(&mut c.thin, "Thin the outer outline to 1 px");
+    if c.thin {
+        value_slider(ui, "ce_thick", "Thinner than (px)", &mut c.thickness, 2..=8);
+        ui.checkbox(&mut c.fixed_color, "Use a fixed outline color");
+        if c.fixed_color {
+            color_row(ui, "Outline color", &mut c.color);
+        } else {
+            value_slider(ui, "ce_luma", "Outline darkness", &mut c.luma, 0..=255);
+        }
+    }
+    widgets::note(
+        ui,
+        "Small interior details (eyes, highlights, thin fingers) are kept. Holes and lone light pixels are off by default because they can be details.",
+    );
 }
 
 fn connectivity(ui: &mut Ui, eight: &mut bool) {
@@ -645,6 +746,8 @@ pub fn open(app_menus: &mut super::MenusState, tab: &mut DocTab, primary: u32, k
     if kind == FilterKind::Scale {
         playback::stop(tab);
         app_menus.scale = Some(ScaleSession::new(&tab.doc));
+    } else if kind == FilterKind::LintSprite {
+        app_menus.lint = Some(super::lint::LintSession::new());
     } else {
         app_menus.filter = Some(FilterSession::new(tab, kind, primary));
     }
@@ -661,6 +764,18 @@ mod tests {
         assert_eq!(&set.encoded()[..5], &[2, 0, 0, 255, 255]);
         set.channels[1].insert(1, (128, 200));
         assert_eq!(&set.encoded()[5..12], &[3, 0, 0, 128, 200, 255, 255]);
+    }
+
+    #[test]
+    fn clean_edges_block_matches_the_core_layout() {
+        let p = FilterParams::default();
+        assert_eq!(p.values(FilterKind::CleanEdges), vec![7, 2, 40, 30, 4, 0, 3, 70, 0, 0x000000FF, 0]);
+        let mut q = FilterParams::default();
+        q.clean.holes = true;
+        q.clean.light = true;
+        q.clean.halo = false;
+        let v = q.values(FilterKind::CleanEdges);
+        assert_eq!((v[0], v[5]), (2 | 4 | 8, 2));
     }
 
     #[test]

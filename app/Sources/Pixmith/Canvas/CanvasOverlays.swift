@@ -158,6 +158,10 @@ enum CanvasOverlays {
         let s = ViewSettings.shared
         let r = spriteRect(m)
         forEachTile(m, dirty: dirty) { drawImage(ctx, img, in: $0, visible: dirty) }
+        // Frame difference: the pixels that differ from the previous frame, tinted over the sprite.
+        if m.frameDiff, let diff = FrameDiffCache.shared.entry(m)?.image {
+            forEachTile(m, dirty: dirty) { drawImage(ctx, diff, in: $0, alpha: CGFloat(s.diffOpacity), visible: dirty) }
+        }
         if s.tiled != .none {
             ctx.setStrokeColor(NSColor.systemOrange.withAlphaComponent(0.8).cgColor)
             ctx.setLineWidth(1)

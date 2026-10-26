@@ -118,6 +118,25 @@ impl Doc {
         unsafe { core::pixmith_render(self.ptr, frame, out.as_mut_ptr(), out.len()) }
     }
 
+    /// How `frame` differs from the frame before it (the last one for frame 0 when `wrap`): the composite of the
+    /// visible layers, or one layer's cel (`layer`). `mask` is resized to one byte per pixel (0 same, 1 changed,
+    /// 2 appeared, 3 disappeared). `None` for a frame or layer that does not exist.
+    pub fn frame_diff(
+        &self,
+        frame: u32,
+        layer: Option<u32>,
+        wrap: bool,
+        mask: &mut Vec<u8>,
+    ) -> Option<pixmith_core::render::diff::PixmithFrameDiff> {
+        use pixmith_core::render::diff::{PixmithFrameDiff, pixmith_frame_diff};
+        mask.resize(self.width() as usize * self.height() as usize, 0);
+        let mut out = PixmithFrameDiff::default();
+        let layer = layer.map_or(-1, |l| l.min(i32::MAX as u32) as i32);
+        // SAFETY: `self.ptr` is a live document and `mask` holds `mask.len()` bytes.
+        unsafe { pixmith_frame_diff(self.ptr, frame, layer, wrap, mask.as_mut_ptr(), mask.len(), &mut out) }
+            .then_some(out)
+    }
+
     /// Marks the document changed; call after every mutation (`SpriteModel.changed()` calls `pixmith_touch`).
     pub fn touch(&mut self) {
         unsafe { pixmith_core::history::pixmith_touch(self.ptr) }

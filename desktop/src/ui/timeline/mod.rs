@@ -82,6 +82,8 @@ pub struct TimelineState {
     pub loop_tags: bool,
     /// Onion skin on the canvas.
     pub onion_skin: bool,
+    /// Frame-difference tint on the canvas: the pixels that differ from the previous frame.
+    pub frame_diff: bool,
     /// Pixel grid on the canvas.
     pub show_grid: bool,
     /// The selected cel range, if more than the current cel.
@@ -120,6 +122,7 @@ impl Default for TimelineState {
             collapsed: false,
             loop_tags: true,
             onion_skin: false,
+            frame_diff: false,
             show_grid: true,
             range: None,
             anchor: None,

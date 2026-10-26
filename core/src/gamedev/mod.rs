@@ -2,4 +2,5 @@
 
 pub mod autotile;
 pub mod godot;
+pub mod rig;
 pub mod tween;

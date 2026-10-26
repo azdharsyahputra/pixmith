@@ -784,6 +784,7 @@ fn dispatch(lua: &Lua, root: &Rc<Ctx>, a: &Rc<Ctx>, name: &str, p: &Params) -> L
             )?;
         }
         "Despeckle" => filter_cel(a, Filter::Despeckle { eight: true })?,
+        "CleanEdges" => clean_edges_command(a, p)?,
         // Selection and cels
         "SelectAll" => {
             let s = a.sprite();
@@ -935,6 +936,155 @@ fn export_sheet(root: &Rc<Ctx>, a: &Rc<Ctx>, p: &Params) -> LuaResult<()> {
     Ok(())
 }
 
+// MARK: CleanEdges and lint
+
+/// Reads one number out of an option that is `true`, a number, or a table holding it under `key`.
+fn opt_num(v: &Value, key: &str) -> Option<i64> {
+    match v {
+        Value::Integer(i) => Some(*i),
+        Value::Number(n) => Some(*n as i64),
+        Value::Table(t) => t.raw_get::<Value>(key).ok().and_then(|v| super::geometry::int_of(&v)),
+        _ => None,
+    }
+}
+
+fn opt_on(v: &Value) -> bool {
+    match v {
+        Value::Boolean(b) => *b,
+        Value::Nil => false,
+        _ => true,
+    }
+}
+
+/// Which cels a script call covers: `frames = "all"` (every frame of the layer), `"layers"` (every layer of the
+/// frame) or the active cel.
+fn cleanup_target(p: &Params) -> Target {
+    match p.str("frames").map(|f| f.to_ascii_lowercase()).as_deref() {
+        Some("all") => Target::AllFrames,
+        Some("layers" | "all_layers") => Target::AllLayers,
+        _ => Target::Cel,
+    }
+}
+
+fn outline_options(p: &Params, o: &mut crate::paint::cleanup::ThinOptions) -> LuaResult<()> {
+    if let Some(c) = p.color("outlineColor")? {
+        o.color = Some([c[0], c[1], c[2]]);
+    }
+    if let Some(t) = p.int("outlineTolerance") {
+        o.tolerance = t.clamp(0, 255) as u32;
+    }
+    if let Some(l) = p.int("outlineLuma") {
+        o.max_luma = l.clamp(0, 255) as u32;
+    }
+    Ok(())
+}
+
+/// `app.command.CleanEdges{ halo, despeckle, holes, lightSpecks, thinOutline, frames, ... }`; see docs/LUA_API.md.
+/// With none of the pass options given, every pass runs with its defaults.
+fn clean_edges_command(a: &Ctx, p: &Params) -> LuaResult<()> {
+    use crate::paint::cleanup::{CleanEdgesOptions, DespeckleOptions, HaloOptions, ThinOptions};
+    let (halo, desp, holes, light, thin) =
+        (p.get("halo"), p.get("despeckle"), p.get("holes"), p.get("lightSpecks"), p.get("thinOutline"));
+    let any = [&halo, &desp, &holes, &light, &thin].iter().any(|v| !matches!(v, Value::Nil));
+    let o = if !any {
+        CleanEdgesOptions::all()
+    } else {
+        let mut o = CleanEdgesOptions::default();
+        if opt_on(&halo) {
+            let mut h = HaloOptions::default();
+            if let Some(r) = opt_num(&halo, "rings") {
+                h.rings = r.clamp(0, 8) as u32;
+            }
+            if let Some(g) = p.int("haloGain").or_else(|| opt_num(&halo, "gain")) {
+                h.min_luma_gain = g.clamp(0, 255) as u32;
+            }
+            if let Some(sat) = p.int("haloSaturation").or_else(|| opt_num(&halo, "saturation")) {
+                h.max_saturation = sat.clamp(0, 100) as u32;
+            }
+            o.halo = Some(h);
+        }
+        let min_size = if opt_on(&desp) { opt_num(&desp, "size").unwrap_or(4).clamp(0, 1024) as u32 } else { 0 };
+        let hole_size = if opt_on(&holes) { opt_num(&holes, "size").unwrap_or(2).clamp(0, 1024) as u32 } else { 0 };
+        let lone_light = opt_on(&light);
+        if min_size > 0 || hole_size > 0 || lone_light {
+            o.despeckle = Some(DespeckleOptions { min_size, hole_size, lone_light });
+        }
+        if opt_on(&thin) {
+            let mut t = ThinOptions::default();
+            if let Some(m) = opt_num(&thin, "thickness") {
+                t.max_thickness = m.clamp(0, 16) as u32;
+            }
+            o.thin_outline = Some(t);
+        }
+        o
+    };
+    let mut o = o;
+    if let Some(t) = o.thin_outline.as_mut() {
+        outline_options(p, t)?;
+    }
+    let (l, f) = drawable(a)?;
+    let s = a.sprite();
+    let before = s.clone();
+    filters::apply(s, &Filter::CleanEdges(o), cleanup_target(p), l, f, None);
+    if let Some(mask) = a.mask().filter(|m| (m.w, m.h) == (s.width, s.height)) {
+        filters::restrict_to_mask(s, &before, &mask);
+    }
+    s.flush_links();
+    Ok(())
+}
+
+/// `app.lint{ frames, speck, list, palette, ... }`: reads the active sprite and returns a table of findings per
+/// cel; it changes nothing. See docs/LUA_API.md.
+fn lint_function(lua: &Lua, root: &Rc<Ctx>, p: Params) -> LuaResult<Table> {
+    use crate::paint::cleanup::{lint_sprite, LintList, LintOptions};
+    let a = active_ctx(root);
+    if a.doc.closed.get() || !a.has_doc.get() {
+        return Err(Error::runtime("app.lint: there is no active sprite"));
+    }
+    let a = &a;
+    let (l, f) = drawable(a)?;
+    let mut o = LintOptions::default();
+    if let Some(v) = p.int("speck") {
+        o.speck_size = v.clamp(0, 1024) as u32;
+    }
+    if let Some(v) = p.int("list") {
+        o.max_list = v.clamp(0, 100_000) as usize;
+    }
+    o.check_palette = p.flag("palette").unwrap_or(false);
+    outline_options(&p, &mut o.outline)?;
+    let cels = lint_sprite(a.sprite(), &o, cleanup_target(&p), l, f);
+    let out = lua.create_table()?;
+    let list_table = |list: &LintList| -> LuaResult<Table> {
+        let t = lua.create_table()?;
+        t.set("count", list.count as i64)?;
+        let items = lua.create_table()?;
+        for it in &list.items {
+            let e = lua.create_table()?;
+            e.set("x", it.x as i64)?;
+            e.set("y", it.y as i64)?;
+            e.set("size", it.size as i64)?;
+            items.push(e)?;
+        }
+        t.set("items", items)?;
+        Ok(t)
+    };
+    let mut total = 0i64;
+    for c in &cels {
+        let e = lua.create_table()?;
+        e.set("layer", c.layer as i64 + 1)?; // 1-based like layer.stackIndex and frameNumber
+        e.set("frame", c.frame as i64 + 1)?;
+        e.set("layerName", a.sprite().layers[c.layer].name.clone())?;
+        for (name, list) in c.report.categories() {
+            e.set(name, list_table(list)?)?;
+        }
+        e.set("total", c.report.total() as i64)?;
+        total += c.report.total() as i64;
+        out.push(e)?;
+    }
+    out.set("total", total)?;
+    Ok(out)
+}
+
 // MARK: Installation
 
 pub(super) fn install(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
@@ -973,6 +1123,8 @@ pub(super) fn install(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
     )?;
     command.set_metatable(Some(meta))?;
     app.set("command", command)?;
+    let c = ctx.clone();
+    app.set("lint", lua.create_function(move |lua, p: Option<Table>| lint_function(lua, &c, Params(p)))?)?;
 
     // app.refresh() has nothing to redraw; app.undo() / app.redo() are the Undo / Redo commands.
     app.set("refresh", lua.create_function(|_, ()| Ok(()))?)?;

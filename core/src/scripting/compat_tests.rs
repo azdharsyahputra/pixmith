@@ -1182,3 +1182,113 @@ fn run_script_named_reports_documents_through_the_c_abi() {
         drop(Box::from_raw(doc));
     }
 }
+
+// MARK: Clean Edges and lint
+
+fn painted(rows: &[&str]) -> Editor {
+    let (w, h) = (rows[0].len(), rows.len());
+    let mut px = Vec::new();
+    for r in rows {
+        for c in r.chars() {
+            px.extend_from_slice(&match c {
+                'K' => [20, 20, 30, 255],
+                'R' => [200, 60, 50, 255],
+                'P' => [225, 225, 220, 255],
+                _ => [0, 0, 0, 0],
+            });
+        }
+    }
+    let mut s = Sprite::new(w as u32, h as u32);
+    s.cels[0][0] = Some(Arc::new(crate::document::Cel { opacity: 255, pixels: px, ..Default::default() }));
+    Editor::new(s)
+}
+
+#[test]
+fn clean_edges_command_removes_specks_and_keeps_details() {
+    // A 4x4 body with a 1 px dark mark and a dust speck; the mark must survive.
+    let mut e = painted(&["........", ".RRRR...", ".RKRR...", ".RRRR...", ".RRRR...", "........", ".......K"]);
+    plain(
+        &mut e,
+        r#"
+local spr = app.activeSprite
+        local function px(f, x, y)
+          local im = Image(spr.width, spr.height)
+          im:drawSprite(spr, f)
+          return im:getPixel(x, y)
+        end
+        app.command.CleanEdges{ despeckle = 4 }
+        assert(px(1, 7, 6) == 0, "speck removed")
+        assert(px(1, 2, 2) ~= 0, "mark kept")
+        assert(px(1, 1, 1) ~= 0, "body kept")
+        "#,
+    );
+}
+
+#[test]
+fn clean_edges_command_all_frames_and_default_passes() {
+    let mut e = painted(&[
+        "........", ".PPPPPP.", ".PKKKKP.", ".PKRRKP.", ".PKRRKP.", ".PKKKKP.", ".PPPPPP.", "........", "......K.",
+    ]);
+    plain(
+        &mut e,
+        r#"
+local spr = app.activeSprite
+        local function px(f, x, y)
+          local im = Image(spr.width, spr.height)
+          im:drawSprite(spr, f)
+          return im:getPixel(x, y)
+        end
+        app.command.NewFrame()
+        app.command.CleanEdges{ frames = "all" }
+        for f = 1, 2 do
+          assert(px(f, 1, 1) == 0, "paper gone, frame " .. f)
+          assert(px(f, 6, 8) == 0, "speck gone, frame " .. f)
+          assert(px(f, 3, 3) ~= 0, "body kept, frame " .. f)
+        end
+        "#,
+    );
+}
+
+#[test]
+fn clean_edges_command_respects_the_selection_and_undoes_in_one_step() {
+    let mut e =
+        painted(&["........", ".RRRR...", ".RRRR...", ".RRRR...", ".RRRR...", "........", "K.K.....", "........"]);
+    plain(
+        &mut e,
+        r#"
+local spr = app.activeSprite
+        local function px(f, x, y)
+          local im = Image(spr.width, spr.height)
+          im:drawSprite(spr, f)
+          return im:getPixel(x, y)
+        end
+        spr.selection:select(Rectangle(0, 0, 8, 5))
+        app.command.CleanEdges{ despeckle = 4 }
+        assert(px(1, 0, 6) ~= 0 and px(1, 2, 6) ~= 0, "specks outside the selection stay")
+        spr.selection:deselect()
+        app.command.CleanEdges{ despeckle = 4 }
+        assert(px(1, 0, 6) == 0 and px(1, 2, 6) == 0, "specks gone without a selection")
+        app.undo()
+        assert(px(1, 0, 6) ~= 0 and px(1, 2, 6) ~= 0, "undo restores both specks")
+        "#,
+    );
+}
+
+#[test]
+fn lint_returns_counts_and_positions_without_changing_anything() {
+    let mut e =
+        painted(&["........", ".PPPPPP.", ".PKKKKP.", ".PK..KP.", ".PKKKKP.", ".PPPPPP.", "........", "......K."]);
+    plain(
+        &mut e,
+        r#"
+        local r = app.lint{ list = 5 }
+        assert(#r == 1 and r[1].frame == 1 and r[1].layer == 1)
+        assert(r[1].holes.count == 1 and r[1].holes.items[1].x == 3 and r[1].holes.items[1].y == 3)
+        assert(r[1].specks.count == 1 and r[1].specks.items[1].x == 6 and r[1].specks.items[1].y == 7)
+        assert(r[1].light_edge.count > 0 and #r[1].light_edge.items <= 5)
+        assert(r.total == r[1].total and r.total > 0)
+        local all = app.lint{ frames = "all" }
+        assert(#all == 1)
+        "#,
+    );
+}

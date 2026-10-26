@@ -56,6 +56,8 @@ final class SpriteModel: ObservableObject {
     @Published var brushSize = 1
     @Published var zoom: CGFloat = 16
     @Published var onionSkin = false
+    /// Tint the pixels that differ from the previous frame (`FrameDiffCache`; options in `ViewSettings`).
+    @Published var frameDiff = false
     @Published var showGrid = true
     @Published var isPlaying = false
     @Published var fileURL: URL? {

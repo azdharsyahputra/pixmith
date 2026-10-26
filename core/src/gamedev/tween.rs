@@ -11,9 +11,12 @@
 //!   `round_half_up` (`floor(x + 0.5)`).
 //! * State lives in the layer's user data text as a versioned line appended after the user's own
 //!   text, so it is saved in `.aseprite` files, follows undo snapshots and needs no `Sprite` field.
+//! * Layers can have a tween parent (see `rig`): the layer's world transform is the parent's world
+//!   transform composed with its own, and frames are rendered from the composed affine matrix.
 //! * Opacity is 0..=1 and multiplies the cel opacity. Colors are never blended, so Indexed and
 //!   Grayscale sprites stay on their palette; the result is still run through `Snapper`.
 
+use super::rig;
 use crate::document::color_mode::Snapper;
 use crate::document::{Cel, Editor, Sprite};
 use std::collections::HashMap;
@@ -249,15 +252,35 @@ pub struct TweenState {
     pub snap_scale: bool,
     /// Ignore the opacity track (for Indexed/Grayscale sprites that cannot show partial opacity).
     pub opacity_off: bool,
+    /// Rig identity: a number that is unique in the sprite, given to a layer when another layer is
+    /// parented to it (`rig::set_parent`). It travels with the layer, so reordering, inserting and
+    /// deleting layers never breaks a link.
+    pub id: Option<u32>,
+    /// The `id` of the tween parent layer. A link whose parent no longer exists is ignored.
+    pub parent: Option<u32>,
 }
 
 impl TweenState {
-    fn new() -> Self {
-        TweenState { tracks: Vec::new(), pivot: None, rotsprite: true, snap_scale: false, opacity_off: false }
+    pub(crate) fn new() -> Self {
+        TweenState {
+            tracks: Vec::new(),
+            pivot: None,
+            rotsprite: true,
+            snap_scale: false,
+            opacity_off: false,
+            id: None,
+            parent: None,
+        }
     }
 
-    fn is_default(&self) -> bool {
-        self.tracks.is_empty() && self.pivot.is_none() && self.rotsprite && !self.snap_scale && !self.opacity_off
+    pub(crate) fn is_default(&self) -> bool {
+        self.tracks.is_empty()
+            && self.pivot.is_none()
+            && self.rotsprite
+            && !self.snap_scale
+            && !self.opacity_off
+            && self.id.is_none()
+            && self.parent.is_none()
     }
 
     pub fn track(&self, p: Prop) -> Option<&TweenTrack> {
@@ -271,14 +294,14 @@ impl TweenState {
         Some((lo, hi))
     }
 
-    fn value(&self, p: Prop, frame: u32) -> f32 {
+    pub(crate) fn value(&self, p: Prop, frame: u32) -> f32 {
         self.track(p).map_or(p.default_value(), |t| value_at(t, frame))
     }
 }
 
 // MARK: Persistence in layer user data
 
-const SEP: &str = "\u{1e}pixmith.tween.v1:";
+pub(crate) const SEP: &str = "\u{1e}pixmith.tween.v1:";
 
 /// Splits layer text into the user's own text and the tween payload.
 fn split_text(text: &str) -> (&str, Option<&str>) {
@@ -299,6 +322,12 @@ fn encode(st: &TweenState) -> String {
     if let Some((x, y)) = st.pivot {
         parts.push(format!("pv={x},{y}"));
     }
+    if let Some(id) = st.id {
+        parts.push(format!("id={id}"));
+    }
+    if let Some(pa) = st.parent {
+        parts.push(format!("pa={pa}"));
+    }
     for t in st.tracks.iter().filter(|t| !t.keys.is_empty()) {
         let keys: Vec<String> = t.keys.iter().map(|k| format!("{},{},{}", k.frame, k.value, k.ease.encode())).collect();
         parts.push(format!("{}={}", t.property.name(), keys.join("~")));
@@ -314,6 +343,8 @@ fn decode(payload: &str, layer: usize) -> TweenState {
             "rs" => st.rotsprite = v == "1",
             "ss" => st.snap_scale = v == "1",
             "oo" => st.opacity_off = v == "1",
+            "id" => st.id = v.parse().ok().filter(|&n| n > 0),
+            "pa" => st.parent = v.parse().ok().filter(|&n| n > 0),
             "pv" => {
                 let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
                 if n.len() == 2 && n.iter().all(|x| x.is_finite()) {
@@ -360,24 +391,55 @@ pub fn store(s: &mut Sprite, layer: usize, st: Option<&TweenState>) {
     l.user_data.text = (!text.is_empty()).then_some(text);
 }
 
+/// Removes the rig id from a layer's tween payload (a duplicated layer must not claim the id of the
+/// layer it was copied from); its own parent link stays.
+pub(crate) fn clear_identity(l: &mut crate::document::Layer) {
+    let Some(text) = l.user_data.text.as_deref() else { return };
+    let (user, Some(payload)) = split_text(text) else { return };
+    let mut st = decode(payload, 0);
+    if st.id.is_none() {
+        return;
+    }
+    st.id = None;
+    let user = user.to_string();
+    let text = if st.is_default() {
+        user
+    } else {
+        format!("{}{}{}{}", user, if user.is_empty() { "" } else { "\n" }, SEP, encode(&st))
+    };
+    l.user_data.text = (!text.is_empty()).then_some(text);
+}
+
 /// Stores the state, or removes it when it is back to defaults.
-fn store_or_clear(s: &mut Sprite, layer: usize, st: &TweenState) {
+pub(crate) fn store_or_clear(s: &mut Sprite, layer: usize, st: &TweenState) {
     store(s, layer, (!st.is_default()).then_some(st));
 }
 
 // MARK: Geometry
 
 #[derive(Clone, Copy, Debug)]
-struct Params {
-    pivot: (f64, f64),
-    tx: f64,
-    ty: f64,
-    sx: f64,
-    sy: f64,
-    angle: f64,
+pub(crate) struct Params {
+    pub(crate) pivot: (f64, f64),
+    pub(crate) tx: f64,
+    pub(crate) ty: f64,
+    pub(crate) sx: f64,
+    pub(crate) sy: f64,
+    pub(crate) angle: f64,
 }
 
+/// Affine matrix `[a, b, c, d, e, f]`: `x' = a x + c y + e`, `y' = b x + d y + f` (canvas coordinates,
+/// y down, positive angles clockwise).
+pub type Matrix = [f64; 6];
+
 impl Params {
+    /// The forward transform of `warp`: scale about the pivot, rotate about it, then translate.
+    pub(crate) fn matrix(&self) -> Matrix {
+        let (c, s) = cos_sin(self.angle);
+        let (a, b, cc, d) = (c * self.sx, s * self.sx, -s * self.sy, c * self.sy);
+        let (px, py) = self.pivot;
+        [a, b, cc, d, px + self.tx - (a * px + cc * py), py + self.ty - (b * px + d * py)]
+    }
+
     fn is_identity(&self) -> bool {
         self.tx == 0.0 && self.ty == 0.0 && self.sx == 1.0 && self.sy == 1.0 && quarter_turns(self.angle) == Some(0)
     }
@@ -442,15 +504,56 @@ const ROTSPRITE_MAX_AREA: usize = 1 << 18;
 /// source upscaled 8x by `transform::upscale8`) the result is resampled RotSprite-style, otherwise
 /// nearest neighbor. Multiples of 90 degrees use exact trigonometry, so they are lossless.
 fn warp(src: &[u8], w: usize, h: usize, p: &Params, up8: Option<&[u32]>) -> Vec<u8> {
-    let mut out = vec![0u8; w * h * 4];
     if p.sx == 0.0 || p.sy == 0.0 {
-        return out;
+        return vec![0u8; w * h * 4];
     }
     let (c, s) = cos_sin(p.angle);
     let inverse = |qx: f64, qy: f64| -> (f64, f64) {
         let (dx, dy) = (qx - p.pivot.0 - p.tx, qy - p.pivot.1 - p.ty);
         ((c * dx + s * dy) / p.sx + p.pivot.0, (-s * dx + c * dy) / p.sy + p.pivot.1)
     };
+    warp_with(src, w, h, &inverse, up8)
+}
+
+/// `warp` for a general affine matrix (a parented layer's composed transform).
+fn warp_affine(src: &[u8], w: usize, h: usize, m: &Matrix, up8: Option<&[u32]>) -> Vec<u8> {
+    let Some(inv) = invert(m) else { return vec![0u8; w * h * 4] };
+    let inverse =
+        |qx: f64, qy: f64| -> (f64, f64) { (inv[0] * qx + inv[2] * qy + inv[4], inv[1] * qx + inv[3] * qy + inv[5]) };
+    warp_with(src, w, h, &inverse, up8)
+}
+
+/// `a` applied after `b` (`b` first).
+pub(crate) fn mul(a: &Matrix, b: &Matrix) -> Matrix {
+    [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5],
+    ]
+}
+
+pub(crate) const IDENTITY: Matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+pub(crate) fn invert(m: &Matrix) -> Option<Matrix> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    let (a, b, c, d) = (m[3] / det, -m[1] / det, -m[2] / det, m[0] / det);
+    Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
+}
+
+/// Whether the matrix only scales and turns by multiples of 90 degrees (nearest neighbor is then exact).
+fn axis_aligned(m: &Matrix) -> bool {
+    let tiny = |v: f64| v.abs() < 1e-9;
+    (tiny(m[1]) && tiny(m[2])) || (tiny(m[0]) && tiny(m[3]))
+}
+
+fn warp_with(src: &[u8], w: usize, h: usize, inverse: &dyn Fn(f64, f64) -> (f64, f64), up8: Option<&[u32]>) -> Vec<u8> {
+    let mut out = vec![0u8; w * h * 4];
     for y in 0..h {
         for x in 0..w {
             let o = (y * w + x) * 4;
@@ -500,6 +603,7 @@ struct CacheKey {
     w: usize,
     h: usize,
     params: [u64; 7],
+    affine: bool,
     rotsprite: bool,
 }
 
@@ -552,13 +656,24 @@ const CACHE_MAX: usize = 64;
 /// Number of warps computed (not served from the cache); lets tests observe caching.
 pub static WARPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn transformed(src: Source, w: usize, h: usize, p: &Params, rotsprite: bool) -> Arc<Vec<u8>> {
-    if p.is_identity() {
+/// The transform of a layer: its own parameters, or (below a tween parent) a composed matrix.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Xf {
+    Own(Params),
+    World(Matrix),
+}
+
+fn transformed(src: Source, w: usize, h: usize, xf: &Xf, rotsprite: bool) -> Arc<Vec<u8>> {
+    let (identity, quarter, bits) = match xf {
+        Xf::Own(p) => (p.is_identity(), quarter_turns(p.angle).is_some(), p.bits()),
+        Xf::World(m) => (*m == IDENTITY, axis_aligned(m), [m[0], m[1], m[2], m[3], m[4], m[5], 0.0].map(f64::to_bits)),
+    };
+    if identity {
         return Arc::new(src.pixels().to_vec());
     }
-    let use_rs = rotsprite && quarter_turns(p.angle).is_none() && w * h <= ROTSPRITE_MAX_AREA;
+    let use_rs = rotsprite && !quarter && w * h <= ROTSPRITE_MAX_AREA;
     let id = src.id();
-    let key = CacheKey { cel: id, w, h, params: p.bits(), rotsprite: use_rs };
+    let key = CacheKey { cel: id, w, h, params: bits, affine: matches!(xf, Xf::World(_)), rotsprite: use_rs };
     let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(|| Cache { results: HashMap::new(), up8: HashMap::new() });
     if let Some((_, r)) = cache.results.get(&key) {
@@ -579,7 +694,11 @@ fn transformed(src: Source, w: usize, h: usize, p: &Params, rotsprite: bool) -> 
             .clone()
     });
     WARPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let result = Arc::new(warp(src.pixels(), w, h, p, up.as_deref().map(|v| v.as_slice())));
+    let up = up.as_deref().map(|v| v.as_slice());
+    let result = Arc::new(match xf {
+        Xf::Own(p) => warp(src.pixels(), w, h, p, up),
+        Xf::World(m) => warp_affine(src.pixels(), w, h, m, up),
+    });
     if cache.results.len() >= CACHE_MAX {
         cache.results.clear();
     }
@@ -605,28 +724,44 @@ fn params_at(st: &TweenState, frame: u32, src: &[u8], w: usize, h: usize) -> (Pa
     (p, op)
 }
 
+/// The local transform of a layer at a frame: identity when it has no tracks (a plain rig parent),
+/// else scale, rotation about its own pivot and translation. Used for the ancestors of a layer.
+pub(crate) fn local_matrix(s: &Sprite, layer: usize, st: &TweenState, frame: u32) -> Matrix {
+    let Some((lo, _)) = st.range() else { return IDENTITY };
+    let (w, h) = (s.width as usize, s.height as usize);
+    let px = if st.pivot.is_some() { Vec::new() } else { source_pixels(s, layer, lo as usize).unwrap_or_default() };
+    let px = if px.len() == w * h * 4 || st.pivot.is_some() { px } else { vec![0; w * h * 4] };
+    params_at(st, frame, &px, w, h).0.matrix()
+}
+
 /// Renders the tweened cel of `layer` at `frame` from the source (the cel at the first key frame, or
 /// for a group its composite at that frame), or `None` outside the key range. For a group the
-/// result is the transformed composite and its tween opacity as cel opacity.
+/// result is the transformed composite and its tween opacity as cel opacity. Below a tween parent the
+/// transform is the parent's world transform composed with the layer's own, and the key range is the
+/// union of the ranges of the layer and its ancestors.
 fn render_state(s: &Sprite, layer: usize, frame: usize, st: &TweenState) -> Option<Arc<Cel>> {
-    let (lo, hi) = st.range()?;
+    let anc = rig::ancestors(s, layer, st);
+    let (lo, hi) = rig::hull(st, &anc)?;
     if (frame as u32) < lo || frame as u32 > hi {
         return None;
     }
+    let src_lo = st.range().map_or(lo, |r| r.0);
+    let parent_world = rig::ancestors_world(s, &anc, frame as u32);
+    let xf = |p: Params| if parent_world == IDENTITY { Xf::Own(p) } else { Xf::World(mul(&parent_world, &p.matrix())) };
     let (w, h) = (s.width as usize, s.height as usize);
     let is_group = s.layers.get(layer)?.is_group();
     let (pixels, base_opacity) = if is_group {
         let mut buf = vec![0u8; w * h * 4];
-        crate::document::layers::composite_range(s, lo as usize, layer + 1, s.subtree_end(layer), &mut buf, 0);
+        crate::document::layers::composite_range(s, src_lo as usize, layer + 1, s.subtree_end(layer), &mut buf, 0);
         let (p, op) = params_at(st, frame as u32, &buf, w, h);
-        (transformed(Source::Buffer(&buf), w, h, &p, st.rotsprite).as_ref().clone(), (255u8, op))
+        (transformed(Source::Buffer(&buf), w, h, &xf(p), st.rotsprite).as_ref().clone(), (255u8, op))
     } else {
-        let src = s.cels.get(lo as usize)?.get(layer)?.clone();
+        let src = s.cels.get(src_lo as usize)?.get(layer)?.clone();
         let Some(src) = src else {
             return Some(Arc::new(Cel { opacity: 255, pixels: vec![0; w * h * 4], ..Default::default() }));
         };
         let (p, op) = params_at(st, frame as u32, &src.pixels, w, h);
-        (transformed(Source::Cel(&src), w, h, &p, st.rotsprite).as_ref().clone(), (src.opacity, op))
+        (transformed(Source::Cel(&src), w, h, &xf(p), st.rotsprite).as_ref().clone(), (src.opacity, op))
     };
     let mut pixels = pixels;
     let mut sn = Snapper::new(s);
@@ -686,17 +821,29 @@ pub fn warning_text(bits: u32) -> String {
 // MARK: Editing
 
 /// Normal and group layers can be tweened (tilemap layers cannot).
-fn editable(s: &Sprite, layer: usize) -> bool {
+pub(crate) fn editable(s: &Sprite, layer: usize) -> bool {
     s.layers.get(layer).is_some_and(|l| l.kind <= 1)
 }
 
 /// Adds or replaces the key of `prop` at `frame`. One undo step.
 pub fn set_key(e: &mut Editor, layer: usize, prop: Prop, frame: u32, value: f32, ease: Ease) -> bool {
-    if !editable(&e.sprite, layer) || frame as usize >= e.sprite.frame_count() || !value.is_finite() {
+    if !key_ok(&e.sprite, layer, frame, value) {
         return false;
     }
     e.checkpoint();
-    let mut st = load(&e.sprite, layer).unwrap_or_else(TweenState::new);
+    set_key_raw(&mut e.sprite, layer, prop, frame, value, ease)
+}
+
+fn key_ok(s: &Sprite, layer: usize, frame: u32, value: f32) -> bool {
+    editable(s, layer) && (frame as usize) < s.frame_count() && value.is_finite()
+}
+
+/// `set_key` on a bare sprite, without an undo step (scripts own their undo step).
+pub(crate) fn set_key_raw(s: &mut Sprite, layer: usize, prop: Prop, frame: u32, value: f32, ease: Ease) -> bool {
+    if !key_ok(s, layer, frame, value) {
+        return false;
+    }
+    let mut st = load(s, layer).unwrap_or_else(TweenState::new);
     let i = match st.tracks.iter().position(|t| t.property == prop) {
         Some(i) => i,
         None => {
@@ -709,7 +856,7 @@ pub fn set_key(e: &mut Editor, layer: usize, prop: Prop, frame: u32, value: f32,
         Ok(j) => keys[j] = Key { frame, value, ease },
         Err(j) => keys.insert(j, Key { frame, value, ease }),
     }
-    store_or_clear(&mut e.sprite, layer, &st);
+    store_or_clear(s, layer, &st);
     true
 }
 
@@ -731,13 +878,25 @@ pub fn remove_key(e: &mut Editor, layer: usize, prop: Prop, frame: u32) -> bool 
 
 /// Sets (`Some`) or resets (`None`, content center) the layer's pivot. One undo step.
 pub fn set_pivot(e: &mut Editor, layer: usize, pivot: Option<(f32, f32)>) -> bool {
-    if !editable(&e.sprite, layer) || pivot.is_some_and(|(x, y)| !x.is_finite() || !y.is_finite()) {
+    if !pivot_ok(&e.sprite, layer, pivot) {
         return false;
     }
     e.checkpoint();
-    let mut st = load(&e.sprite, layer).unwrap_or_else(TweenState::new);
+    set_pivot_raw(&mut e.sprite, layer, pivot)
+}
+
+fn pivot_ok(s: &Sprite, layer: usize, pivot: Option<(f32, f32)>) -> bool {
+    editable(s, layer) && !pivot.is_some_and(|(x, y)| !x.is_finite() || !y.is_finite())
+}
+
+/// `set_pivot` on a bare sprite, without an undo step.
+pub(crate) fn set_pivot_raw(s: &mut Sprite, layer: usize, pivot: Option<(f32, f32)>) -> bool {
+    if !pivot_ok(s, layer, pivot) {
+        return false;
+    }
+    let mut st = load(s, layer).unwrap_or_else(TweenState::new);
     st.pivot = pivot;
-    store_or_clear(&mut e.sprite, layer, &st);
+    store_or_clear(s, layer, &st);
     true
 }
 
@@ -757,13 +916,20 @@ fn source_pixels(s: &Sprite, layer: usize, frame: usize) -> Option<Vec<u8>> {
     s.cels.get(frame)?.get(layer)?.as_ref().map(|c| c.pixels.clone())
 }
 
+/// The frame the layer's tween renders from: its first own key, else (a keyless child) the start of
+/// the range it inherits, else frame 0.
+fn source_frame(s: &Sprite, layer: usize, st: Option<&TweenState>) -> u32 {
+    let Some(st) = st else { return 0 };
+    st.range().map(|r| r.0).or_else(|| rig::hull(st, &rig::ancestors(s, layer, st)).map(|r| r.0)).unwrap_or(0)
+}
+
 /// The pivot in effect: custom, else the content center of the source.
 pub fn effective_pivot(s: &Sprite, layer: usize) -> Option<(f64, f64)> {
     let st = load(s, layer);
     if let Some((x, y)) = st.as_ref().and_then(|st| st.pivot) {
         return Some((x as f64, y as f64));
     }
-    let frame = st.as_ref().and_then(|st| st.range()).map_or(0, |r| r.0 as usize);
+    let frame = source_frame(s, layer, st.as_ref()) as usize;
     let px = source_pixels(s, layer, frame)?;
     Some(content_center(&px, s.width as usize, s.height as usize))
 }
@@ -772,7 +938,7 @@ pub fn effective_pivot(s: &Sprite, layer: usize) -> Option<(f64, f64)> {
 /// whole canvas when it is empty. Canvas handles are drawn around this box.
 pub fn source_bounds(s: &Sprite, layer: usize) -> Option<(f64, f64, f64, f64)> {
     let st = load(s, layer);
-    let frame = st.as_ref().and_then(|st| st.range()).map_or(0, |r| r.0 as usize);
+    let frame = source_frame(s, layer, st.as_ref()) as usize;
     let px = source_pixels(s, layer, frame)?;
     let (w, h) = (s.width as usize, s.height as usize);
     let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
@@ -821,7 +987,8 @@ impl BakeOptions {
 /// Transform parameters at a frame: x, y (rounded), rotation, scale x, scale y, opacity, pivot x, y.
 pub fn transform_at(s: &Sprite, layer: usize, frame: u32) -> Option<[f32; 8]> {
     let st = load(s, layer)?;
-    let (lo, _) = st.range()?;
+    let lo = rig::hull(&st, &rig::ancestors(s, layer, &st))?.0;
+    let lo = st.range().map_or(lo, |r| r.0);
     let (w, h) = (s.width as usize, s.height as usize);
     let px = source_pixels(s, layer, lo as usize).unwrap_or_else(|| vec![0; w * h * 4]);
     let (p, op) = params_at(&st, frame, &px, w, h);
@@ -837,18 +1004,23 @@ pub fn transform_at(s: &Sprite, layer: usize, frame: u32) -> Option<[f32; 8]> {
     ])
 }
 
-/// Writes the tweened result into real cels as one undo step, per `opts`. Every frame is rendered
-/// from the source before any cel is touched. Returns the layer the cels went to.
-///
-/// In place, the source cel at the first key frame is overwritten only when the tracks are removed
-/// (a plain bake); with `keep_source` it is left alone. A new layer leaves the original untouched
-/// and hides it. Groups always bake into a new layer.
-pub fn bake_with(e: &mut Editor, layer: usize, opts: BakeOptions) -> Option<usize> {
-    let st = load(&e.sprite, layer)?;
-    let (lo, hi) = st.range()?;
-    if !editable(&e.sprite, layer) || hi as usize >= e.sprite.frame_count() {
+/// Everything a bake needs, rendered from the untouched document.
+struct BakePlan {
+    rendered: Vec<(usize, Arc<Cel>)>,
+    new_layer: bool,
+    /// Covers the whole key range, so the tracks (and the rig link) go away.
+    full: bool,
+}
+
+/// Renders the frames a bake of `layer` writes. The sprite must have its links flushed.
+fn plan_bake(s: &Sprite, layer: usize, opts: &BakeOptions) -> Option<BakePlan> {
+    let st = load(s, layer)?;
+    let anc = rig::ancestors(s, layer, &st);
+    let (lo, hi) = rig::hull(&st, &anc)?;
+    if !editable(s, layer) || hi as usize >= s.frame_count() {
         return None;
     }
+    let src_lo = st.range().map_or(lo, |r| r.0);
     let (from, to) = match opts.range {
         BakeRange::All => (lo, hi),
         BakeRange::Frames(a, b) => (a.min(b), a.max(b)),
@@ -857,35 +1029,59 @@ pub fn bake_with(e: &mut Editor, layer: usize, opts: BakeOptions) -> Option<usiz
     if from < lo || to > hi {
         return None;
     }
-    let is_group = e.sprite.layers[layer].is_group();
-    let new_layer = opts.new_layer || is_group;
-    e.sprite.flush_links();
-    let rendered: Vec<(usize, Arc<Cel>)> = (from..=to)
-        .filter(|&f| new_layer || !(opts.keep_source && f == lo))
-        .filter_map(|f| render_state(&e.sprite, layer, f as usize, &st).map(|c| (f as usize, c)))
+    let new_layer = opts.new_layer || s.layers[layer].is_group();
+    let rendered = (from..=to)
+        .filter(|&f| new_layer || !(opts.keep_source && f == src_lo))
+        .filter_map(|f| render_state(s, layer, f as usize, &st).map(|c| (f as usize, c)))
         .collect();
-    e.checkpoint();
-    let full = from == lo && to == hi;
-    let target = if new_layer {
+    Some(BakePlan { rendered, new_layer, full: from == lo && to == hi })
+}
+
+/// Writes a plan into the document (the caller made the undo checkpoint). Returns the layer the cels
+/// went to and, when a layer was inserted, its index.
+fn apply_bake(e: &mut Editor, layer: usize, opts: &BakeOptions, plan: &BakePlan) -> (usize, Option<usize>) {
+    let is_group = e.sprite.layers[layer].is_group();
+    let (target, inserted) = if plan.new_layer {
         let above = if is_group { e.sprite.subtree_end(layer) - 1 } else { layer };
         let t = e.sprite.add_layer(above);
         e.sprite.layers[t].name = format!("{} (baked)", e.sprite.layers[layer].name);
         e.sprite.layers[t].child_level = e.sprite.layers[layer].child_level;
-        t
+        (t, Some(t))
     } else {
-        layer
+        (layer, None)
     };
     // `add_layer` inserts above `layer`, so `layer` keeps its index.
-    for (f, cel) in rendered {
-        e.sprite.cels[f][target] = Some(cel);
+    for (f, cel) in &plan.rendered {
+        e.sprite.cels[*f][target] = Some(cel.clone());
     }
-    if new_layer {
+    if plan.new_layer {
         e.sprite.layers[layer].visible = false;
     }
-    if !opts.keep_source && full {
+    if !opts.keep_source && plan.full {
         store(&mut e.sprite, layer, None);
+        rig::forget_unused_ids(&mut e.sprite);
     }
-    Some(target)
+    (target, inserted)
+}
+
+/// Writes the tweened result into real cels as one undo step, per `opts`. Every frame is rendered
+/// from the source before any cel is touched. Returns the layer the cels went to.
+///
+/// In place, the source cel at the first key frame is overwritten only when the tracks are removed
+/// (a plain bake); with `keep_source` it is left alone. A new layer leaves the original untouched
+/// and hides it. Groups always bake into a new layer.
+///
+/// A layer with a tween parent is baked with its composed transform; baking it removes its rig link
+/// (the motion of the parent is part of its cels now). A layer that has tween children cannot lose its
+/// tracks this way (the children would stop moving): use `bake_all`, or `keep_source`.
+pub fn bake_with(e: &mut Editor, layer: usize, opts: BakeOptions) -> Option<usize> {
+    e.sprite.flush_links();
+    let plan = plan_bake(&e.sprite, layer, &opts)?;
+    if !opts.keep_source && plan.full && !rig::children_of(&e.sprite, layer).is_empty() {
+        return None;
+    }
+    e.checkpoint();
+    Some(apply_bake(e, layer, &opts, &plan).0)
 }
 
 /// Plain bake: in place, first to last key; `keep_source` keeps tracks and source.
@@ -893,23 +1089,35 @@ pub fn bake(e: &mut Editor, layer: usize, keep_source: bool) -> bool {
     bake_with(e, layer, BakeOptions::all(keep_source)).is_some()
 }
 
-/// Bakes every tweened layer (one undo step). Higher layers first so inserted layers do not shift
-/// the ones still to do. Returns how many layers were baked.
+/// Bakes every tweened layer (one undo step). All frames of all layers are rendered from the
+/// document as it is first, so the parents' motion reaches their children whatever the order;
+/// the results are then written parents before children. Returns how many layers were baked.
 pub fn bake_all(e: &mut Editor, keep_source: bool, new_layer: bool) -> usize {
-    let todo: Vec<usize> = (0..e.sprite.layers.len())
-        .rev()
-        .filter(|&l| load(&e.sprite, l).is_some_and(|st| st.range().is_some()))
+    let opts = BakeOptions { range: BakeRange::All, new_layer, keep_source };
+    e.sprite.flush_links();
+    let mut plans: Vec<(usize, usize, BakePlan)> = (0..e.sprite.layers.len())
+        .filter_map(|l| {
+            let depth = load(&e.sprite, l).map(|st| rig::ancestors(&e.sprite, l, &st).len())?;
+            plan_bake(&e.sprite, l, &opts).map(|p| (depth, l, p))
+        })
         .collect();
-    if todo.is_empty() {
+    if plans.is_empty() {
         return 0;
     }
+    // Parents first; among equals the higher layer first (its insertion shifts fewer pending layers).
+    plans.sort_by_key(|(depth, l, _)| (*depth, std::cmp::Reverse(*l)));
+    let mut index: Vec<usize> = plans.iter().map(|p| p.1).collect();
     e.begin_transaction();
-    let n = todo
-        .into_iter()
-        .filter(|&l| bake_with(e, l, BakeOptions { range: BakeRange::All, new_layer, keep_source }).is_some())
-        .count();
+    e.checkpoint();
+    for k in 0..plans.len() {
+        if let (_, Some(at)) = apply_bake(e, index[k], &opts, &plans[k].2) {
+            for j in index.iter_mut().skip(k + 1).filter(|j| **j >= at) {
+                *j += 1;
+            }
+        }
+    }
     e.end_transaction();
-    n
+    plans.len()
 }
 
 /// A copy of the sprite with every tween baked in place (tracks removed), for exporters that need
@@ -1149,6 +1357,7 @@ pub unsafe extern "C" fn pixmith_tween_set_rotsprite(doc: *mut Editor, layer: u3
 }
 
 /// Bit 0: layer has keys. Bit 1: RotSprite on. Bit 2: custom pivot. Bit 3: snap scale. Bit 4: opacity ignored.
+/// Bit 5: the layer has a tween parent link (it may point at a deleted layer; see `pixmith_tween_get_parent`).
 #[no_mangle]
 pub unsafe extern "C" fn pixmith_tween_options(doc: *const Editor, layer: u32) -> u32 {
     crate::ffi::guarded("pixmith_tween_options", std::ptr::null_mut(), || {
@@ -1160,6 +1369,7 @@ pub unsafe extern "C" fn pixmith_tween_options(doc: *const Editor, layer: u32) -
                     | (st.pivot.is_some() as u32) << 2
                     | (st.snap_scale as u32) << 3
                     | (st.opacity_off as u32) << 4
+                    | (st.parent.is_some() as u32) << 5
             }
             None => 2,
         }
@@ -1523,7 +1733,7 @@ mod tests {
         assert_eq!(a, b);
         // Same source cel + params: the cached buffer itself is returned.
         let cel = e.sprite.cels[0][0].clone().unwrap();
-        let p = Params { pivot: (8.0, 8.0), tx: 0.0, ty: 0.0, sx: 1.0, sy: 1.0, angle: 20.0 };
+        let p = Xf::Own(Params { pivot: (8.0, 8.0), tx: 0.0, ty: 0.0, sx: 1.0, sy: 1.0, angle: 20.0 });
         let (r1, r2) =
             (transformed(Source::Cel(&cel), 16, 16, &p, true), transformed(Source::Cel(&cel), 16, 16, &p, true));
         assert!(Arc::ptr_eq(&r1, &r2), "second request served from cache");

@@ -72,6 +72,12 @@ pub fn show(tab: &mut DocTab, st: &mut TimelineState, ui: &mut egui::Ui, rect: R
     };
     toggle(ui_l, icon::REPEAT, &mut st.loop_tags, "Loop tag: play inside the tag that contains the current frame");
     toggle(ui_l, icon::STACK, &mut st.onion_skin, "Onion skin (options in View > View Options)");
+    toggle(
+        ui_l,
+        icon::EXCLUDE,
+        &mut st.frame_diff,
+        "Frame difference: tint the pixels that differ from the previous frame (options in View > View Options)",
+    );
     toggle(ui_l, icon::HASH, &mut st.show_grid, "Pixel grid");
 
     // Right group, laid out right to left.

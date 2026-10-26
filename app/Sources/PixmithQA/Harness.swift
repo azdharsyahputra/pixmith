@@ -116,6 +116,7 @@ func fresh(_ w: Int = 16, _ h: Int = 16) -> SpriteModel {
     m.brushSize = 1
     m.zoom = 8
     m.onionSkin = false
+    m.frameDiff = false
     m.showGrid = true
     m.loopTags = true
     m.opts.secondary = WHITE

@@ -75,7 +75,7 @@ fn reserve(ctx: &Ctx, w: usize, h: usize) -> LuaResult<usize> {
 
 impl ImageH {
     /// A free-standing image; `px` must hold `w * h * 4` bytes, or `None` for a transparent one.
-    fn own(ctx: &Rc<Ctx>, w: usize, h: usize, px: Option<Vec<u8>>, mode: i64) -> LuaResult<ImageH> {
+    pub(super) fn own(ctx: &Rc<Ctx>, w: usize, h: usize, px: Option<Vec<u8>>, mode: i64) -> LuaResult<ImageH> {
         let bytes = reserve(ctx, w, h)?;
         let px = px.unwrap_or_else(|| vec![0; bytes]);
         debug_assert_eq!(px.len(), bytes);

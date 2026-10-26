@@ -68,26 +68,26 @@ fn render(s: &Shot) -> (u32, u32) {
         .with_render_options(options)
         .wgpu()
         .build_ui_state(
-        |ui, app: &mut PixmithApp| {
-            if !installed {
-                // New fonts take effect on the next pass; the first pass draws nothing.
-                theme::install(ui.ctx());
-                theme::apply(ui.ctx(), app.dark);
-                for id in collapse {
-                    pixmith_desktop::ui::widgets::set_section_collapsed(ui.ctx(), id, true);
+            |ui, app: &mut PixmithApp| {
+                if !installed {
+                    // New fonts take effect on the next pass; the first pass draws nothing.
+                    theme::install(ui.ctx());
+                    theme::apply(ui.ctx(), app.dark);
+                    for id in collapse {
+                        pixmith_desktop::ui::widgets::set_section_collapsed(ui.ctx(), id, true);
+                    }
+                    installed = true;
+                    ui.ctx().request_discard("fonts installed");
+                    return;
                 }
-                installed = true;
-                ui.ctx().request_discard("fonts installed");
-                return;
-            }
-            // The harness insets its root ui; the real window has no inset.
-            let full = ui.ctx().content_rect();
-            let mut root = ui.new_child(egui::UiBuilder::new().max_rect(full));
-            root.set_clip_rect(full);
-            app.ui(&mut root);
-        },
-        app,
-    );
+                // The harness insets its root ui; the real window has no inset.
+                let full = ui.ctx().content_rect();
+                let mut root = ui.new_child(egui::UiBuilder::new().max_rect(full));
+                root.set_clip_rect(full);
+                app.ui(&mut root);
+            },
+            app,
+        );
     // The marching ants and the text cursor ask for repaints, so `run` would complain; `run_ok` does not.
     harness.run_ok();
     harness.run_ok();

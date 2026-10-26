@@ -254,6 +254,35 @@ func registerLayers() {
         m.onionSkin = false
     }
 
+    scenario("frames/frame-difference-view") {
+        let m = fresh(8, 8), d = CanvasDriver()
+        m.zoom = 16
+        m.color = RED
+        d.click(2, 2)
+        m.addFrame(duplicate: true)
+        m.color = BLUE
+        d.click(5, 5)
+        d.sync()
+        let off = d.shown(5, 5, in: d.bitmap())
+        m.frameDiff = true
+        // Frame 2 is frame 1 plus a blue pixel at (5, 5): exactly one pixel appeared.
+        let e = FrameDiffCache.shared.entry(m)
+        expectEq(e?.reference, 0)
+        expectEq(e.map { [$0.changed, $0.appeared, $0.disappeared] } ?? [], [0, 1, 0])
+        expectEq(e?.chip, "Diff 1 px: 0 changed, 1 new, 0 gone")
+        let on = d.shown(5, 5, in: d.bitmap())
+        expect(off != nil && on != nil && off != on, "the appeared pixel is tinted: \(String(describing: off)) vs \(String(describing: on))")
+        // Frame 1 looks back at the last frame only when the view wraps; the pixel is gone there.
+        m.frame = 0
+        let wrapped = FrameDiffCache.shared.entry(m)
+        expectEq(wrapped.map { [$0.changed, $0.appeared, $0.disappeared] } ?? [], [0, 0, 1])
+        ViewSettings.shared.diffWrap = false
+        expectEq(FrameDiffCache.shared.entry(m)?.reference, nil)
+        expectEq(FrameDiffCache.shared.entry(m)?.chip, "Diff: no previous frame")
+        ViewSettings.shared.diffWrap = true
+        m.frameDiff = false
+    }
+
     scenario("tags/edit-and-playback") {
         let m = fresh()
         for _ in 0..<5 { m.addFrame(duplicate: false) }

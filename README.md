@@ -107,7 +107,7 @@ The script builds a universal (arm64 + x86_64) app when the Rust toolchain has b
 
 **Layers, frames and animation**
 - Layers and nested groups with opacity, visibility, blend modes, merge down, duplicate and drag-and-drop reordering.
-- Timeline with a cel grid: select ranges of cels, per-frame durations, frame reordering, linked cels, cel properties, onion skinning (optional tint) and a floating preview window.
+- Timeline with a cel grid: select ranges of cels, per-frame durations, frame reordering, linked cels, cel properties, onion skinning (optional tint), a frame-difference view that tints the pixels changed from the previous frame and a floating preview window.
 - Animation tags with forward, reverse and ping-pong directions and tag-aware playback.
 - Tilemap layers with tilesets: create, convert, rename, duplicate and delete tiles, share flipped copies, and a stamp mode.
 - Slices (including 9-patch centers and pivots) and user data (text, color) for the sprite, layers, cels, tags and slices.

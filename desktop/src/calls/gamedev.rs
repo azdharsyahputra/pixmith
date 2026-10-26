@@ -14,6 +14,7 @@ use pixmith_core::document::tilemap as tilemap_ffi;
 use pixmith_core::ffi::document as core;
 use pixmith_core::gamedev::godot as godot_ffi;
 use pixmith_core::gamedev::godot::tileset as tileset_ffi;
+use pixmith_core::gamedev::rig as rig_ffi;
 use pixmith_core::gamedev::tween as tween_ffi;
 use pixmith_core::history;
 use pixmith_core::{jobs, scripting};
@@ -233,6 +234,24 @@ impl Doc {
     pub fn tween_set_flag(&mut self, layer: u32, flag: u32, on: bool) -> bool {
         let ok = unsafe { tween_ffi::pixmith_tween_set_flag(self.raw(), layer, flag, on) };
         self.after_tween(ok, "Tween Option")
+    }
+
+    /// The tween parent of a layer (the rig link), if it has one.
+    pub fn tween_parent(&self, layer: u32) -> Option<u32> {
+        let p = unsafe { rig_ffi::pixmith_tween_get_parent(self.raw(), layer) };
+        u32::try_from(p).ok()
+    }
+
+    /// Whether `parent` can be the tween parent of `layer` (no cycle, both tweenable).
+    pub fn tween_can_parent(&self, layer: u32, parent: u32) -> bool {
+        unsafe { rig_ffi::pixmith_tween_can_parent(self.raw(), layer, parent) }
+    }
+
+    /// Links `layer` below `parent`, or unlinks it with `None`. One undo step.
+    pub fn tween_set_parent(&mut self, layer: u32, parent: Option<u32>) -> bool {
+        let p = parent.map_or(-1, |p| p as i32);
+        let ok = unsafe { rig_ffi::pixmith_tween_set_parent(self.raw(), layer, p) };
+        self.after_tween(ok, "Set Tween Parent")
     }
 
     pub fn tween_warning(&self, layer: u32) -> Option<String> {

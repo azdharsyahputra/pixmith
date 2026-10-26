@@ -30,6 +30,11 @@
 //! sprite:newLayer(name), sprite:newGroup(name), sprite:deleteLayer(i), sprite:moveLayer(i, to) -> index
 //! sprite:moveLayerIntoGroup(i, group) -> index, sprite:moveLayerOutOfGroup(i) -> index
 //!
+//! -- Tween rig (layers with a tween parent; see docs/LUA_API.md)
+//! layer.tweenParent (read/write layer or nil), layer:setTweenKey(prop, frame, value [, ease]),
+//! layer:setTweenPivot(x, y | nil), layer:tweenTransform([frame]) -> { matrix, local, rotation, scaleX, scaleY, pivotX,
+//! pivotY } or nil, layer:tweenMap([frame,] x, y) -> x, y
+//!
 //! -- Frames and tags
 //! sprite.frames[i] -> { duration (ms), index }
 //! sprite:newFrame([copy]), sprite:duplicateFrame(i), sprite:deleteFrame(i)
@@ -65,6 +70,7 @@
 //! -- Palette
 //! sprite.paletteSize, sprite:getPaletteColor(i), sprite:setPaletteColor(i, color), sprite:addPaletteColor(color)
 //!
+//! app.frameDiff{ frame, layer, wrap, mask } -> { changed, appeared, disappeared, total, bounds, ... } (docs/LUA_API.md)
 //! app.alert(msg), app.undoLabel(text), app.blend.Multiply ..., app.direction.PingPong ..., print(...)
 //! app.version, app.apiVersion, app.activeLayer / app.activeFrame (handles; assign to select them)
 //! color.rgba(r, g, b [, a]), color.split(c) -> r, g, b, a
@@ -93,6 +99,7 @@ mod commands;
 mod compat_tests;
 mod dialog;
 mod events;
+mod framediff;
 mod fs;
 mod geometry;
 pub mod host;
@@ -1209,6 +1216,23 @@ impl UserData for LayerH {
             t.get()?;
             Ok(t.0.sprite().parent_layer(t.1).map(|p| LayerH::new(&t.0, p)))
         });
+        // The tween parent (docs/LUA_API.md, Tween rig): assigning nil unlinks; a cycle is an error.
+        f.add_field_method_get("tweenParent", |_, t| {
+            t.get()?;
+            Ok(crate::gamedev::rig::parent_of(t.0.sprite(), t.1).map(|p| LayerH::new(&t.0, p)))
+        });
+        f.add_field_method_set("tweenParent", |_, t, v: Value| {
+            t.get()?;
+            let parent = if matches!(v, Value::Nil) { None } else { Some(t.0.layer_of(&v)?) };
+            if crate::gamedev::rig::set_parent_raw(t.0.sprite(), t.1, parent) {
+                Ok(())
+            } else {
+                Err(Error::runtime(
+                    "tweenParent: both layers must be normal or group layers, a layer cannot be its own ancestor, \
+                     and a group cannot be linked to a layer inside it",
+                ))
+            }
+        });
         f.add_field_method_get("children", |lua, t| {
             t.get()?;
             let s = t.0.sprite();
@@ -1233,6 +1257,88 @@ impl UserData for LayerH {
             })
         });
         m.add_meta_method(mlua::MetaMethod::ToString, |_, t, ()| Ok(format!("Layer(\"{}\")", t.get()?.name)));
+        // layer:setTweenKey("rotation", frame, 30 [, "linear"]): props x, y, rotation, scaleX, scaleY, opacity.
+        m.add_method("setTweenKey", |_, t, (prop, frame, value, ease): (String, Value, f64, Option<String>)| {
+            use crate::gamedev::tween::{set_key_raw, Ease, Prop};
+            t.get()?;
+            let f = t.0.frame_of(&frame)?;
+            let prop = match prop.as_str() {
+                "x" => Prop::PosX,
+                "y" => Prop::PosY,
+                "rotation" => Prop::Rotation,
+                "scaleX" => Prop::ScaleX,
+                "scaleY" => Prop::ScaleY,
+                "opacity" => Prop::Opacity,
+                other => {
+                    return Err(Error::runtime(format!(
+                        "unknown tween property '{other}' (x, y, rotation, scaleX, scaleY, opacity)"
+                    )))
+                }
+            };
+            let ease = match ease.as_deref().unwrap_or("linear") {
+                "linear" => Ease::Linear,
+                "hold" => Ease::Hold,
+                "inQuad" => Ease::InQuad,
+                "outQuad" => Ease::OutQuad,
+                "inOutQuad" => Ease::InOutQuad,
+                "inOutCubic" => Ease::InOutCubic,
+                "outBack" => Ease::OutBack,
+                "outBounce" => Ease::OutBounce,
+                other => return Err(Error::runtime(format!("unknown easing '{other}'"))),
+            };
+            if !set_key_raw(t.0.sprite(), t.1, prop, f as u32, value as f32, ease) {
+                return Err(Error::runtime("setTweenKey: the layer cannot be tweened or the value is not finite"));
+            }
+            Ok(())
+        });
+        // layer:setTweenPivot(x, y) in canvas coordinates (pixel corners), or setTweenPivot(nil) for the content center.
+        m.add_method("setTweenPivot", |_, t, (x, y): (Option<f64>, Option<f64>)| {
+            t.get()?;
+            let pivot = match (x, y) {
+                (Some(x), Some(y)) => Some((x as f32, y as f32)),
+                (None, None) => None,
+                _ => return Err(Error::runtime("setTweenPivot needs x and y, or nil")),
+            };
+            if crate::gamedev::tween::set_pivot_raw(t.0.sprite(), t.1, pivot) {
+                Ok(())
+            } else {
+                Err(Error::runtime("setTweenPivot: the layer cannot be tweened or the pivot is not finite"))
+            }
+        });
+        // layer:tweenTransform([frame]) -> { matrix = {a,b,c,d,e,f}, local = {...}, rotation, scaleX, scaleY, pivotX, pivotY },
+        // or nil when the layer is not tweened (no keys of its own or of an ancestor).
+        m.add_method("tweenTransform", |lua, t, frame: Option<Value>| {
+            t.get()?;
+            let f = match frame {
+                Some(v) if !matches!(v, Value::Nil) => t.0.frame_of(&v)?,
+                _ => t.0.frame_index(None)?,
+            };
+            let Some(c) = crate::gamedev::rig::composed_transform(t.0.sprite(), t.1, f as u32) else { return Ok(None) };
+            let out = lua.create_table()?;
+            out.set("matrix", lua.create_sequence_from(c.matrix)?)?;
+            out.set("local", lua.create_sequence_from(c.local)?)?;
+            out.set("rotation", c.rotation)?;
+            out.set("scaleX", c.scale_x)?;
+            out.set("scaleY", c.scale_y)?;
+            out.set("pivotX", c.pivot_world.0)?;
+            out.set("pivotY", c.pivot_world.1)?;
+            Ok(Some(out))
+        });
+        // layer:tweenMap([frame,] x, y) -> x, y: a point of the layer's rest pose where it is drawn at that frame.
+        m.add_method("tweenMap", |_, t, mut a: MultiValue| {
+            t.get()?;
+            let nums = a.iter().filter(|v| matches!(v, Value::Integer(_) | Value::Number(_))).count();
+            let f = if nums >= 3 { take_frame_idx(&t.0, &mut a, false)? } else { t.0.frame_index(None)? };
+            let num = |v: Option<Value>| match v {
+                Some(Value::Integer(i)) => Ok(i as f64),
+                Some(Value::Number(n)) => Ok(n),
+                _ => Err(Error::runtime("tweenMap needs x and y")),
+            };
+            let (x, y) = (num(a.pop_front())?, num(a.pop_front())?);
+            let m = crate::gamedev::rig::world_matrix(t.0.sprite(), t.1, f as u32)
+                .ok_or_else(|| Error::runtime("tweenMap: the layer is not tweened"))?;
+            Ok(crate::gamedev::rig::map_point(&m, x, y))
+        });
         // layer:cel(frame) -> the cel, or nil when the layer has no image there (as in Aseprite).
         m.add_method("cel", |_, t, frame: Value| {
             t.get()?;
@@ -1962,6 +2068,7 @@ impl UserData for SliceH {
             let sl = t.get()?;
             if matches!(v, Value::Nil) {
                 sl.has_pivot = false;
+                sl.pivot_from = 0;
                 return Ok(());
             }
             let (x, y) = geometry::point_of(&v).ok_or_else(|| Error::runtime("pivot must be a Point or nil"))?;
@@ -2219,6 +2326,7 @@ fn setup(lua: &Lua, ctx: &Rc<Ctx>) -> LuaResult<()> {
     palettes::install(lua, ctx)?;
     fs::install(lua, ctx)?;
     commands::install(lua, ctx)?;
+    framediff::install(lua, ctx)?;
     host::install(lua, ctx)?;
     Ok(())
 }
@@ -2564,6 +2672,53 @@ mod tests {
     }
 
     #[test]
+    fn tween_rig_from_lua() {
+        let mut s = Sprite::new(40, 40);
+        s.add_frame(0, false);
+        s.add_frame(1, false);
+        s.add_layer(0);
+        s.draw_line(0, 0, 10, 10, 10, 10, RED, 1);
+        s.draw_line(1, 0, 20, 10, 20, 10, [0, 255, 0, 255], 1);
+        let mut e = Editor::new(s);
+        ok(
+            &mut e,
+            r#"
+            local parent, child = sprite.layers[1], sprite.layers[2]
+            assert(child.tweenParent == nil and parent.tweenParent == nil)
+            parent:setTweenKey("x", 1, 0)
+            parent:setTweenKey("x", 3, 4)
+            parent:setTweenKey("rotation", 1, 0, "hold")
+            parent:setTweenKey("rotation", 3, 90)
+            parent:setTweenPivot(10, 10)
+            assert(parent:tweenTransform(1).rotation == 0)
+            child.tweenParent = parent
+            assert(child.tweenParent == parent and #parent.children == 0)
+            -- the child has no keys, it follows: at frame 3 the parent is translated by (4,0) and turned 90 degrees about (10,10)
+            local t = child:tweenTransform(3)
+            assert(math.abs(t.rotation - 90) < 1e-9, t.rotation)
+            assert(math.abs(t.matrix[1]) < 1e-9 and math.abs(t.matrix[2] - 1) < 1e-9)
+            -- the child's pixel (20,10) has its center at (20.5, 10.5): (10.5, 0.5) from the pivot, turned to (-0.5, 10.5), plus 4 to the right
+            local x, y = child:tweenMap(3, 20.5, 10.5)
+            assert(math.abs(x - 13.5) < 1e-9 and math.abs(y - 20.5) < 1e-9, x .. "," .. y)
+            local x2, y2 = child:tweenMap(20.5, 10.5)   -- the active frame is 1: nothing moved
+            assert(x2 == 20.5 and y2 == 10.5)
+            -- cycles and non-layers are errors
+            assert(not pcall(function() parent.tweenParent = child end))
+            assert(not pcall(function() parent.tweenParent = parent end))
+            assert(not pcall(function() parent:setTweenKey("shear", 1, 0) end))
+            child.tweenParent = nil
+            assert(child.tweenParent == nil and child:tweenTransform(3) == nil)
+            child.tweenParent = parent
+            "#,
+        );
+        assert_eq!(crate::gamedev::rig::parent_of(&e.sprite, 1), Some(0));
+        let img = e.sprite.render(2);
+        let at = |x: usize, y: usize| &img[(y * 40 + x) * 4..][..4];
+        assert_eq!(at(13, 20), &[0, 255, 0, 255]);
+        assert_eq!(e.history_len().0, 1, "the whole script is one undo step");
+    }
+
+    #[test]
     fn reads_and_writes_pixels_layers_and_frames() {
         let mut e = Editor::new(Sprite::new(4, 3));
         let o = ok(
@@ -2631,6 +2786,44 @@ mod tests {
             "sprite.frames[1].duration = 120.0 sprite.layers[1].opacity = 200 assert(sprite.frames[1].duration == 120)",
         );
         assert_eq!(e.sprite.durations, vec![120]);
+    }
+
+    #[test]
+    fn frame_diff_reports_counts_bounds_and_a_mask() {
+        let mut e = Editor::new(Sprite::new(8, 4));
+        let o = ok(
+            &mut e,
+            r#"
+            -- Top half of a body moves one pixel right, the bottom half stays: a torn character.
+            local top = sprite:newLayer("Top")
+            sprite:newFrame()
+            for y = 0, 3 do
+              for x = 1, 4 do
+                local dx = (y < 2) and 1 or 0
+                sprite:setPixel(x, y, 0xFF0000FF, 1, 1)
+                sprite:setPixel(x + dx, y, 0xFF0000FF, 1, 2)
+              end
+            end
+            sprite:setPixel(7, 3, 0x0000FFFF, top.index, 2)   -- only on the top layer, frame 2
+            local d = app.frameDiff{ frame = 2, mask = true }
+            print(d.frame, d.previous, d.changed, d.appeared, d.disappeared, d.total)
+            print(d.bounds.x, d.bounds.y, d.bounds.width, d.bounds.height)
+            print(d.mask.width, d.mask.height, d.mask:getPixel(5, 0), d.mask:getPixel(1, 0), d.mask:getPixel(2, 0))
+            local l = app.frameDiff{ frame = 2, layer = 2 }
+            print(l.layer, l.total, l.mask)
+            local w = app.frameDiff{ frame = 1 }
+            local n = app.frameDiff{ frame = 1, wrap = false }
+            print(w.previous, w.total, n.previous, n.total, n.bounds)
+            "#,
+        );
+        assert_eq!(
+            o.messages,
+            vec!["2\t1\t0\t3\t2\t5", "1\t0\t7\t4", "8\t4\t4278255360\t4278190335\t0", "2\t1\tnil", "2\t5\tnil\t0\tnil",]
+        );
+        let o = run_src(&mut e, "app.frameDiff{ frame = 9 }");
+        assert!(o.error.is_some_and(|m| m.contains("frame 9 does not exist")));
+        let o = run_src(&mut e, "sprite:newLayer('x') local g = sprite:newGroup('g') app.frameDiff{ layer = g }");
+        assert!(o.error.is_some_and(|m| m.contains("groups have no pixels")));
     }
 
     #[test]

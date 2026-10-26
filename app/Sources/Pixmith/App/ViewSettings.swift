@@ -43,6 +43,13 @@ final class ViewSettings: ObservableObject {
     @Published var onionFalloff = 0.6 { didSet { persist() } }
     @Published var onionTint = false { didSet { persist() } }
 
+    // Frame difference (the on/off switch stays `SpriteModel.frameDiff`).
+    @Published var diffOpacity = 0.65 { didSet { persist() } }
+    /// Compare only the active layer instead of the composite of the visible layers.
+    @Published var diffActiveLayer = false { didSet { persist() } }
+    /// The first frame is compared with the last one (a looping animation); otherwise it has nothing to compare with.
+    @Published var diffWrap = true { didSet { persist() } }
+
     @Published var tiled: TiledMode = .none { didSet { persist() } }
 
     // Pixel grid (the on/off switch stays `SpriteModel.showGrid`).
@@ -84,6 +91,8 @@ final class ViewSettings: ObservableObject {
         var onionPast, onionFuture: Int?
         var onionOpacity, onionFalloff: Double?
         var onionTint: Bool?
+        var diffOpacity: Double?
+        var diffActiveLayer, diffWrap: Bool?
         var tiled: String?
         var gridColor: UInt32?
         var gridOpacity: Double?
@@ -102,7 +111,8 @@ final class ViewSettings: ObservableObject {
         guard !loading else { return }
         var snap = Snapshot(
             onionPast: onionPast, onionFuture: onionFuture, onionOpacity: onionOpacity, onionFalloff: onionFalloff,
-            onionTint: onionTint, tiled: tiled.rawValue, gridOpacity: gridOpacity, gridMinZoom: gridMinZoom,
+            onionTint: onionTint, diffOpacity: diffOpacity, diffActiveLayer: diffActiveLayer, diffWrap: diffWrap,
+            tiled: tiled.rawValue, gridOpacity: gridOpacity, gridMinZoom: gridMinZoom,
             customGrid: customGrid, customGridW: customGridW, customGridH: customGridH, customGridX: customGridX,
             customGridY: customGridY, customGridType: customGridType.rawValue, isoGridW: isoGridW, isoGridH: isoGridH,
             isoGridX: isoGridX, isoGridY: isoGridY, customGridColor: Self.rgba(customGridColor),
@@ -126,6 +136,9 @@ final class ViewSettings: ObservableObject {
         onionOpacity = s.onionOpacity ?? onionOpacity
         onionFalloff = s.onionFalloff ?? onionFalloff
         onionTint = s.onionTint ?? onionTint
+        diffOpacity = (s.diffOpacity ?? diffOpacity).clamped(to: 0.1...1)
+        diffActiveLayer = s.diffActiveLayer ?? diffActiveLayer
+        diffWrap = s.diffWrap ?? diffWrap
         tiled = s.tiled.flatMap(TiledMode.init(rawValue:)) ?? tiled
         if let c = s.gridColor { gridColor = Color(cgColor: c.cgColor) }
         gridOpacity = s.gridOpacity ?? gridOpacity

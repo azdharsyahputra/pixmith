@@ -622,6 +622,8 @@ impl Sprite {
         let end = self.subtree_end(i);
         let mut block: Vec<Layer> = self.layers[i..end].to_vec();
         block[0].name.push_str(" copy");
+        // The copies must not claim the rig ids of the originals (their children keep following those).
+        block.iter_mut().for_each(crate::gamedev::tween::clear_identity);
         self.layers.splice(end..end, block);
         for row in &mut self.cels {
             let copies: Vec<_> = row[i..end].iter().map(independent_cel).collect();

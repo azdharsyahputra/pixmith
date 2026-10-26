@@ -11,6 +11,7 @@ pub mod filters;
 mod help;
 mod history;
 pub mod hooks;
+mod lint;
 pub mod prefs;
 mod sheets;
 pub mod shortcuts;
@@ -44,6 +45,7 @@ pub struct MenusState {
     pub cli_open: bool,
     pub filter: Option<filters::FilterSession>,
     pub scale: Option<filters::ScaleSession>,
+    pub lint: Option<lint::LintSession>,
     pub canvas_size: Option<sheets::CanvasSizeSession>,
     pub cel: Option<sheets::CelSession>,
     /// Sprite > Sprite Properties… is open.
@@ -72,6 +74,7 @@ impl Default for MenusState {
             cli_open: false,
             filter: None,
             scale: None,
+            lint: None,
             canvas_size: None,
             cel: None,
             sprite_props: false,
@@ -152,6 +155,7 @@ impl MenusState {
     fn sheet_open(&self) -> bool {
         self.filter.is_some()
             || self.scale.is_some()
+            || self.lint.is_some()
             || self.canvas_size.is_some()
             || self.cel.is_some()
             || self.sprite_props
@@ -210,6 +214,7 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
     apply_prefs(app);
     hooks::sheet_import_dialog(app, ctx);
     filters::show(app, ctx);
+    lint::show(app, ctx);
     if let Some(mut s) = app.menus.canvas_size.take()
         && !sheets::canvas_size(app, ctx, &mut s)
     {

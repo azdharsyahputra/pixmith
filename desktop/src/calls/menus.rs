@@ -8,7 +8,7 @@ use crate::doc::{Doc, last_error, take_string};
 use pixmith_core::document::color_mode as cm;
 use pixmith_core::document::layers;
 use pixmith_core::history;
-use pixmith_core::paint::{filters, selection};
+use pixmith_core::paint::{cleanup, filters, selection};
 
 /// The rectangle that limits a filter: the selection's bounds, or `None` for the whole canvas.
 pub type FilterRegion = Option<(i32, i32, u32, u32)>;
@@ -95,6 +95,15 @@ impl Doc {
             self.touch();
         }
         ok
+    }
+
+    /// Sprite Lint (`pixmith_sprite_lint`): the core's text report for the cels chosen by `target`, empty on a bad
+    /// argument. Read only; see `pixmith_filters.h` for the format and the parameter block.
+    pub fn sprite_lint(&self, target: u32, layer: u32, frame: u32, params: &[i32]) -> String {
+        // SAFETY: `params` is valid for its length; the returned string is owned and freed by `take_string`.
+        unsafe {
+            take_string(cleanup::pixmith_sprite_lint(self.raw(), target, layer, frame, params.as_ptr(), params.len()))
+        }
     }
 
     /// The 256-entry lookup table of one curve, from the core so previews match the filter (`lut`).
@@ -234,6 +243,35 @@ mod tests {
         let params = [0xFF0000FFu32 as i32, 0x00FF00FFu32 as i32, 0];
         assert!(d.filter_apply("Replace Color", 0, 0, 0, 0, None, &params));
         assert_eq!(pixel(&d, 1, 1), 0x00FF00FF);
+    }
+
+    /// A 3 x 3 red block at (1, 1) and a lone red pixel at (6, 6).
+    fn block_and_dust() -> Doc {
+        let mut d = Doc::new(8, 8);
+        d.begin_edit("Pencil");
+        for (x, y) in [(1, 1), (2, 1), (3, 1), (1, 2), (2, 2), (3, 2), (1, 3), (2, 3), (3, 3), (6, 6)] {
+            d.stroke_begin(0, 0, x, y, 0xFF0000FF, 1, 0);
+            d.stroke_end();
+        }
+        d.touch();
+        d
+    }
+
+    #[test]
+    fn clean_edges_and_lint_use_the_core() {
+        let mut d = block_and_dust();
+        let report = d.sprite_lint(0, 0, 0, &[]);
+        assert!(report.starts_with("cel 0 0\n"), "{report}");
+        assert!(report.contains("specks 1\n6 6 1\n"), "{report}");
+        let before = d.history_counts().0;
+        // Pass flags 2: detached specks only.
+        assert!(d.filter_apply("Clean Edges", 12, 0, 0, 0, None, &[2, 2, 40, 30, 4]));
+        assert_eq!(pixel(&d, 6, 6) & 0xFF, 0, "the speck is gone");
+        assert_eq!(pixel(&d, 2, 2), 0xFF0000FF, "the block stays");
+        assert_eq!(d.history_counts().0, before + 1);
+        assert!(!d.filter_apply("Clean Edges", 12, 0, 0, 0, None, &[2]), "nothing left to clean");
+        assert!(d.undo());
+        assert_eq!(pixel(&d, 6, 6), 0xFF0000FF);
     }
 
     #[test]

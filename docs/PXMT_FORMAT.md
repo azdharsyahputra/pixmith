@@ -67,8 +67,15 @@ Pixmith keeps some document data that `.aseprite` has no field for. All of it is
 | Data | Where it lives |
 | --- | --- |
 | Tween tracks (keyframed layer transforms) | the layer's user data text, a versioned line after the user's own text (`gamedev/tween.rs`) |
+| Tween rig links (a layer's tween parent) | the same tween line, as `id=` and `pa=` members (below) |
 | Terrains and auto-tile intent | the tilemap layer's user data text, a `pixmith.autotile.v1:` line (`gamedev/autotile.rs`) |
 | Godot export settings | the sprite's user data text, a `pixmith-godot-export ` line (`gamedev/godot/settings.rs`) |
+
+### Tween payload and the rig link
+
+The tween line is `\u001e` (record separator) `pixmith.tween.v1:` followed by `;`-separated `name=value` members: `rs`, `ss`, `oo` (flags), `pv=x,y` (pivot), the tracks `px`, `py`, `rot`, `sx`, `sy`, `op` (`frame,value,ease` keys joined by `~`), and, since the rig was added, **`id=N`** and **`pa=N`**. A layer that has children gets `id` (a positive integer, unique in the sprite, assigned the first time a child is linked); a child stores its parent's number as `pa`. Layers are never referenced by index, so reordering, inserting and deleting layers keeps links intact, and everything stays inside the layer's own user data text (it is plain `.aseprite` user data: Aseprite shows it and keeps it, and ignores its meaning).
+
+Compatibility: this is an additive change inside payload version 1, so no version number changed. Files without `id`/`pa` read and write byte for byte as before. An older Pixmith skips the two members it does not know (the layers then move on their own, unparented) and drops them when it saves the file again. A `pa` that names no layer is ignored; if two layers carry the same `id` (hand editing, copied layers) the lowest layer is the parent; a cycle in a hand edited file is read with the walk stopping where it would revisit a layer; `Duplicate Layer` gives the copy no `id`, so the children keep following the original.
 
 Future Pixmith-only data that does not fit user data would get its own chunk (or a `META` member) and be ignored by older readers.
 

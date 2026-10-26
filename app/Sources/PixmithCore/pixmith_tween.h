@@ -51,3 +51,22 @@ bool pixmith_tween_range(const PixmithDoc *doc, uint32_t layer, uint32_t *out2);
 char *pixmith_tween_warning_text(const PixmithDoc *doc, uint32_t layer);
 // Writes 4 floats: x0, y0, x1, y1 (pixel corners) of the tween source content.
 bool pixmith_tween_source_bounds(const PixmithDoc *doc, uint32_t layer, float *out4);
+
+// MARK: Tween rig (parented layers; core/src/gamedev/rig.rs)
+// A layer can have a tween parent: its transform is the parent's transform composed with its own, about its own
+// pivot. The link survives reordering, inserting and deleting layers. Options bit 5 (pixmith_tween_options) says a
+// layer has a parent link.
+// parent -1 unlinks. One undo step. Fails (false, nothing changed) for a cycle or a layer that cannot be tweened.
+bool pixmith_tween_set_parent(PixmithDoc *doc, uint32_t layer, int32_t parent);
+// The parent's layer index, or -1.
+int32_t pixmith_tween_get_parent(const PixmithDoc *doc, uint32_t layer);
+// Whether `parent` is a valid parent for `layer` (fills a menu: excludes the layer, its descendants, groups that
+// contain it or that it contains).
+bool pixmith_tween_can_parent(const PixmithDoc *doc, uint32_t layer, uint32_t parent);
+// Returns the number of children; writes up to `cap` of their layer indices to `out` (out may be NULL).
+uint32_t pixmith_tween_children(const PixmithDoc *doc, uint32_t layer, uint32_t *out, uint32_t cap);
+// Writes 11 floats: composed matrix a b c d e f (x' = a x + c y + e, y' = b x + d y + f), rotation (degrees,
+// clockwise), scale x, scale y, world position of the layer's pivot (x, y). False when the layer is not tweened.
+bool pixmith_tween_composed_at(const PixmithDoc *doc, uint32_t layer, uint32_t frame, float *out11);
+// First and last frame the layer is driven in: its own keys and its ancestors' together.
+bool pixmith_tween_effective_range(const PixmithDoc *doc, uint32_t layer, uint32_t *out2);

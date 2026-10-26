@@ -16,6 +16,11 @@ enum {
     PIXMITH_FILTER_BLUR = 9,                // none (3x3, alpha-aware)
     PIXMITH_FILTER_SHARPEN = 10,            // none (3x3, alpha-aware)
     PIXMITH_FILTER_CURVES = 11,             // five curves (RGB master, R, G, B, A), each: point count, then x, y pairs (0...255)
+    PIXMITH_FILTER_CLEAN_EDGES = 12,        // all optional, in this order: pass flags (1 halo, 2 despeckle, 4 thin outline,
+                                            // 8 lone light pixels; default 7), halo rings (2), halo luma gain (40),
+                                            // halo max saturation % (30), despeckle min size (4), hole size (0 = keep holes),
+                                            // outline max thickness (3), outline max luma (70), fixed outline color on (0/1),
+                                            // its color, its tolerance
 };
 
 // Targets: 0 = the cel at (layer, frame), 1 = every frame of `layer`, 2 = every layer of `frame`.
@@ -37,3 +42,12 @@ bool pixmith_scale_sprite(PixmithDoc *doc, uint32_t width, uint32_t height);
 
 // Writes the 256-entry lookup table of one curve (`n` control points as x, y pairs) to `out`.
 bool pixmith_curve_lut(const int32_t *xy, size_t n, uint8_t *out);
+
+// Sprite Lint (read only). Reports problems of the cels chosen by `target` (as above) without changing the
+// document. `params` (all optional, in this order): speck size (4), positions listed per category (64), check
+// palette (0/1), outline max luma (70), fixed outline color on (0/1), its color, its tolerance.
+// Returns NULL on a bad argument; otherwise text to release with pixmith_string_free: a line "cel <layer> <frame>"
+// (0-based) starts a cel; a line "<category> <count>" starts a category (light_edge, holes, specks, no_outline,
+// strays, semi_transparent, off_palette); the lines below it are "x y size".
+char *pixmith_sprite_lint(const PixmithDoc *doc, uint32_t target, uint32_t layer, uint32_t frame,
+                          const int32_t *params, size_t param_count);

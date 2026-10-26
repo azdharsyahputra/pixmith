@@ -6,8 +6,9 @@ import SwiftUI
 /// `scale` is not a pixel filter and uses its own sheet.
 enum FilterKind: UInt32, CaseIterable, Identifiable {
     case replaceColor = 0, invert, desaturate, hsl, brightnessContrast, colorBalance
-    case outline, dropShadow, despeckle, blur, sharpen, curves
+    case outline, dropShadow, despeckle, blur, sharpen, curves, cleanEdges
     case scale = 1000
+    case lintSprite
 
     var id: UInt32 { rawValue }
 
@@ -25,6 +26,8 @@ enum FilterKind: UInt32, CaseIterable, Identifiable {
         case .despeckle: "Remove Isolated Pixels"
         case .blur: "Blur"
         case .sharpen: "Sharpen"
+        case .cleanEdges: "Clean Edges"
+        case .lintSprite: "Lint Sprite"
         case .scale: "Scale Sprite"
         }
     }
@@ -84,6 +87,9 @@ struct FXCommands: Commands {
             item(.outline)
             item(.dropShadow)
             item(.despeckle)
+            item(.cleanEdges)
+            Divider()
+            item(.lintSprite)
             Divider()
             item(.blur)
             item(.sharpen)
@@ -118,6 +124,8 @@ private struct FilterSheetsModifier: ViewModifier {
         content.sheet(item: $state.active) { kind in
             if kind == .scale {
                 ScaleSheet(model: model)
+            } else if kind == .lintSprite {
+                LintSheet(model: model)
             } else {
                 FilterSheet(model: model, kind: kind)
             }
@@ -127,7 +135,7 @@ private struct FilterSheetsModifier: ViewModifier {
 
 // MARK: - Parameters
 
-private enum FilterTarget: UInt32, CaseIterable, Identifiable {
+enum FilterTarget: UInt32, CaseIterable, Identifiable {
     case cel = 0, allFrames, allLayers
     var id: UInt32 { rawValue }
     var title: String {
@@ -154,6 +162,7 @@ private struct FilterParams: Equatable {
     var shadowX = 1, shadowY = 1
     var shadowColor: UInt32 = 0x00000099
     var curves = CurveSet()
+    var clean = CleanParams()
 
     func values(_ kind: FilterKind) -> [Int32] {
         func c(_ v: UInt32) -> Int32 { Int32(bitPattern: v) }
@@ -166,8 +175,27 @@ private struct FilterParams: Equatable {
         case .outline: return [c(outlineColor), inside ? 1 : 0, eight ? 1 : 0]
         case .dropShadow: return [Int32(shadowX), Int32(shadowY), c(shadowColor)]
         case .despeckle: return [eight ? 1 : 0]
-        case .invert, .desaturate, .blur, .sharpen, .scale: return []
+        case .cleanEdges: return clean.values
+        case .invert, .desaturate, .blur, .sharpen, .scale, .lintSprite: return []
         }
+    }
+}
+
+/// The Clean Edges sheet: which passes run and their thresholds (`PIXMITH_FILTER_CLEAN_EDGES` in `pixmith_filters.h`).
+private struct CleanParams: Equatable {
+    var halo = true, rings = 2, gain = 40
+    var specks = true, minSize = 4
+    var holes = false, holeSize = 2
+    var light = false
+    var thin = true, thickness = 3, luma = 70
+    var fixedColor = false
+    var color: UInt32 = 0x000000FF
+
+    /// The parameter block of the core call.
+    var values: [Int32] {
+        let flags = (halo ? 1 : 0) | (specks ? 2 : 0) | (thin ? 4 : 0) | (light ? 8 : 0)
+        return [Int32(flags), Int32(rings), Int32(gain), 30, Int32(minSize), holes ? Int32(holeSize) : 0,
+                Int32(thickness), Int32(luma), fixedColor ? 1 : 0, Int32(bitPattern: color), 0]
     }
 }
 
@@ -240,7 +268,33 @@ struct FilterSheet: View {
             DSNote("3x3 blur that ignores transparent pixels' color.")
         case .sharpen:
             DSNote("3x3 sharpen that ignores transparent pixels' color.")
-        case .scale:
+        case .cleanEdges:
+            Toggle("Remove paper halo (light, grayish outer pixels)", isOn: $p.clean.halo).toggleStyle(.checkbox)
+            if p.clean.halo {
+                ValueSlider(label: "Rings", value: $p.clean.rings, range: 1...4)
+                ValueSlider(label: "Lighter than inside by", value: $p.clean.gain, range: 10...120)
+            }
+            Toggle("Remove detached specks", isOn: $p.clean.specks).toggleStyle(.checkbox)
+            if p.clean.specks {
+                ValueSlider(label: "Smaller than (px)", value: $p.clean.minSize, range: 2...32)
+            }
+            Toggle("Fill tiny enclosed holes", isOn: $p.clean.holes).toggleStyle(.checkbox)
+            if p.clean.holes {
+                ValueSlider(label: "Smaller than (px)", value: $p.clean.holeSize, range: 2...16)
+            }
+            Toggle("Replace lone light pixels inside dark areas", isOn: $p.clean.light).toggleStyle(.checkbox)
+            Toggle("Thin the outer outline to 1 px", isOn: $p.clean.thin).toggleStyle(.checkbox)
+            if p.clean.thin {
+                ValueSlider(label: "Thinner than (px)", value: $p.clean.thickness, range: 2...8)
+                Toggle("Use a fixed outline color", isOn: $p.clean.fixedColor).toggleStyle(.checkbox)
+                if p.clean.fixedColor {
+                    ColorRow(label: "Outline color", value: $p.clean.color)
+                } else {
+                    ValueSlider(label: "Outline darkness", value: $p.clean.luma, range: 0...255)
+                }
+            }
+            DSNote("Small interior details (eyes, highlights, thin fingers) are kept. Holes and lone light pixels are off by default because they can be details.")
+        case .scale, .lintSprite:
             EmptyView()
         }
     }
@@ -369,7 +423,7 @@ struct ScaleSheet: View {
 
 // MARK: - Controls
 
-private struct ValueSlider: View {
+struct ValueSlider: View {
     let label: String
     @Binding var value: Int
     let range: ClosedRange<Int>
@@ -381,7 +435,7 @@ private struct ValueSlider: View {
     }
 }
 
-private struct ColorRow: View {
+struct ColorRow: View {
     let label: String
     @Binding var value: UInt32
 
