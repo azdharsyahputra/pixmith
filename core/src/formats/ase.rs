@@ -28,8 +28,22 @@ const MAX_LAYERS: usize = 4096;
 const MAX_CEL_SLOTS: usize = 1 << 22;
 /// Decoded-but-not-yet-placed pixel data (zlib bombs are rejected by this).
 const MAX_PENDING_BYTES: usize = 1 << 29;
-/// Memory the finished cels of one file may take.
+/// Memory the finished cels of one file may take. Pixmith holds every distinct cel (linked cels once, tilemap cels
+/// as their rendering) as a full-canvas RGBA image, whatever its stored bounds, so this is what is counted.
 const MAX_CEL_BYTES: usize = 1 << 31;
+
+fn mb(bytes: usize) -> String {
+    format!("{:.1} MB", bytes as f64 / (1 << 20) as f64)
+}
+
+fn too_many_cel_bytes(cels: usize, width: u32, height: u32, bytes: usize, limit: usize) -> String {
+    format!(
+        "file needs too much memory: {cels} cels on a {width}x{height} canvas need about {} (Pixmith holds each \
+         distinct cel as a full {width}x{height} RGBA image, linked cels once), the limit is {}",
+        mb(bytes),
+        mb(limit)
+    )
+}
 
 struct Reader<'a> {
     buf: &'a [u8],
@@ -99,6 +113,11 @@ struct PendingCel {
 }
 
 pub fn read(bytes: &[u8]) -> Result<Sprite> {
+    read_limited(bytes, MAX_CEL_BYTES)
+}
+
+/// `read` with its own limit for the memory the finished cels may take.
+fn read_limited(bytes: &[u8], max_cel_bytes: usize) -> Result<Sprite> {
     let mut r = Reader::new(bytes);
     r.skip(4)?;
     if r.u16()? != FILE_MAGIC {
@@ -143,6 +162,8 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
     let mut color_profile = None;
     let mut pending_bytes = 0usize;
     let mut cel_bytes = 0usize;
+    let mut cel_count = 0usize;
+    let mut stored_cels = 0usize;
     let mut tileset_bytes = 0usize;
     let canvas_bytes = width as usize * height as usize * 4;
 
@@ -194,16 +215,28 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
                 }
                 CHUNK_CEL => {
                     if let Some(cel) = read_cel(&mut c, frame, bpp, MAX_PENDING_BYTES - pending_bytes)? {
+                        // What the file stores: the cel's own bounds (pixel cels) or its tile grid (tilemap cels).
                         pending_bytes += match &cel.data {
                             CelData::Pixels { data, .. } => data.len(),
                             CelData::Tilemap(g) => g.tiles.len() * 4,
                             CelData::Linked(_) => 0,
                         };
                         if !matches!(cel.data, CelData::Linked(_)) {
+                            stored_cels += 1;
+                            // What it takes once loaded: a full-canvas image.
                             cel_bytes += canvas_bytes;
                         }
-                        if pending_bytes > MAX_PENDING_BYTES || cel_bytes > MAX_CEL_BYTES {
-                            return Err("file needs too much memory".into());
+                        cel_count += 1;
+                        if pending_bytes > MAX_PENDING_BYTES {
+                            return Err(format!(
+                                "file needs too much memory: the pixel data stored in its {cel_count} cels is about {}, \
+                                 the limit is {}",
+                                mb(pending_bytes),
+                                mb(MAX_PENDING_BYTES)
+                            ));
+                        }
+                        if cel_bytes > max_cel_bytes {
+                            return Err(too_many_cel_bytes(stored_cels, width, height, cel_bytes, max_cel_bytes));
                         }
                         pending.push(cel);
                     }
@@ -212,7 +245,11 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
                     let t = tilemap::parse_tileset_chunk(c.rest(), bpp)?;
                     tileset_bytes += t.pixel_bytes();
                     if tileset_bytes > MAX_PENDING_BYTES {
-                        return Err("tilesets need too much memory".into());
+                        return Err(format!(
+                            "tilesets need too much memory: about {}, the limit is {}",
+                            mb(tileset_bytes),
+                            mb(MAX_PENDING_BYTES)
+                        ));
                     }
                     raw_tilesets.push(t);
                 }
@@ -248,7 +285,11 @@ pub fn read(bytes: &[u8]) -> Result<Sprite> {
         (t.from, t.to) = (a.min(b), a.max(b));
     }
     if frame_count * layers.len() > MAX_CEL_SLOTS {
-        return Err("too many frames and layers".into());
+        return Err(format!(
+            "too many frames and layers: {frame_count} frames x {} layers = {} cel slots, the limit is {MAX_CEL_SLOTS}",
+            layers.len(),
+            frame_count * layers.len()
+        ));
     }
     if palette.is_empty() {
         palette = default_palette();
@@ -364,7 +405,12 @@ fn read_cel(c: &mut Reader, frame: usize, bpp: usize, budget: usize) -> Result<O
             let h = c.u16()? as usize;
             let len = w * h * bpp;
             if len > budget {
-                return Err("cel is too large".into());
+                return Err(format!(
+                    "a {w}x{h} cel needs {} of decoded pixel data, but only {} of the {} limit is left",
+                    mb(len),
+                    mb(budget),
+                    mb(MAX_PENDING_BYTES)
+                ));
             }
             let data = if kind == 0 {
                 c.bytes(len)?.to_vec()
@@ -725,14 +771,16 @@ pub fn write(s: &Sprite) -> Vec<u8> {
         for (li, cel) in s.cels[f].iter().enumerate() {
             let Some(cel) = cel else { continue };
             let background = s.layers[li].flags & 8 != 0;
-            if s.layers[li].kind == tilemap::KIND_TILEMAP {
+            // Cels of one layer that share a buffer (tilemap cels included) are written as links.
+            if let Some(&source) = written.get(&(li, Arc::as_ptr(cel))) {
+                chunks.push(chunk(CHUNK_CEL, linked_cel_body(li, cel, source)));
+            } else if s.layers[li].kind == tilemap::KIND_TILEMAP {
                 if let Some(mut body) = tilemap::cel_body(li, cel) {
                     // Offset 9 of a cel chunk: layer, x, y, opacity, type, then the z-index.
                     body[9..11].copy_from_slice(&cel.z_index.to_le_bytes());
+                    written.insert((li, Arc::as_ptr(cel)), f);
                     chunks.push(chunk(CHUNK_CEL, body));
                 }
-            } else if let Some(&source) = written.get(&(li, Arc::as_ptr(cel))) {
-                chunks.push(chunk(CHUNK_CEL, linked_cel_body(li, cel, source)));
             } else {
                 let body = cel_body(li, cel, s.width as usize, s.height as usize, &mut enc, background);
                 written.insert((li, Arc::as_ptr(cel)), f);
@@ -811,6 +859,89 @@ mod tests {
         assert_eq!(s.render(0), expected);
         assert_eq!(s.render(1), expected);
         assert_eq!(s.durations, vec![100, 50]);
+    }
+
+    /// A raw RGBA cel chunk body: `w` x `h` transparent pixels on layer 0 at (0, 0).
+    fn raw_cel_body(w: u16, h: u16) -> Vec<u8> {
+        let mut cel = Vec::new();
+        for v in [0, 0, 0] {
+            put_u16(&mut cel, v); // layer, x, y
+        }
+        cel.push(255);
+        put_u16(&mut cel, 0); // raw
+        cel.extend([0; 7]);
+        put_u16(&mut cel, w);
+        put_u16(&mut cel, h);
+        cel.extend(vec![0; w as usize * h as usize * 4]);
+        cel
+    }
+
+    fn linked_body(source: u16) -> Vec<u8> {
+        let mut link = Vec::new();
+        for v in [0, 0, 0] {
+            put_u16(&mut link, v);
+        }
+        link.push(255);
+        put_u16(&mut link, 1); // linked
+        link.extend([0; 7]);
+        put_u16(&mut link, source);
+        link
+    }
+
+    /// A one-layer RGBA file on a `width` x `height` canvas whose frames each hold the given cel chunk (none: empty).
+    fn file_of(width: u32, height: u32, cels: Vec<Option<Vec<u8>>>) -> Vec<u8> {
+        let mut file = header(cels.len(), width, height, 32, 0);
+        for (i, cel) in cels.into_iter().enumerate() {
+            let mut chunks = Vec::new();
+            if i == 0 {
+                chunks.push(chunk(CHUNK_LAYER, layer_body(&Layer::new("L"))));
+            }
+            chunks.extend(cel.map(|c| chunk(CHUNK_CEL, c)));
+            file.extend(frame(chunks, 100));
+        }
+        let len = file.len() as u32;
+        file[..4].copy_from_slice(&len.to_le_bytes());
+        file
+    }
+
+    #[test]
+    fn many_small_cels_on_a_big_canvas_load() {
+        // 1280x768 canvas, 30 cels of 76x120: about 24 MB of stored pixels, ~118 MB once loaded.
+        let file = file_of(1280, 768, (0..30).map(|_| Some(raw_cel_body(76, 120))).collect());
+        let s = read(&file).unwrap();
+        assert_eq!(s.frame_count(), 30);
+        assert_eq!(s.distinct_cel_count(), 30);
+    }
+
+    #[test]
+    fn cel_memory_counts_each_distinct_cel_once_and_names_the_cause() {
+        // A 64x64 canvas is 16 KiB per cel; the limit is 1 MiB, so 64 cels fit and 65 do not.
+        let limit = 1 << 20;
+        let load = |n: usize| {
+            read_limited(&file_of(64, 64, (0..n).map(|_| Some(raw_cel_body(4, 4))).collect()), limit).map(|_| ())
+        };
+        assert_eq!(load(64), Ok(()));
+        let err = load(65).unwrap_err();
+        for part in ["too much memory", "65 cels", "64x64", "1.0 MB", "the limit is 1.0 MB"] {
+            assert!(err.contains(part), "{part:?} missing from: {err}");
+        }
+        // Linked cels share one buffer: thousands of them cost one cel.
+        let mut cels = vec![Some(raw_cel_body(4, 4))];
+        cels.extend((1..3000).map(|_| Some(linked_body(0))));
+        let s = read_limited(&file_of(64, 64, cels), limit).unwrap();
+        assert_eq!(s.frame_count(), 3000);
+        assert_eq!(s.distinct_cel_count(), 1);
+    }
+
+    #[test]
+    fn a_truly_oversized_file_still_errors_with_numbers() {
+        // 65535x1024 is the largest canvas (256 MiB per cel): nine one-pixel cels need 2.25 GiB, over the 2 GiB limit.
+        let file = file_of(65535, 1024, (0..9).map(|_| Some(raw_cel_body(1, 1))).collect());
+        let err = read(&file).unwrap_err();
+        for part in ["too much memory", "9 cels", "65535x1024", "2304", "the limit is 2048.0 MB"] {
+            assert!(err.contains(part), "{part:?} missing from: {err}");
+        }
+        assert!(read(&file_of(65535, 1024, (0..8).map(|_| Some(raw_cel_body(1, 1))).collect())).is_ok());
     }
 
     /// Hand-built indexed file whose palette has duplicate colors: [clear, red, red, blue].

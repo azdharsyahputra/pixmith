@@ -257,3 +257,39 @@ fn the_template_shows_the_diamond_and_marks_the_set_neighbours() {
     let none = &ts.tiles[1];
     assert!(none[(((py - 2) as usize) * tw + (px + 4) as usize) * 4 + 3] > 0, "outline pixel on the upper right edge");
 }
+
+/// Stamps a 3x3 block of plain tiles (no terrain data) on cells (0..3, 0..3) and returns their values by cell.
+fn stamp_plain_block(s: &mut Sprite, l: usize) -> Vec<((i64, i64), u32)> {
+    let ids: Vec<u32> = (0..9).map(|_| s.tilesets[0].add_blank()).collect();
+    let mut out = Vec::new();
+    for j in 0..3i64 {
+        for i in 0..3i64 {
+            let v = ids[(j * 3 + i) as usize];
+            assert!(stamp_cell(s, l, 0, i, j, v));
+            out.push(((i, j), v));
+        }
+    }
+    out
+}
+
+#[test]
+fn iso_terrain_paint_leaves_plain_stamped_tiles_alone() {
+    for mode in [Mode::Sides, Mode::Blob] {
+        let (mut s, l) = setup(mode);
+        let block = stamp_plain_block(&mut s, l);
+        // The cell just below block cell (2, 2) in cell space, then more around the block.
+        paint_terrain(&mut s, l, 0, 2, 3, Some(1));
+        paint_cells(&mut s, l, 0, &[(3, 3), (3, 2), (0, 3), (1, 3)], Some(1));
+        for &((i, j), v) in &block {
+            assert_eq!(tile_in_cell(&s, l, 0, i, j), v, "{mode:?}: block cell ({i}, {j}) survives painting");
+        }
+        assert_ne!(tile_in_cell(&s, l, 0, 2, 3), 0, "the painted cell got its terrain tile");
+        // Erasing terrain clears the auto tiles it made but not the plain ones, and a rebuild keeps them too.
+        paint_cells(&mut s, l, 0, &[(2, 3), (3, 3), (3, 2), (0, 3), (1, 3)], None);
+        assert_eq!(tile_in_cell(&s, l, 0, 2, 3), 0);
+        rebuild(&mut s, l, 0);
+        for &((i, j), v) in &block {
+            assert_eq!(tile_in_cell(&s, l, 0, i, j), v, "{mode:?}: block cell ({i}, {j}) survives erase and rebuild");
+        }
+    }
+}

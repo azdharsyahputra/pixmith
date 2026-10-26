@@ -29,3 +29,9 @@ typedef struct PixmithFrameDiff {
 // `mask` that is too small.
 bool pixmith_frame_diff(const PixmithDoc *doc, uint32_t frame, int32_t layer, bool wrap, uint8_t *mask, size_t len,
                         PixmithFrameDiff *out);
+
+// Like `pixmith_frame_diff` with a wrap mode instead of the flag: 0 = tag (a frame in a tag compares with the previous
+// frame of the same tag, the first frame of a tag with the tag's last; frames outside tags wrap over the document),
+// 1 = document (frame 0 with the last frame, `wrap == true` above), 2 = none (frame 0 has no reference). Other modes fail.
+bool pixmith_frame_diff_mode(const PixmithDoc *doc, uint32_t frame, int32_t layer, int32_t mode, uint8_t *mask, size_t len,
+                             PixmithFrameDiff *out);

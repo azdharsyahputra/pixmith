@@ -171,10 +171,11 @@ Tilemap layers also have `layer:getTile(x, y [, frame])` and
 
 ### Tween rig (parented layers)
 
-Pixmith's per-layer tween (keys for x, y, rotation, scale and opacity, a pivot) can be chained: a layer may have a **tween parent**, and its transform at a frame is the parent's transform composed with its own. Rotating a thigh moves the knee, and the shin, whose pivot is the knee, rotates about the moved knee. Opacity is not inherited. A child without keys of its own simply follows its parent; frames outside the key range of the layer and all its ancestors show the layer's own cels. Cels are resampled by nearest neighbor (RotSprite for turns that are not multiples of 90 degrees), never blended.
+Pixmith's per-layer tween (keys for x, y, rotation, scale and opacity, a pivot) can be chained: a layer may have a **tween parent**, and its transform at a frame is the parent's transform composed with its own. Rotating a thigh moves the knee, and the shin, whose pivot is the knee, rotates about the moved knee. Opacity is not inherited. A child without keys of its own simply follows its parent; frames before the first key of the layer and all its ancestors show the layer's own cels, and frames after the last key hold the last pose (see `setTweenExtend`). Cels are resampled by nearest neighbor (RotSprite for turns that are not multiples of 90 degrees), never blended.
 
 - `layer.tweenParent` (read/write): the parent layer handle or `nil`. Assigning a layer (handle, number or name) links, `nil` unlinks. It raises an error for a cycle (including a layer being its own ancestor), for tilemap layers, and for a group and a layer inside it. The link is stored in the layer's user data, so it survives layer moves and file saves.
 - `layer:setTweenKey(prop, frame, value [, ease])` adds or replaces a key. `prop` is `"x"`, `"y"`, `"rotation"` (degrees, clockwise), `"scaleX"`, `"scaleY"` or `"opacity"` (0..1); `ease` is `"linear"` (default), `"hold"`, `"inQuad"`, `"outQuad"`, `"inOutQuad"`, `"inOutCubic"`, `"outBack"` or `"outBounce"`. The layer's cel at its first key frame is the source image.
+- `layer:setTweenExtend(mode)` and `layer.tweenExtend` (read) say what the layer shows in the frames **after its last key** (the last key of the layer and its ancestors): `"hold"` (the default for new tweens) keeps the pose of the last key until the end of the sprite, `"loop"` repeats the key range (frame `last + 1` shows the pose of the first key frame, and so on; the key range is the cycle), and `"rest"` shows the layer's own cels, which is how files made before this option behave (they carry no setting and read as `"rest"`, so they render as before). Before the first key the layer's own cels always show, because the tween's source image is the cel at the first key frame. For a layer with a tween parent the child's own setting decides, also for the poses of its ancestors. Baking writes the held or looped frames too, so a bake never changes what is shown.
 - `layer:setTweenPivot(x, y)` sets the pivot in canvas coordinates (pixel corners; in the rest pose, i.e. the child's own space); `layer:setTweenPivot(nil)` goes back to the center of the content.
 - `layer:tweenTransform([frame])` returns `nil` when neither the layer nor an ancestor has keys, else a table: `matrix` and `local` (six numbers `a, b, c, d, e, f` with `x' = a*x + c*y + e`, `y' = b*x + d*y + f`; `matrix` includes the parents, `local` is the layer's own transform), `rotation` (degrees, of the composed matrix), `scaleX`, `scaleY` and `pivotX`, `pivotY` (where the layer's own pivot is on the canvas).
 - `layer:tweenMap([frame,] x, y)` returns the canvas position of a rest-pose point at that frame (an error if the layer is not tweened).
@@ -379,9 +380,13 @@ undo step.
   it (the "frame-difference view" of the editor), to find parts that did not move with the rest of a character.
   `frame` (1-based number or frame handle) defaults to the active frame; `layer` (number, name or layer handle)
   restricts the comparison to one layer's cel (hidden layers count; a missing cel is transparent), otherwise the
-  composite of the visible layers is compared (reference layers left out). The frame before frame 1 is the last
-  frame when `wrap` is true (the default; right for looping animations) and none when `wrap=false`; a one-frame
-  sprite never has one. Returns `{ frame, previous, layer, changed, appeared, disappeared, total, bounds, mask }`:
+  composite of the visible layers is compared (reference layers left out). `wrap` says what the first frame of a
+  loop is compared with: `"tag"` (the default) wraps inside the frame's tag, so a frame in a tag compares with the
+  previous frame of that tag and the tag's first frame with its last (no fake spike where one direction of a
+  walk sheet ends and the next begins; with nested or overlapping tags the innermost one, the one with fewest
+  frames and the first listed on a tie, decides; frames outside every tag and the first frame of the sprite
+  behave as `"document"`); `"document"` (or `true`) compares frame 1 with the last frame of the sprite and
+  ignores tags; `"none"` (or `false`) gives frame 1 no previous frame. A one-frame sprite never has one. Returns `{ frame, previous, layer, changed, appeared, disappeared, total, bounds, mask }`:
   `previous` is the 1-based frame compared against (`nil` when there is none, and then every count is 0);
   `appeared` counts pixels that were transparent and are not, `disappeared` the other way round, `changed` pixels
   that are not transparent in either frame but differ in color or alpha (the color of a fully transparent pixel never
@@ -757,7 +762,10 @@ sprite:newCel(sprite.layers[1], 1, art, Point(8, 8))      -- the whole image bec
 Constructors: `Image(width, height [, colorMode])`, `Image{ width=, height=, colorMode= }` / `Image(ImageSpec{...})` /
 `Image(sprite.spec)`, `Image(size)`, `Image(otherImage)` (a copy) and `Image{ fromFile = path }`. `fromFile` needs read
 permission and an absolute path; a PNG (any bit depth or color type; palette PNGs are expanded) or, for other
-extensions, any image Pixmith opens (the first frame); at most 8192 x 8192 for PNG. Images are **always RGBA in
+extensions, any image Pixmith opens (the first frame). **Size limits:** the file may be at most 256 MB, and the decoded
+image at most 67,108,864 pixels (2^26; 256 MB as RGBA, e.g. 8192 x 8192 or 16384 x 4096) with at most 65,535 pixels
+per side; a larger one fails with an error that names the size and these limits. A script may also keep at most
+512 MB of images alive at once (`Image(...)` is limited to the same 67,108,864 pixels). Images are **always RGBA in
 memory**; the `colorMode` given to `Image` (`ColorMode.RGB` 0, `GRAY` / `GRAYSCALE` 1, `INDEXED` 2) is remembered and
 decides what the pixel functions return and take (see [Colors](#colors)): RGB `0xAABBGGRR`, grayscale
 `gray | alpha << 8`, indexed a palette index of the active sprite. A `cel.image` of an Indexed or Grayscale sprite

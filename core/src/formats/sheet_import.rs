@@ -198,7 +198,13 @@ pub fn sprite_from_sheet_json(png: &[u8], json_text: &str) -> Result<Sprite, Str
         return Err("the sprite described by the JSON is too large".into());
     }
     if defs.len() > u16::MAX as usize || (defs.len() as u64).saturating_mul(cw as u64 * ch as u64 * 4) > 1 << 30 {
-        return Err("the JSON describes too many frames".into());
+        return Err(format!(
+            "the JSON describes too many frames: {} frames of {cw}x{ch} need about {} MB (every frame is kept as a \
+             full RGBA image), the limit is 1024 MB and {} frames",
+            defs.len(),
+            (defs.len() as u64).saturating_mul(cw as u64 * ch as u64 * 4) >> 20,
+            u16::MAX
+        ));
     }
     let mut s = Sprite::new(cw as u32, ch as u32);
     s.durations.clear();

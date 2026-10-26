@@ -32,6 +32,7 @@
 //!
 //! -- Tween rig (layers with a tween parent; see docs/LUA_API.md)
 //! layer.tweenParent (read/write layer or nil), layer:setTweenKey(prop, frame, value [, ease]),
+//! layer:setTweenExtend("hold" | "rest" | "loop"), layer.tweenExtend (read),
 //! layer:setTweenPivot(x, y | nil), layer:tweenTransform([frame]) -> { matrix, local, rotation, scaleX, scaleY, pivotX,
 //! pivotY } or nil, layer:tweenMap([frame,] x, y) -> x, y
 //!
@@ -1246,6 +1247,10 @@ impl UserData for LayerH {
             Ok(t.0.sprite().parent_layer(t.1).map(|p| LayerH::new(&t.0, p)))
         });
         // The tween parent (docs/LUA_API.md, Tween rig): assigning nil unlinks; a cycle is an error.
+        f.add_field_method_get("tweenExtend", |_, t| {
+            t.get()?;
+            Ok(crate::gamedev::tween::extend_of(t.0.sprite(), t.1).name())
+        });
         f.add_field_method_get("tweenParent", |_, t| {
             t.get()?;
             Ok(crate::gamedev::rig::parent_of(t.0.sprite(), t.1).map(|p| LayerH::new(&t.0, p)))
@@ -1319,6 +1324,18 @@ impl UserData for LayerH {
                 return Err(Error::runtime("setTweenKey: the layer cannot be tweened or the value is not finite"));
             }
             Ok(())
+        });
+        // layer:setTweenExtend("hold" | "rest" | "loop"): what the layer shows after its last key.
+        m.add_method("setTweenExtend", |_, t, mode: String| {
+            use crate::gamedev::tween::{set_extend_raw, Extend};
+            t.get()?;
+            let x = Extend::from_name(&mode)
+                .ok_or_else(|| Error::runtime(format!("unknown tween extend '{mode}' (hold, rest, loop)")))?;
+            if set_extend_raw(t.0.sprite(), t.1, x) {
+                Ok(())
+            } else {
+                Err(Error::runtime("setTweenExtend: the layer cannot be tweened"))
+            }
         });
         // layer:setTweenPivot(x, y) in canvas coordinates (pixel corners), or setTweenPivot(nil) for the content center.
         m.add_method("setTweenPivot", |_, t, (x, y): (Option<f64>, Option<f64>)| {
@@ -2985,6 +3002,49 @@ mod tests {
         assert!(o.error.is_some_and(|m| m.contains("frame 9 does not exist")));
         let o = run_src(&mut e, "sprite:newLayer('x') local g = sprite:newGroup('g') app.frameDiff{ layer = g }");
         assert!(o.error.is_some_and(|m| m.contains("groups have no pixels")));
+    }
+
+    #[test]
+    fn tween_extend_from_lua() {
+        let mut e = Editor::new(Sprite::new(8, 8));
+        let o = ok(
+            &mut e,
+            r#"
+            local l = sprite.layers[1]
+            for i = 2, 8 do sprite:newFrame() end
+            print(l.tweenExtend)
+            l:setTweenKey("x", 1, 0) l:setTweenKey("x", 5, 4)
+            print(string.format("%.0f", l:tweenTransform(8).matrix[5]), l.tweenExtend)
+            l:setTweenExtend("loop")
+            print(string.format("%.0f", l:tweenTransform(6).matrix[5]), l.tweenExtend)
+            l:setTweenExtend("rest")
+            print(l.tweenExtend, pcall(l.setTweenExtend, l, "forever"))
+            "#,
+        );
+        assert!(o.error.is_none(), "{:?}", o.error);
+        assert_eq!(o.messages[0], "hold");
+        assert_eq!(o.messages[1], "4\thold");
+        assert_eq!(o.messages[2], "0\tloop");
+        assert!(o.messages[3].starts_with("rest\tfalse"), "{:?}", o.messages);
+    }
+
+    #[test]
+    fn frame_diff_wrap_modes() {
+        let mut e = Editor::new(Sprite::new(4, 2));
+        ok(&mut e, "sprite:newFrame() sprite:newFrame() sprite:setPixel(0, 0, 0xFF0000FF, 1, 2)");
+        e.sprite.add_tag(1, 2); // frames 2-3 (1-based)
+        let o = ok(
+            &mut e,
+            r#"
+            local p = function(t) return app.frameDiff(t).previous end
+            print(p{ frame = 1 }, p{ frame = 1, wrap = "none" }, p{ frame = 1, wrap = false }, p{ frame = 1, wrap = true })
+            print(p{ frame = 2 }, p{ frame = 2, wrap = "tag" }, p{ frame = 2, wrap = "document" }, p{ frame = 2, wrap = "none" })
+            print(p{ frame = 3 }, p{ frame = 3, wrap = true })
+            "#,
+        );
+        assert_eq!(o.messages, vec!["3\tnil\tnil\t3", "3\t3\t1\t1", "2\t2"]);
+        let o = run_src(&mut e, "app.frameDiff{ wrap = 'loop' }");
+        assert!(o.error.is_some_and(|m| m.contains("wrap must be")));
     }
 
     #[test]

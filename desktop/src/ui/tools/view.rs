@@ -163,7 +163,8 @@ pub struct ViewSettings {
     pub diff_opacity: f64,
     /// Compare only the active layer instead of the composite of the visible layers.
     pub diff_active_layer: bool,
-    /// The first frame is compared with the last one (a looping animation); otherwise it has nothing to compare with.
+    /// The first frame of a tag is compared with the tag's last one (a looping animation; frames outside tags wrap
+    /// over the document); otherwise it has nothing to compare with.
     pub diff_wrap: bool,
     pub tiled: TiledMode,
     pub grid_color: [u8; 3],

@@ -1038,7 +1038,10 @@ pub fn resize_canvas(e: &mut Editor, nw: i32, nh: i32, ox: i32, oy: i32) -> bool
     }
     let area = nw as usize * nh as usize;
     if area > crate::document::MAX_CANVAS_PIXELS || !e.sprite.cels_fit_budget(nw as u64, nh as u64) {
-        crate::ffi::set_error("the canvas would need too much memory");
+        crate::ffi::set_error(format!(
+            "the canvas would need too much memory: {}",
+            e.sprite.cel_budget_note(nw as u64, nh as u64)
+        ));
         return false;
     }
     e.checkpoint();

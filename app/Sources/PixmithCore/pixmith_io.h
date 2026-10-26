@@ -49,5 +49,9 @@ typedef struct PixmithExport {
 
 // Writes the export; returns the number of files written, or -1 (see pixmith_last_error).
 int32_t pixmith_export_run(const PixmithDoc *doc, const PixmithExport *options, const char *path);
+// Warnings of the last pixmith_export_run / pixmith_export_run_ex / pixmith_export_gif on the calling thread, one per
+// line ("" when there are none). A warning does not fail the export (the files are written); today it is a GIF over
+// 50 MB. The string stays valid until the next export on this thread; do not free it.
+const char *pixmith_export_warnings(void);
 // Number of output files (sheets/animations/images; a PNG sequence counts once per job) or -1 if invalid.
 int32_t pixmith_export_job_count(const PixmithDoc *doc, const PixmithExport *options);

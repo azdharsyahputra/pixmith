@@ -458,6 +458,28 @@ pub fn render_outputs(
     path: &str,
     json_path: Option<&str>,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
+    render_outputs_warn(s, fmt, o, e, path, json_path).map(|r| r.files)
+}
+
+/// The files of an export and the warnings it raised (for example a GIF over 50 MB). Warnings do not fail the
+/// export; callers write the files and show the warnings.
+#[derive(Debug, Default)]
+pub struct Rendered {
+    pub files: Vec<(String, Vec<u8>)>,
+    /// One line each, naming the file they are about.
+    pub warnings: Vec<String>,
+}
+
+/// `render_outputs` that also returns the warnings.
+pub fn render_outputs_warn(
+    s: &Sprite,
+    fmt: Format,
+    o: &ExportOptions,
+    e: &EncodeOptions,
+    path: &str,
+    json_path: Option<&str>,
+) -> Result<Rendered, String> {
+    let mut warnings = Vec::new();
     let mut o = o.clone();
     // Animated formats need equally sized frames.
     let animated = fmt.image().is_some_and(|f| crate::formats::raster::writes_animation(f, &e.image));
@@ -490,7 +512,11 @@ pub fn render_outputs(
                     files.push((p, crate::formats::raster::encode_still(fmt, f, e.scale, &e.image)?));
                 }
             }
-            Format::Gif => files.push((p, crate::formats::gif::gif_bytes_job(job, e.scale)?)),
+            Format::Gif => {
+                let g = crate::formats::gif::gif_encode_job(job, e.scale)?;
+                warnings.extend(g.warnings.into_iter().map(|w| format!("{p}: {w}")));
+                files.push((p, g.data));
+            }
             Format::Apng => files.push((p, crate::formats::animation::apng_bytes_job(job, e.scale)?)),
             Format::Sequence => files.extend(crate::formats::gif::png_sequence_job(job, e.scale, &p)?),
             Format::Sheet => {
@@ -514,7 +540,7 @@ pub fn render_outputs(
             }
         }
     }
-    Ok(files)
+    Ok(Rendered { files, warnings })
 }
 
 fn frame_png(f: &PlanFrame, scale: usize) -> Result<Vec<u8>, String> {
@@ -606,8 +632,10 @@ pub unsafe extern "C" fn pixmith_export_run(
             return -1;
         };
         let mut count = 0;
-        let ok = report(render_outputs(&ed.sprite, fmt, &o, &e, &path, None).and_then(|files| {
-            for (p, data) in &files {
+        crate::formats::gif::set_export_warnings(&[]);
+        let ok = report(render_outputs_warn(&ed.sprite, fmt, &o, &e, &path, None).and_then(|r| {
+            crate::formats::gif::set_export_warnings(&r.warnings);
+            for (p, data) in &r.files {
                 write_file(p, data)?;
                 count += 1;
             }

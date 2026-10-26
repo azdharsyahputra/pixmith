@@ -29,6 +29,10 @@ uint32_t pixmith_tween_warnings(const PixmithDoc *doc, uint32_t layer);
 // Flag 0 RotSprite, 1 snap scale to integer, 2 ignore opacity. Options bits: 0 keys, 1 RotSprite,
 // 2 custom pivot, 3 snap scale, 4 opacity ignored.
 bool pixmith_tween_set_flag(PixmithDoc *doc, uint32_t layer, uint32_t flag, bool on);
+
+// What the layer shows after its last key: 0 rest (its own cels), 1 hold (default), 2 loop (repeat the key range).
+bool pixmith_tween_set_extend(PixmithDoc *doc, uint32_t layer, uint32_t mode);
+uint32_t pixmith_tween_extend(const PixmithDoc *doc, uint32_t layer);
 // mode: 0 all keys, 1 frames from..=to, 2 current frame (from). Returns the layer the cels went to or -1.
 // Groups always bake into a new layer.
 int32_t pixmith_tween_bake_ex(PixmithDoc *doc, uint32_t layer, uint32_t mode, uint32_t from, uint32_t to,

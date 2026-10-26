@@ -9,21 +9,69 @@
 //! * `changed`: not transparent in either, but the color or the alpha differs.
 //! * Unchanged: the same RGBA, or transparent in both (the color of a fully transparent pixel never counts).
 //!
-//! The reference frame is the previous one. The first frame has no previous one; when `wrap` is true (the
-//! animation loops, which is the usual case for a walk cycle) it is compared with the last frame, otherwise it
-//! has no reference and the result is empty (`reference == None`). A one-frame sprite never has a reference.
+//! The reference frame is the previous one. The first frame has no previous one; what it is compared with is
+//! the [`DiffWrap`] mode (the animation loops, which is the usual case for a walk cycle):
+//!
+//! * `Tag` (the default): a frame inside a tag compares with the previous frame of the same tag, and the first
+//!   frame of a tag with that tag's last frame, so an 8-direction walk sheet (one tag per direction) has no fake
+//!   spike where one direction ends and the next begins. When tags overlap or nest, the innermost tag (the one
+//!   spanning the fewest frames; the first listed on a tie) decides. Frames outside every tag behave as
+//!   `Document`; a tag of one frame has no reference for its frame.
+//! * `Document`: frame 0 compares with the last frame of the document, every other frame with the one before it
+//!   (tags are ignored). This is what the old `wrap = true` did.
+//! * `None`: frame 0 has no reference and the result is empty (`reference == None`); the old `wrap = false`.
+//!
+//! A one-frame sprite never has a reference.
 //!
 //! The difference is taken on the composite of the visible layers ([`DiffSource::Composite`], reference layers
 //! left out) or on the pixels of one layer's cel ([`DiffSource::Layer`], visibility ignored; a missing cel is
 //! transparent). Linked cels and frames made of the same cels are recognized by identity without comparing pixels.
 
-use crate::document::Sprite;
+use crate::document::{Sprite, Tag};
 use std::sync::Arc;
 
 pub const KIND_UNCHANGED: u8 = 0;
 pub const KIND_CHANGED: u8 = 1;
 pub const KIND_APPEARED: u8 = 2;
 pub const KIND_DISAPPEARED: u8 = 3;
+
+/// How the first frame of a loop is compared (see the module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffWrap {
+    /// Wrap inside the frame's tag (innermost on overlap); outside tags like `Document`.
+    #[default]
+    Tag,
+    /// Frame 0 compares with the document's last frame.
+    Document,
+    /// Frame 0 has no reference.
+    None,
+}
+
+impl DiffWrap {
+    /// The ABI value: 0 tag, 1 document, 2 none.
+    pub fn from_i32(v: i32) -> Option<DiffWrap> {
+        Some(match v {
+            0 => DiffWrap::Tag,
+            1 => DiffWrap::Document,
+            2 => DiffWrap::None,
+            _ => return None,
+        })
+    }
+    pub fn to_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// The old boolean: `true` wraps over the whole document, `false` does not wrap.
+impl From<bool> for DiffWrap {
+    fn from(wrap: bool) -> DiffWrap {
+        if wrap {
+            DiffWrap::Document
+        } else {
+            DiffWrap::None
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffSource {
@@ -139,11 +187,33 @@ pub fn compare_rgba(prev: &[u8], cur: &[u8], w: usize, h: usize) -> FrameDiff {
 
 /// The frame `frame` is compared with: the one before it, or (first frame, `wrap`) the last one.
 pub fn reference_frame(frames: usize, frame: usize, wrap: bool) -> Option<usize> {
+    reference_frame_in(&[], frames, frame, wrap.into())
+}
+
+/// The innermost tag containing `frame` (fewest frames; the first listed on a tie), as `(from, to)` clamped to
+/// the document.
+fn innermost_tag(tags: &[Tag], frames: usize, frame: usize) -> Option<(usize, usize)> {
+    tags.iter()
+        .map(|t| (t.from as usize, (t.to as usize).min(frames - 1)))
+        .filter(|&(from, to)| (from..=to).contains(&frame))
+        .min_by_key(|&(from, to)| to - from)
+}
+
+/// The frame `frame` is compared with under `wrap` (see the module docs).
+pub fn reference_frame_in(tags: &[Tag], frames: usize, frame: usize, wrap: DiffWrap) -> Option<usize> {
     if frame >= frames || frames < 2 {
         return None;
     }
+    if wrap == DiffWrap::Tag {
+        if let Some((from, to)) = innermost_tag(tags, frames, frame) {
+            return match frame {
+                f if f > from => Some(f - 1),
+                _ => (to > from).then_some(to),
+            };
+        }
+    }
     match frame {
-        0 => wrap.then_some(frames - 1),
+        0 => (wrap != DiffWrap::None).then_some(frames - 1),
         n => Some(n - 1),
     }
 }
@@ -167,7 +237,7 @@ fn same_cels(s: &Sprite, a: usize, b: usize) -> bool {
 /// The difference between `frame` and its reference frame (see the module docs). `None` when the frame does
 /// not exist or the layer is out of range or a group. Call `Sprite::flush_links` first if linked cels may have
 /// a pending edit.
-pub fn frame_diff(s: &Sprite, frame: usize, source: DiffSource, wrap: bool) -> Option<FrameDiff> {
+pub fn frame_diff(s: &Sprite, frame: usize, source: DiffSource, wrap: impl Into<DiffWrap>) -> Option<FrameDiff> {
     let frames = s.cels.len();
     if frame >= frames {
         return None;
@@ -178,7 +248,7 @@ pub fn frame_diff(s: &Sprite, frame: usize, source: DiffSource, wrap: bool) -> O
             return None;
         }
     }
-    let Some(prev) = reference_frame(frames, frame, wrap) else {
+    let Some(prev) = reference_frame_in(&s.tags, frames, frame, wrap.into()) else {
         return Some(FrameDiff::empty(w, h, None));
     };
     let mut d = match source {
@@ -231,8 +301,8 @@ pub struct PixmithFrameDiff {
     pub h: u32,
 }
 
-/// Computes the difference of `frame` from the previous frame (the last one for frame 0 when `wrap`, else no
-/// reference) of the composite of the visible layers (`layer` < 0) or of one layer's cel (`layer` >= 0, a
+/// Computes the difference of `frame` from its reference frame (`wrap` true: the document's last frame for
+/// frame 0, false: none; see `pixmith_frame_diff_mode` for the tag mode) of the composite of the visible layers (`layer` < 0) or of one layer's cel (`layer` >= 0, a
 /// non-group layer). Writes the counts and bounds to `out` and, when `mask` is not null, one byte per pixel
 /// (`width * height`, row-major: 0 same, 1 changed, 2 appeared, 3 disappeared). Returns false for a missing
 /// document, frame or layer, or a `mask` that is too small.
@@ -250,27 +320,52 @@ pub unsafe extern "C" fn pixmith_frame_diff(
         let Some(s) = crate::ffi::sprite(doc) else { return false };
         let source = if layer < 0 { DiffSource::Composite } else { DiffSource::Layer(layer as usize) };
         let Some(d) = frame_diff(s, frame as usize, source, wrap) else { return false };
-        if !mask.is_null() {
-            if len < d.mask.len() {
-                return false;
-            }
-            std::ptr::copy_nonoverlapping(d.mask.as_ptr(), mask, d.mask.len());
-        }
-        if !out.is_null() {
-            let (x, y, w, h) = d.bounds.unwrap_or((0, 0, 0, 0));
-            *out = PixmithFrameDiff {
-                changed: d.changed,
-                appeared: d.appeared,
-                disappeared: d.disappeared,
-                reference_frame: d.reference.map_or(-1, |f| f as i32),
-                x,
-                y,
-                w,
-                h,
-            };
-        }
-        true
+        write_diff(&d, mask, len, out)
     })
+}
+
+/// Like `pixmith_frame_diff`, with the wrap mode: 0 tag (default), 1 document, 2 none (see [`DiffWrap`]). Any
+/// other mode fails.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_frame_diff_mode(
+    doc: *const crate::document::Editor,
+    frame: u32,
+    layer: i32,
+    mode: i32,
+    mask: *mut u8,
+    len: usize,
+    out: *mut PixmithFrameDiff,
+) -> bool {
+    crate::ffi::guarded("pixmith_frame_diff_mode", std::ptr::null_mut(), || {
+        let Some(s) = crate::ffi::sprite(doc) else { return false };
+        let Some(wrap) = DiffWrap::from_i32(mode) else { return false };
+        let source = if layer < 0 { DiffSource::Composite } else { DiffSource::Layer(layer as usize) };
+        let Some(d) = frame_diff(s, frame as usize, source, wrap) else { return false };
+        write_diff(&d, mask, len, out)
+    })
+}
+
+unsafe fn write_diff(d: &FrameDiff, mask: *mut u8, len: usize, out: *mut PixmithFrameDiff) -> bool {
+    if !mask.is_null() {
+        if len < d.mask.len() {
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(d.mask.as_ptr(), mask, d.mask.len());
+    }
+    if !out.is_null() {
+        let (x, y, w, h) = d.bounds.unwrap_or((0, 0, 0, 0));
+        *out = PixmithFrameDiff {
+            changed: d.changed,
+            appeared: d.appeared,
+            disappeared: d.disappeared,
+            reference_frame: d.reference.map_or(-1, |f| f as i32),
+            x,
+            y,
+            w,
+            h,
+        };
+    }
+    true
 }
 
 #[cfg(test)]
@@ -474,6 +569,129 @@ mod tests {
         assert_eq!(reference_frame(4, 3, false), Some(2));
         assert_eq!(reference_frame(1, 0, true), None);
         assert_eq!(reference_frame(4, 4, true), None);
+    }
+
+    /// An 8-direction walk: 8 tags of 8 frames on a 16x4 canvas. In tag `t`, frame `k` has a pixel at (k, 0) and a
+    /// static "body" of `2 * t` pixels on row 1, so the cycle moves 2 pixels per step but jumps by 4 where a
+    /// tag follows another.
+    fn walk_sheet() -> Sprite {
+        let mut s = Sprite::new(16, 4);
+        for _ in 1..64 {
+            let n = s.frame_count();
+            s.add_frame(n - 1, false);
+        }
+        for t in 0..8usize {
+            for k in 0..8usize {
+                let mut px = vec![(k, 0, RED)];
+                px.extend((0..2 * t).map(|x| (x, 1, BLUE)));
+                s.cels[t * 8 + k][0] = Some(cel(16, 4, &px));
+            }
+            s.add_tag(t * 8, t * 8 + 7);
+        }
+        s
+    }
+
+    #[test]
+    fn tag_wrap_has_no_spike_where_a_tag_starts() {
+        let s = walk_sheet();
+        for t in 0..8usize {
+            for k in 0..8usize {
+                let f = t * 8 + k;
+                let tag = frame_diff(&s, f, DiffSource::Composite, DiffWrap::Tag).unwrap();
+                let want = if k == 0 { t * 8 + 7 } else { f - 1 };
+                assert_eq!(tag.reference, Some(want), "frame {f}");
+                assert_eq!(tag.total(), 2, "frame {f}: one pixel leaves, one arrives, whatever the tag");
+            }
+        }
+        // Tag is the default, and a document wrap shows the fake spike at the start of tag 1.
+        assert_eq!(DiffWrap::default(), DiffWrap::Tag);
+        let doc = frame_diff(&s, 8, DiffSource::Composite, DiffWrap::Document).unwrap();
+        assert_eq!((doc.reference, doc.total()), (Some(7), 4));
+        let none = frame_diff(&s, 8, DiffSource::Composite, DiffWrap::None).unwrap();
+        assert_eq!((none.reference, none.total()), (Some(7), 4), "frame 8 is not the first frame");
+        // The layer source takes the same references.
+        let l = frame_diff(&s, 8, DiffSource::Layer(0), DiffWrap::Tag).unwrap();
+        assert_eq!((l.reference, l.total()), (Some(15), 2));
+        // Frame 0: the last frame of the first tag (tag), of the document (document) or nothing (none).
+        let first = |m| frame_diff(&s, 0, DiffSource::Composite, m).unwrap().reference;
+        assert_eq!((first(DiffWrap::Tag), first(DiffWrap::Document), first(DiffWrap::None)), (Some(7), Some(63), None));
+        // The old booleans: true = document, false = none.
+        assert_eq!(frame_diff(&s, 0, DiffSource::Composite, true).unwrap().reference, Some(63));
+        assert_eq!(frame_diff(&s, 0, DiffSource::Composite, false).unwrap().reference, None);
+    }
+
+    #[test]
+    fn untagged_frames_fall_back_to_document_wrap() {
+        let mut s = sprite((0..6).map(|i| cel(6, 4, &[(i, 0, RED)])).collect());
+        s.add_tag(1, 3);
+        let r = |f| reference_frame_in(&s.tags, 6, f, DiffWrap::Tag);
+        // Inside the tag: previous frame, and the tag start wraps to the tag end.
+        assert_eq!((r(1), r(2), r(3)), (Some(3), Some(1), Some(2)));
+        // Outside: the previous frame, and frame 0 the document's last frame.
+        assert_eq!((r(0), r(4), r(5)), (Some(5), Some(3), Some(4)));
+        assert_eq!(reference_frame_in(&s.tags, 6, 0, DiffWrap::None), None);
+        // A one-frame tag has no reference, and a tag reaching past the end is clamped to the document.
+        s.add_tag(5, 5);
+        assert_eq!(reference_frame_in(&s.tags, 6, 5, DiffWrap::Tag), None);
+        s.tags[1].from = 4;
+        s.tags[1].to = 40;
+        assert_eq!(reference_frame_in(&s.tags, 6, 4, DiffWrap::Tag), Some(5));
+        assert_eq!(reference_frame_in(&s.tags, 6, 5, DiffWrap::Tag), Some(4));
+    }
+
+    #[test]
+    fn nested_or_overlapping_tags_use_the_innermost() {
+        let mut s = sprite((0..12).map(|i| cel(6, 4, &[(i % 6, 0, RED)])).collect());
+        s.add_tag(0, 11); // the whole walk
+        s.add_tag(4, 7); // a sub-cycle inside it
+        s.add_tag(6, 9); // overlaps the sub-cycle on frames 6-7 (same length: the first listed wins)
+        let r = |f| reference_frame_in(&s.tags, 12, f, DiffWrap::Tag);
+        assert_eq!(r(0), Some(11), "only the outer tag");
+        assert_eq!(r(3), Some(2));
+        assert_eq!(r(4), Some(7), "start of the inner tag wraps inside it, not to frame 3");
+        assert_eq!(r(5), Some(4));
+        assert_eq!(r(6), Some(5), "tie between the two 4-frame tags: the first listed (4..7)");
+        assert_eq!(r(7), Some(6), "still the first listed tag");
+        assert_eq!(r(8), Some(7), "only the later tag (6..9) holds frame 8, and it is not its first frame");
+        assert_eq!(r(9), Some(8));
+        assert_eq!(r(10), Some(9), "back in the outer tag");
+        assert_eq!(r(11), Some(10));
+    }
+
+    #[test]
+    fn frame_diff_mode_abi() {
+        let doc = crate::ffi::document::pixmith_new(6, 4);
+        unsafe {
+            let e = &mut *doc;
+            for _ in 0..3 {
+                let n = e.sprite.frame_count();
+                e.sprite.add_frame(n - 1, false);
+            }
+            for f in 0..4 {
+                e.sprite.cels[f][0] = Some(cel(6, 4, &[(f, 0, RED)]));
+            }
+            e.sprite.add_tag(0, 1);
+            e.sprite.add_tag(2, 3);
+            let mut out = PixmithFrameDiff::default();
+            let refs: Vec<i32> = [0, 1, 2]
+                .iter()
+                .map(|&m| {
+                    assert!(pixmith_frame_diff_mode(doc, 2, -1, m, std::ptr::null_mut(), 0, &mut out));
+                    out.reference_frame
+                })
+                .collect();
+            assert_eq!(refs, vec![3, 1, 1], "tag, document, none: frame 2 starts the second tag");
+            assert!(pixmith_frame_diff_mode(doc, 0, -1, 2, std::ptr::null_mut(), 0, &mut out));
+            assert_eq!(out.reference_frame, -1);
+            assert!(!pixmith_frame_diff_mode(doc, 0, -1, 3, std::ptr::null_mut(), 0, &mut out));
+            assert!(!pixmith_frame_diff_mode(doc, 9, -1, 0, std::ptr::null_mut(), 0, &mut out));
+            // The old function keeps its meaning.
+            assert!(pixmith_frame_diff(doc, 2, -1, true, std::ptr::null_mut(), 0, &mut out));
+            assert_eq!(out.reference_frame, 1);
+            assert!(pixmith_frame_diff(doc, 0, -1, true, std::ptr::null_mut(), 0, &mut out));
+            assert_eq!(out.reference_frame, 3);
+            crate::ffi::document::pixmith_free(doc);
+        }
     }
 
     #[test]

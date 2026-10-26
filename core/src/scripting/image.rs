@@ -61,7 +61,10 @@ fn reserve(ctx: &Ctx, w: usize, h: usize) -> LuaResult<usize> {
     let pixels = w
         .checked_mul(h)
         .filter(|&n| n <= MAX_IMAGE_PIXELS)
-        .ok_or_else(|| Error::runtime(format!("image {w}x{h} is too large (at most {MAX_IMAGE_PIXELS} pixels)")))?;
+        .ok_or_else(|| Error::runtime(format!(
+            "image {w}x{h} is too large (at most {MAX_IMAGE_PIXELS} pixels = {} MB as RGBA, e.g. 8192x8192)",
+            (MAX_IMAGE_PIXELS * 4) >> 20
+        )))?;
     let bytes = pixels * 4;
     if ctx.image_bytes.get().saturating_add(bytes) > MAX_LIVE_IMAGE_BYTES {
         return Err(Error::runtime(format!(
@@ -449,7 +452,13 @@ fn load_png(path: &str) -> LuaResult<(usize, usize, Vec<u8>)> {
         return Err(Error::runtime(format!("{path} is not a file")));
     }
     if meta.len() > MAX_PNG_FILE_BYTES {
-        return Err(Error::runtime(format!("{path} is larger than {} MB", MAX_PNG_FILE_BYTES >> 20)));
+        return Err(Error::runtime(format!(
+            "{path} is {} MB, larger than the {} MB limit for Image{{ fromFile }} (decoded images are also limited \
+             to {MAX_IMAGE_PIXELS} pixels = {} MB as RGBA, e.g. 8192x8192)",
+            meta.len() >> 20,
+            MAX_PNG_FILE_BYTES >> 20,
+            (MAX_IMAGE_PIXELS * 4) >> 20
+        )));
     }
     let mut bytes = Vec::with_capacity(meta.len() as usize);
     file.take(MAX_PNG_FILE_BYTES + 1).read_to_end(&mut bytes).map_err(fail)?;

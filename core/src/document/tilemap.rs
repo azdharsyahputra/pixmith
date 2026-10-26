@@ -728,8 +728,26 @@ pub fn reconcile(s: &mut Sprite) {
             }
         }
     }
+    sync_cels(s, todo);
+}
+
+/// `sync_cel` for each `(frame, layer)` in `todo`. Cels that share a buffer stay shared: the first of each group is
+/// synced and its siblings take the result (`sync_cel` alone would give every sibling its own copy).
+fn sync_cels(s: &mut Sprite, todo: Vec<(usize, usize)>) {
+    let mut first: HashMap<(usize, *const Cel), usize> = HashMap::new();
+    let mut siblings = Vec::new();
     for (f, l) in todo {
-        sync_cel(s, l, f, None);
+        let Some(Some(cel)) = s.cels.get(f).and_then(|r| r.get(l)) else { continue };
+        match first.get(&(l, Arc::as_ptr(cel))) {
+            Some(&f0) => siblings.push((f, l, f0)),
+            None => {
+                first.insert((l, Arc::as_ptr(cel)), f);
+                sync_cel(s, l, f, None);
+            }
+        }
+    }
+    for (f, l, f0) in siblings {
+        s.cels[f][l] = s.cels[f0][l].clone();
     }
 }
 
@@ -773,9 +791,7 @@ pub fn normalized(s: &Sprite) -> Cow<'_, Sprite> {
         return Cow::Borrowed(s);
     }
     let mut copy = s.clone();
-    for (f, l) in todo {
-        sync_cel(&mut copy, l, f, None);
-    }
+    sync_cels(&mut copy, todo);
     if far {
         trim_far_grids(&mut copy);
     }

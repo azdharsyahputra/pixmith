@@ -440,7 +440,10 @@ pub(super) fn resize(a: &Ctx, w: i64, h: i64) -> LuaResult<()> {
         return Ok(());
     }
     if !s.cels_fit_budget(w as u64, h as u64) {
-        return Err(Error::runtime("the sprite would need too much memory"));
+        return Err(Error::runtime(format!(
+            "the sprite would need too much memory: {}",
+            s.cel_budget_note(w as u64, h as u64)
+        )));
     }
     s.flush_links();
     filters::scale_sprite(s, w as u32, h as u32);
@@ -466,7 +469,10 @@ pub(super) fn crop(a: &Ctx, x: i64, y: i64, w: i64, h: i64) -> LuaResult<()> {
     }
     let ok = scratch(a, |e| crate::paint::selection::resize_canvas(e, w as i32, h as i32, -x as i32, -y as i32));
     if !ok && (w, h, x, y) != (sw, sh, 0, 0) {
-        return Err(Error::runtime("the sprite would need too much memory"));
+        return Err(Error::runtime(format!(
+            "the sprite would need too much memory: {}",
+            a.sprite().cel_budget_note(w as u64, h as u64)
+        )));
     }
     Ok(())
 }
@@ -965,7 +971,10 @@ fn dispatch(lua: &Lua, root: &Rc<Ctx>, a: &Rc<Ctx>, name: &str, p: &Params) -> L
             if !scratch(a, |e| crate::paint::selection::resize_canvas(e, nw as i32, nh as i32, l as i32, t as i32))
                 && (nw, nh, l, t) != (s.width as i64, s.height as i64, 0, 0)
             {
-                return Err(Error::runtime("CanvasSize: the canvas would need too much memory"));
+                return Err(Error::runtime(format!(
+                    "CanvasSize: the canvas would need too much memory: {}",
+                    a.sprite().cel_budget_note(nw as u64, nh as u64)
+                )));
             }
         }
         "SpriteSize" => {

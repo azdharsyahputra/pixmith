@@ -54,7 +54,8 @@ final class FrameDiffCache {
         guard w > 0, h > 0 else { return nil }
         var mask = [UInt8](repeating: 0, count: w * h)
         var out = PixmithFrameDiff()
-        guard pixmith_frame_diff(m.doc, UInt32(m.frame), Int32(layer ?? -1), wrap, &mask, mask.count, &out) else { return nil }
+        // `wrap` compares the first frame of a tag with the tag's last (mode 0, tag); off gives it no reference (mode 2, none).
+        guard pixmith_frame_diff_mode(m.doc, UInt32(m.frame), Int32(layer ?? -1), wrap ? 0 : 2, &mask, mask.count, &out) else { return nil }
         var image: CGImage?
         if out.changed + out.appeared + out.disappeared > 0 {
             var rgba = [UInt8](repeating: 0, count: w * h * 4)

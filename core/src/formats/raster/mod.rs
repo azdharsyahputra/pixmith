@@ -189,7 +189,14 @@ pub(crate) fn check_dims(w: usize, h: usize) -> Result<(), String> {
 /// Fails when one more frame of `w` x `h` would exceed the limits on frame count or memory.
 pub(crate) fn check_frame_budget(count: usize, w: usize, h: usize) -> Result<(), String> {
     if count >= u16::MAX as usize || (count as u64 + 1) * (w as u64 * h as u64 * 4) > MAX_ANIMATION_BYTES {
-        return Err("the animation has too many frames".into());
+        return Err(format!(
+            "the animation has too many frames: {} frames of {w}x{h} need about {} MB (every frame is kept as a full \
+             RGBA image), the limit is {} MB and {} frames",
+            count + 1,
+            ((count as u64 + 1) * (w as u64 * h as u64 * 4)) >> 20,
+            MAX_ANIMATION_BYTES >> 20,
+            u16::MAX
+        ));
     }
     Ok(())
 }

@@ -27,7 +27,13 @@ pub fn sprite_from_gif(bytes: &[u8]) -> Result<Sprite, String> {
     while let Some(f) = dec.read_next_frame().map_err(|e| e.to_string())? {
         // Sprites hold at most 65535 frames, and all of them are kept in memory.
         if frames.len() >= u16::MAX as usize || (frames.len() + 1) as u64 * (w * h * 4) as u64 > 1 << 30 {
-            return Err("the GIF has too many frames".into());
+            return Err(format!(
+                "the GIF has too many frames: {} frames of {w}x{h} need about {} MB (every frame is kept as a full \
+                 RGBA image), the limit is 1024 MB and {} frames",
+                frames.len() + 1,
+                ((frames.len() + 1) * w * h * 4) >> 20,
+                u16::MAX
+            ));
         }
         if f.width == 0 || f.height == 0 {
             continue;

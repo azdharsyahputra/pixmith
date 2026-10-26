@@ -1,11 +1,11 @@
-//! `app.frameDiff{ frame=, layer=, wrap=, mask= }`: which pixels a frame changed compared with the frame before
+//! `app.frameDiff{ frame=, layer=, wrap=, mask= }` (`wrap` = "tag" (default), "document", "none", true or false): which pixels a frame changed compared with the frame before
 //! it (see `render::diff`). Read-only; works on the active document.
 
 use super::geometry::RectV;
 use super::image::ImageH;
 use super::sprites::active_ctx;
 use super::Ctx;
-use crate::render::diff::{self, DiffSource, DEFAULT_COLORS};
+use crate::render::diff::{self, DiffSource, DiffWrap, DEFAULT_COLORS};
 use mlua::{Error, Lua, Result as LuaResult, Table, Value};
 use std::rc::Rc;
 
@@ -26,7 +26,17 @@ fn frame_diff(lua: &Lua, root: &Rc<Ctx>, p: Option<Table>) -> LuaResult<Table> {
             (DiffSource::Layer(l), Some(l))
         }
     };
-    let wrap = !matches!(get("wrap"), Value::Boolean(false));
+    let wrap = match get("wrap") {
+        Value::Nil => DiffWrap::Tag,
+        Value::Boolean(b) => b.into(),
+        Value::String(s) => match s.to_str()?.to_ascii_lowercase().as_str() {
+            "tag" => DiffWrap::Tag,
+            "document" => DiffWrap::Document,
+            "none" => DiffWrap::None,
+            _ => return Err(Error::runtime("frameDiff: wrap must be \"tag\", \"document\", \"none\", true or false")),
+        },
+        _ => return Err(Error::runtime("frameDiff: wrap must be \"tag\", \"document\", \"none\", true or false")),
+    };
     let want_mask = matches!(get("mask"), Value::Boolean(true));
     act.sprite().flush_links();
     let d = diff::frame_diff(act.sprite(), frame, source, wrap)

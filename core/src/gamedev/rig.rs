@@ -17,7 +17,9 @@
 //! * A layer's source is still its own cel at its first own key frame. A child **without keys of its
 //!   own** follows its parent with a plain rest pose (its cel at the first frame of the range it
 //!   inherits). The frames a layer is driven in are the union of its own key range and those of all
-//!   its ancestors; outside them its own cels show.
+//!   its ancestors, from the first key to the last, and after the last key to the end of the sprite when
+//!   the layer's `Extend` is `Hold` or `Loop` (the rendered layer's setting decides, also for the poses of
+//!   its ancestors); before the first key, and after the last for `Extend::Rest`, its own cels show.
 //! * Opacity is not inherited; scale is (a scaled thigh scales the leg).
 //! * Parents are stored as numbers, not layer indices: a parent gets an `id` the first time a child is
 //!   linked to it, the child stores `pa=<id>`. Both live in the layer's tween payload in its user data
@@ -212,7 +214,7 @@ pub fn set_parent(e: &mut Editor, layer: usize, parent: Option<usize>) -> bool {
 pub fn world_matrix(s: &Sprite, layer: usize, frame: u32) -> Option<Matrix> {
     let st = load(s, layer)?;
     let anc = ancestors(s, layer, &st);
-    hull(&st, &anc)?;
+    let frame = st.pose_frame(hull(&st, &anc)?, frame);
     Some(mul(&ancestors_world(s, &anc, frame), &tween::local_matrix(s, layer, &st, frame)))
 }
 
@@ -234,7 +236,7 @@ pub struct Composed {
 pub fn composed_transform(s: &Sprite, layer: usize, frame: u32) -> Option<Composed> {
     let st = load(s, layer)?;
     let anc = ancestors(s, layer, &st);
-    hull(&st, &anc)?;
+    let frame = st.pose_frame(hull(&st, &anc)?, frame);
     let local = tween::local_matrix(s, layer, &st, frame);
     let matrix = mul(&ancestors_world(s, &anc, frame), &local);
     let pivot = tween::effective_pivot(s, layer).unwrap_or((0.0, 0.0));

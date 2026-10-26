@@ -10,6 +10,17 @@ use std::sync::Arc;
 /// Largest PNG (in pixels) that is decoded: 8192 x 8192.
 const MAX_IMPORT_PIXELS: u64 = 1 << 26;
 
+/// The error for an image over the limit; it names the size, the limit and what the limit means in memory.
+fn too_large(w: u32, h: u32) -> String {
+    format!(
+        "image is too large: {w}x{h} = {} pixels, the limit is {MAX_IMPORT_PIXELS} pixels ({} MB as RGBA, e.g. \
+         8192x8192) and {} pixels per side",
+        w as u64 * h as u64,
+        (MAX_IMPORT_PIXELS * 4) >> 20,
+        u16::MAX
+    )
+}
+
 /// Decodes any PNG to straight-alpha RGBA8. Returns `(width, height, pixels)`.
 pub fn decode_png(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     let mut dec = png::Decoder::new(bytes);
@@ -21,13 +32,13 @@ pub fn decode_png(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
         || iw as u64 * ih as u64 > MAX_IMPORT_PIXELS
         || iw as usize * ih as usize > crate::document::MAX_CANVAS_PIXELS
     {
-        return Err("image is too large".into());
+        return Err(too_large(iw, ih));
     }
     let mut buf = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     let (w, h) = (info.width as usize, info.height as usize);
     if w > u16::MAX as usize || h > u16::MAX as usize {
-        return Err("image is too large".into());
+        return Err(too_large(w as u32, h as u32));
     }
     let data = &buf[..info.buffer_size()];
     let rgba = match info.color_type {

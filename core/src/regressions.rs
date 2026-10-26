@@ -166,3 +166,63 @@ fn filters_reach_tilemap_layers_and_strokes_do_not_pile_up_tiles() {
         drop(Box::from_raw(doc));
     }
 }
+
+fn tilemap_pair() -> (*mut Editor, u32) {
+    let doc = Box::into_raw(Box::new(Editor::new(Sprite::new(16, 16))));
+    unsafe {
+        let layer = crate::document::tilemap::pixmith_add_tilemap_layer(doc, 0, 8, 8);
+        crate::paint::shapes::pixmith_stroke_begin(doc, layer, 0, 2, 2, u32::from_be_bytes(RED), 1, 0);
+        crate::paint::shapes::pixmith_stroke_to(doc, 4, 2);
+        crate::paint::shapes::pixmith_stroke_end();
+        crate::ffi::document::pixmith_add_frame(doc, 0, false);
+        (doc, layer)
+    }
+}
+
+#[test]
+fn linked_tilemap_cels_stay_linked_through_a_save_and_a_script() {
+    let (doc, layer) = tilemap_pair();
+    let l = layer as usize;
+    unsafe {
+        assert!(crate::document::layers::pixmith_cel_link(doc, layer, 0, 1));
+        assert!(crate::document::layers::pixmith_cel_is_linked(doc, layer, 0));
+        assert!(crate::document::layers::pixmith_cel_is_linked(doc, layer, 1));
+        let o = crate::scripting::run(
+            &mut *doc,
+            "local n = 0 for _, c in ipairs(app.activeSprite.cels) do if c.linked then n = n + 1 end end print(n)",
+            (l, 0),
+            Default::default(),
+        );
+        assert_eq!((o.error, o.messages), (None, vec!["2".to_string()]));
+        let back = crate::formats::ase::read(&crate::formats::ase::write(&(*doc).sprite)).unwrap();
+        assert!(back.is_cel_linked(l, 0) && back.is_cel_linked(l, 1), "the link survives a save");
+        assert_eq!(back.render(1), back.render(0));
+        assert!(back.cels[0][l].as_ref().unwrap().tiles.is_some(), "and it is still a tilemap cel");
+        // The same through .pxmt.
+        let pxmt = crate::formats::pxmt::write(&(*doc).sprite).unwrap();
+        assert!(crate::formats::pxmt::read(&pxmt).unwrap().is_cel_linked(l, 1));
+        // Unlinking is also respected by the file.
+        assert!(crate::document::layers::pixmith_cel_unlink(doc, layer, 1));
+        let back = crate::formats::ase::read(&crate::formats::ase::write(&(*doc).sprite)).unwrap();
+        assert!(!back.is_cel_linked(l, 0));
+        drop(Box::from_raw(doc));
+    }
+}
+
+#[test]
+fn saving_unsynced_linked_tilemap_cels_keeps_the_link_and_the_edit() {
+    let (doc, layer) = tilemap_pair();
+    let l = layer as usize;
+    unsafe {
+        let s = &mut (*doc).sprite;
+        assert!(s.link_cels(l, 0, 1));
+        // A pixel edit that did not go through the tile-aware tools: saving writes it back into the tiles.
+        let cel = Arc::make_mut(s.cels[0][l].as_mut().unwrap());
+        cel.pixels[(10 * 16 + 10) * 4..][..4].copy_from_slice(&RED);
+        s.cels[1][l] = s.cels[0][l].clone();
+        let back = crate::formats::ase::read(&crate::formats::ase::write(s)).unwrap();
+        assert!(back.is_cel_linked(l, 0) && back.is_cel_linked(l, 1));
+        assert_eq!(&back.render(1)[(10 * 16 + 10) * 4..][..4], &RED);
+        drop(Box::from_raw(doc));
+    }
+}

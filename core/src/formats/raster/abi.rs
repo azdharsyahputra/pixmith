@@ -10,7 +10,7 @@
 use super::{encode_animation, encode_still, writes_animation, ImageFormat, ImageOptions, ImportOptions};
 use crate::document::Editor;
 use crate::ffi::{path_arg, set_error};
-use crate::formats::export_plan::{from_c, render_outputs, Job, PixmithExport, PlanFrame};
+use crate::formats::export_plan::{from_c, render_outputs_warn, Job, PixmithExport, PlanFrame};
 use crate::formats::gif::{report, write_file};
 use crate::formats::json::{self, Value};
 use std::ffi::{c_char, CString};
@@ -178,8 +178,10 @@ pub unsafe extern "C" fn pixmith_export_run_ex(
         };
         e.image = image;
         let mut count = 0;
-        let ok = report(render_outputs(&ed.sprite, fmt, &o, &e, &path, None).and_then(|files| {
-            for (p, data) in &files {
+        crate::formats::gif::set_export_warnings(&[]);
+        let ok = report(render_outputs_warn(&ed.sprite, fmt, &o, &e, &path, None).and_then(|r| {
+            crate::formats::gif::set_export_warnings(&r.warnings);
+            for (p, data) in &r.files {
                 write_file(p, data)?;
                 count += 1;
             }

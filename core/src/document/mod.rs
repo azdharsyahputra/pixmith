@@ -335,6 +335,18 @@ impl Sprite {
         distinct * w as u128 * h as u128 * 4 <= MAX_NEW_CEL_BYTES as u128
     }
 
+    /// Why `cels_fit_budget(w, h)` says no (or would): the cel count, the memory they would need and the limits.
+    pub(crate) fn cel_budget_note(&self, w: u64, h: u64) -> String {
+        let need = self.distinct_cel_count() as u128 * w as u128 * h as u128 * 4;
+        format!(
+            "{} distinct cels (linked cels once) at {w}x{h} need about {} MB as full-canvas RGBA images, the limit is \
+             {} MB, and a canvas has at most {MAX_CANVAS_PIXELS} pixels",
+            self.distinct_cel_count(),
+            need >> 20,
+            MAX_NEW_CEL_BYTES >> 20
+        )
+    }
+
     /// Number of distinct cel buffers (linked cels count once).
     pub fn distinct_cel_count(&self) -> usize {
         let mut seen = std::collections::HashSet::new();

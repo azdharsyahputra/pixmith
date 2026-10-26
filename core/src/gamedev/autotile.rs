@@ -433,6 +433,16 @@ impl Autotile {
         Choice { value: best.map_or(0, |b| b.1 | transform_flags(b.2)), exact: false }
     }
 
+    /// Like [`resolve`](Self::resolve), but `None` when the engine has nothing to say about the cell: no
+    /// override and no terrain around it. Such a cell keeps whatever tile is in it unless that tile is an
+    /// auto-tile (has terrain data), which is then stale and must go.
+    fn resolve_or_keep(&self, frame: u32, x: i32, y: i32, dims: (u32, u32), square: bool) -> Option<TileRef> {
+        if self.override_at(frame, x, y).is_none() && self.wanted(frame, x, y, dims).is_none() {
+            return None;
+        }
+        Some(self.resolve(frame, x, y, dims, square).0)
+    }
+
     /// The tile value and whether it is a fallback for one display cell (overrides win).
     pub fn resolve(&self, frame: u32, x: i32, y: i32, dims: (u32, u32), square: bool) -> (TileRef, bool) {
         if let Some(v) = self.override_at(frame, x, y) {
@@ -832,7 +842,10 @@ fn ensure_grids(at: &mut Autotile, kf: u32, c: &Ctx) {
 /// Writes display-cell values into the cel's tile grid (normalising its geometry first) and
 /// re-renders the pixels once. Returns true if existing tiles were lost while the grid geometry
 /// changed (the caller then resolves everything).
-fn apply(s: &mut Sprite, layer: usize, frame: usize, c: &Ctx, updates: &[(i32, i32, u32)]) -> bool {
+/// An update value for `apply`: the engine has nothing to place here, so a plain tile stays and an auto-tile goes.
+const KEEP: u32 = u32::MAX;
+
+fn apply(s: &mut Sprite, layer: usize, frame: usize, at: &Autotile, c: &Ctx, updates: &[(i32, i32, u32)]) -> bool {
     let (w, h) = (s.width as usize, s.height as usize);
     let ts = s.tilesets[c.ts].clone();
     let (ox, oy) = c.origin();
@@ -892,7 +905,14 @@ fn apply(s: &mut Sprite, layer: usize, frame: usize, c: &Ctx, updates: &[(i32, i
     };
     for &(x, y, v) in updates {
         if x >= 0 && y >= 0 && (x as u32) < gw && (y as u32) < gh {
-            grid.tiles[y as usize * gw as usize + x as usize] = v;
+            let slot = &mut grid.tiles[y as usize * gw as usize + x as usize];
+            *slot = if v != KEEP {
+                v
+            } else if at.tiles.contains_key(&(*slot & TILE_ID_MASK)) {
+                0
+            } else {
+                *slot
+            };
         }
     }
     cel.pixels = render_cel(&grid, &ts, c.offset, w, h);
@@ -900,12 +920,29 @@ fn apply(s: &mut Sprite, layer: usize, frame: usize, c: &Ctx, updates: &[(i32, i
     lost
 }
 
+fn resolved(at: &Autotile, kf: u32, x: i32, y: i32, c: &Ctx, keep_plain: bool) -> u32 {
+    if keep_plain {
+        at.resolve_or_keep(kf, x, y, c.dims, c.square).unwrap_or(KEEP)
+    } else {
+        at.resolve(kf, x, y, c.dims, c.square).0
+    }
+}
+
 fn resolve_all_cells(c: &Ctx) -> Vec<(i32, i32)> {
     let (gw, gh) = c.grid_dims();
     (0..gh as i32).flat_map(|y| (0..gw as i32).map(move |x| (x, y))).collect()
 }
 
-fn resolve_cells(s: &mut Sprite, layer: usize, frame: usize, at: &Autotile, c: &Ctx, cells: &[(i32, i32)]) {
+/// Re-resolves display cells. With `keep_plain`, cells without terrain data (and no override) keep a plain tile.
+fn resolve_cells(
+    s: &mut Sprite,
+    layer: usize,
+    frame: usize,
+    at: &Autotile,
+    c: &Ctx,
+    cells: &[(i32, i32)],
+    keep_plain: bool,
+) {
     let kf = key_frame(s, layer, frame);
     let (gw, gh) = c.grid_dims();
     let mut updates = Vec::with_capacity(cells.len());
@@ -913,12 +950,12 @@ fn resolve_cells(s: &mut Sprite, layer: usize, frame: usize, at: &Autotile, c: &
         if x < 0 || y < 0 || x as u32 >= gw || y as u32 >= gh {
             continue;
         }
-        updates.push((x, y, at.resolve(kf, x, y, c.dims, c.square).0));
+        updates.push((x, y, resolved(at, kf, x, y, c, keep_plain)));
     }
-    if apply(s, layer, frame, c, &updates) {
+    if apply(s, layer, frame, at, c, &updates) {
         let all: Vec<(i32, i32, u32)> =
-            resolve_all_cells(c).into_iter().map(|(x, y)| (x, y, at.resolve(kf, x, y, c.dims, c.square).0)).collect();
-        apply(s, layer, frame, c, &all);
+            resolve_all_cells(c).into_iter().map(|(x, y)| (x, y, resolved(at, kf, x, y, c, keep_plain))).collect();
+        apply(s, layer, frame, at, c, &all);
     }
 }
 
@@ -1061,7 +1098,7 @@ pub fn paint_cells(
     }
     touched.sort_unstable();
     touched.dedup();
-    resolve_cells(s, layer, frame, &at, &c, &touched);
+    resolve_cells(s, layer, frame, &at, &c, &touched, true);
     save(s, layer, &at);
     touched
 }
@@ -1159,7 +1196,7 @@ pub fn set_override(s: &mut Sprite, layer: usize, frame: usize, x: i32, y: i32, 
     ensure_grids(&mut at, kf, &c);
     let g = at.overrides.entry(kf).or_insert_with(|| Grid::new(gw, gh));
     g.set(x, y, v);
-    resolve_cells(s, layer, frame, &at, &c, &[(x, y)]);
+    resolve_cells(s, layer, frame, &at, &c, &[(x, y)], false);
     save(s, layer, &at);
     true
 }
@@ -1209,8 +1246,8 @@ pub fn rebuild(s: &mut Sprite, layer: usize, frame: usize) {
         return;
     }
     let all: Vec<(i32, i32, u32)> =
-        resolve_all_cells(&c).into_iter().map(|(x, y)| (x, y, at.resolve(kf, x, y, c.dims, c.square).0)).collect();
-    apply(s, layer, frame, &c, &all);
+        resolve_all_cells(&c).into_iter().map(|(x, y)| (x, y, resolved(&at, kf, x, y, &c, true))).collect();
+    apply(s, layer, frame, &at, &c, &all);
 }
 
 pub fn rebuild_all(s: &mut Sprite, layer: usize) {
@@ -2296,6 +2333,33 @@ mod tests {
         let t = paint_terrain(&mut s2, l2, 0, 2, 2, Some(1));
         assert_eq!(t.len(), 4);
         assert!(t.iter().all(|&(x, y)| (2..=3).contains(&x) && (2..=3).contains(&y)));
+    }
+
+    #[test]
+    fn plain_stamped_tiles_survive_painting_next_to_them() {
+        for mode in [Mode::Sides, Mode::Blob] {
+            let (mut s, l) = setup(mode);
+            let plain: Vec<u32> = (0..9).map(|_| s.tilesets[0].add_blank()).collect();
+            for (k, &t) in plain.iter().enumerate() {
+                assert!(stamp(&mut s, l, 0, (k as i32 % 3) * 8, (k as i32 / 3) * 8, t));
+            }
+            // Paint the row under the block and one cell next to it, then erase them again.
+            let row = [(0, 3), (1, 3), (2, 3), (3, 3), (3, 1)];
+            for &(x, y) in &row {
+                paint_terrain(&mut s, l, 0, x, y, Some(1));
+            }
+            for (k, &t) in plain.iter().enumerate() {
+                assert_eq!(cell(&s, l, k as i32 % 3, k as i32 / 3), t, "{mode:?}: plain tile {k} survives painting");
+            }
+            paint_cells(&mut s, l, 0, &row, None);
+            rebuild(&mut s, l, 0);
+            for (k, &t) in plain.iter().enumerate() {
+                assert_eq!(cell(&s, l, k as i32 % 3, k as i32 / 3), t, "{mode:?}: plain tile {k} survives erasing");
+            }
+            for &(x, y) in &row {
+                assert_eq!(cell(&s, l, x, y), 0, "{mode:?}: erased terrain leaves no tile at ({x}, {y})");
+            }
+        }
     }
 
     #[test]

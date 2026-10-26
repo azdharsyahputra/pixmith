@@ -214,7 +214,7 @@ pub fn show(app: &mut PixmithApp, ctx: &egui::Context) {
                         card.toggle("Enabled", &mut timeline.frame_diff);
                         card.slider("Opacity", &mut s.diff_opacity, (0.1, 1.0));
                         card.toggle("Active layer only", &mut s.diff_active_layer);
-                        card.toggle("Compare first frame with last", &mut s.diff_wrap);
+                        card.toggle("Compare first frame with last in tag", &mut s.diff_wrap);
                     });
                     section(ui, "Tiled Mode", |card| {
                         let names: Vec<&str> = TiledMode::ALL.iter().map(|m| m.title()).collect();

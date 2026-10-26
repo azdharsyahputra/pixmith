@@ -241,10 +241,46 @@ pub fn value_at(track: &TweenTrack, frame: u32) -> f32 {
     (a.value as f64 + (b.value as f64 - a.value as f64) * a.ease.apply(t)) as f32
 }
 
+/// What a layer shows in the frames after its last key (the frames before the first key always show the layer's
+/// own cels: the source image of a tween is the cel at the first key frame, so there is nothing to hold there).
+/// Per layer, not per track, because it decides whether the layer is drawn at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Extend {
+    /// The layer's own cels (the behaviour of files from before this option existed).
+    Rest,
+    /// Keep the pose of the last key until the end of the sprite (the default for new tweens).
+    #[default]
+    Hold,
+    /// Repeat the key range: frame `last + 1` shows the pose of the first key frame, and so on.
+    Loop,
+}
+
+impl Extend {
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+    pub fn from_code(c: u32) -> Option<Extend> {
+        Some(match c {
+            0 => Extend::Rest,
+            1 => Extend::Hold,
+            2 => Extend::Loop,
+            _ => return None,
+        })
+    }
+    pub fn name(self) -> &'static str {
+        ["rest", "hold", "loop"][self as usize]
+    }
+    pub fn from_name(n: &str) -> Option<Extend> {
+        (0..3).filter_map(Extend::from_code).find(|e| e.name() == n)
+    }
+}
+
 /// All tweening state of one layer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TweenState {
     pub tracks: Vec<TweenTrack>,
+    /// The frames after the last key (see [`Extend`]). A payload without the `ex` member reads as `Rest`.
+    pub extend: Extend,
     /// Custom pivot in canvas coordinates (pixel corners are integers; .5 allowed).
     pub pivot: Option<(f32, f32)>,
     pub rotsprite: bool,
@@ -264,6 +300,7 @@ impl TweenState {
     pub(crate) fn new() -> Self {
         TweenState {
             tracks: Vec::new(),
+            extend: Extend::Hold,
             pivot: None,
             rotsprite: true,
             snap_scale: false,
@@ -297,6 +334,24 @@ impl TweenState {
     pub(crate) fn value(&self, p: Prop, frame: u32) -> f32 {
         self.track(p).map_or(p.default_value(), |t| value_at(t, frame))
     }
+
+    /// The last frame the layer is drawn in, given the last key frame `hi` of its key range (its own keys joined
+    /// with its ancestors'): `hi` itself for `Rest`, else the end of the sprite.
+    pub(crate) fn driven_end(&self, frame_count: usize, hi: u32) -> u32 {
+        match self.extend {
+            Extend::Rest => hi,
+            _ => (frame_count.saturating_sub(1) as u32).max(hi),
+        }
+    }
+
+    /// The frame whose pose `frame` shows: itself, except past the key range `(lo, hi)` of a `Loop` layer.
+    pub(crate) fn pose_frame(&self, (lo, hi): (u32, u32), frame: u32) -> u32 {
+        if self.extend == Extend::Loop && frame > hi {
+            lo + (frame - lo) % (hi - lo + 1)
+        } else {
+            frame
+        }
+    }
 }
 
 // MARK: Persistence in layer user data
@@ -319,6 +374,9 @@ fn encode(st: &TweenState) -> String {
     if st.opacity_off {
         parts.push("oo=1".into());
     }
+    if st.extend != Extend::Rest {
+        parts.push(format!("ex={}", st.extend.name()));
+    }
     if let Some((x, y)) = st.pivot {
         parts.push(format!("pv={x},{y}"));
     }
@@ -337,12 +395,14 @@ fn encode(st: &TweenState) -> String {
 
 fn decode(payload: &str, layer: usize) -> TweenState {
     let mut st = TweenState::new();
+    st.extend = Extend::Rest; // files from before the option have no `ex`
     for part in payload.split(';') {
         let Some((k, v)) = part.split_once('=') else { continue };
         match k {
             "rs" => st.rotsprite = v == "1",
             "ss" => st.snap_scale = v == "1",
             "oo" => st.opacity_off = v == "1",
+            "ex" => st.extend = Extend::from_name(v).unwrap_or(Extend::Rest),
             "id" => st.id = v.parse().ok().filter(|&n| n > 0),
             "pa" => st.parent = v.parse().ok().filter(|&n| n > 0),
             "pv" => {
@@ -742,25 +802,26 @@ pub(crate) fn local_matrix(s: &Sprite, layer: usize, st: &TweenState, frame: u32
 fn render_state(s: &Sprite, layer: usize, frame: usize, st: &TweenState) -> Option<Arc<Cel>> {
     let anc = rig::ancestors(s, layer, st);
     let (lo, hi) = rig::hull(st, &anc)?;
-    if (frame as u32) < lo || frame as u32 > hi {
+    if (frame as u32) < lo || frame as u32 > st.driven_end(s.frame_count(), hi) {
         return None;
     }
+    let pose = st.pose_frame((lo, hi), frame as u32);
     let src_lo = st.range().map_or(lo, |r| r.0);
-    let parent_world = rig::ancestors_world(s, &anc, frame as u32);
+    let parent_world = rig::ancestors_world(s, &anc, pose);
     let xf = |p: Params| if parent_world == IDENTITY { Xf::Own(p) } else { Xf::World(mul(&parent_world, &p.matrix())) };
     let (w, h) = (s.width as usize, s.height as usize);
     let is_group = s.layers.get(layer)?.is_group();
     let (pixels, base_opacity) = if is_group {
         let mut buf = vec![0u8; w * h * 4];
         crate::document::layers::composite_range(s, src_lo as usize, layer + 1, s.subtree_end(layer), &mut buf, 0);
-        let (p, op) = params_at(st, frame as u32, &buf, w, h);
+        let (p, op) = params_at(st, pose, &buf, w, h);
         (transformed(Source::Buffer(&buf), w, h, &xf(p), st.rotsprite).as_ref().clone(), (255u8, op))
     } else {
         let src = s.cels.get(src_lo as usize)?.get(layer)?.clone();
         let Some(src) = src else {
             return Some(Arc::new(Cel { opacity: 255, pixels: vec![0; w * h * 4], ..Default::default() }));
         };
-        let (p, op) = params_at(st, frame as u32, &src.pixels, w, h);
+        let (p, op) = params_at(st, pose, &src.pixels, w, h);
         (transformed(Source::Cel(&src), w, h, &xf(p), st.rotsprite).as_ref().clone(), (src.opacity, op))
     };
     let mut pixels = pixels;
@@ -900,6 +961,31 @@ pub(crate) fn set_pivot_raw(s: &mut Sprite, layer: usize, pivot: Option<(f32, f3
     true
 }
 
+/// Sets what the layer shows after its last key. One undo step.
+pub fn set_extend(e: &mut Editor, layer: usize, extend: Extend) -> bool {
+    if !editable(&e.sprite, layer) {
+        return false;
+    }
+    e.checkpoint();
+    set_extend_raw(&mut e.sprite, layer, extend)
+}
+
+/// `set_extend` on a bare sprite, without an undo step (scripts own their undo step).
+pub(crate) fn set_extend_raw(s: &mut Sprite, layer: usize, extend: Extend) -> bool {
+    if !editable(s, layer) {
+        return false;
+    }
+    let mut st = load(s, layer).unwrap_or_else(TweenState::new);
+    st.extend = extend;
+    store_or_clear(s, layer, &st);
+    true
+}
+
+/// What a layer shows after its last key (`Hold` for a layer without tween state).
+pub fn extend_of(s: &Sprite, layer: usize) -> Extend {
+    load(s, layer).map_or(Extend::Hold, |st| st.extend)
+}
+
 /// Chooses RotSprite (true) or nearest neighbor (false) for non-90-degree rotation.
 pub fn set_rotsprite(e: &mut Editor, layer: usize, on: bool) -> bool {
     set_flag(e, layer, 0, on)
@@ -961,9 +1047,9 @@ pub fn source_bounds(s: &Sprite, layer: usize) -> Option<(f64, f64, f64, f64)> {
 /// Which frames a bake covers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BakeRange {
-    /// First to last key.
+    /// First key to the last frame the layer is drawn in (the last key for `Rest`, else the end of the sprite).
     All,
-    /// An inclusive frame range (must lie inside the key range).
+    /// An inclusive frame range (must lie inside the range `All` covers).
     Frames(u32, u32),
     Current(u32),
 }
@@ -987,11 +1073,11 @@ impl BakeOptions {
 /// Transform parameters at a frame: x, y (rounded), rotation, scale x, scale y, opacity, pivot x, y.
 pub fn transform_at(s: &Sprite, layer: usize, frame: u32) -> Option<[f32; 8]> {
     let st = load(s, layer)?;
-    let lo = rig::hull(&st, &rig::ancestors(s, layer, &st))?.0;
-    let lo = st.range().map_or(lo, |r| r.0);
+    let hull = rig::hull(&st, &rig::ancestors(s, layer, &st))?;
+    let lo = st.range().map_or(hull.0, |r| r.0);
     let (w, h) = (s.width as usize, s.height as usize);
     let px = source_pixels(s, layer, lo as usize).unwrap_or_else(|| vec![0; w * h * 4]);
-    let (p, op) = params_at(&st, frame, &px, w, h);
+    let (p, op) = params_at(&st, st.pose_frame(hull, frame), &px, w, h);
     Some([
         p.tx as f32,
         p.ty as f32,
@@ -1021,12 +1107,15 @@ fn plan_bake(s: &Sprite, layer: usize, opts: &BakeOptions) -> Option<BakePlan> {
         return None;
     }
     let src_lo = st.range().map_or(lo, |r| r.0);
+    // The frames after the last key are part of the animation too (held or looped), so a bake that removes the
+    // tracks writes them; otherwise they would jump back to the layer's own cels.
+    let end = st.driven_end(s.frame_count(), hi);
     let (from, to) = match opts.range {
-        BakeRange::All => (lo, hi),
+        BakeRange::All => (lo, end),
         BakeRange::Frames(a, b) => (a.min(b), a.max(b)),
         BakeRange::Current(f) => (f, f),
     };
-    if from < lo || to > hi {
+    if from < lo || to > end {
         return None;
     }
     let new_layer = opts.new_layer || s.layers[layer].is_group();
@@ -1034,7 +1123,7 @@ fn plan_bake(s: &Sprite, layer: usize, opts: &BakeOptions) -> Option<BakePlan> {
         .filter(|&f| new_layer || !(opts.keep_source && f == src_lo))
         .filter_map(|f| render_state(s, layer, f as usize, &st).map(|c| (f as usize, c)))
         .collect();
-    Some(BakePlan { rendered, new_layer, full: from == lo && to == hi })
+    Some(BakePlan { rendered, new_layer, full: from == lo && to == end })
 }
 
 /// Writes a plan into the document (the caller made the undo checkpoint). Returns the layer the cels
@@ -1394,6 +1483,24 @@ pub unsafe extern "C" fn pixmith_tween_warnings(doc: *const Editor, layer: u32) 
 pub unsafe extern "C" fn pixmith_tween_set_flag(doc: *mut Editor, layer: u32, flag: u32, on: bool) -> bool {
     crate::ffi::guarded("pixmith_tween_set_flag", doc, || {
         ed(doc).is_some_and(|e| set_flag(e, layer as usize, flag, on))
+    })
+}
+
+/// What the layer shows after its last key: 0 rest (its own cels), 1 hold (the default), 2 loop (repeat the key
+/// range). One undo step.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tween_set_extend(doc: *mut Editor, layer: u32, mode: u32) -> bool {
+    crate::ffi::guarded("pixmith_tween_set_extend", doc, || {
+        let Some(x) = Extend::from_code(mode) else { return false };
+        ed(doc).is_some_and(|e| set_extend(e, layer as usize, x))
+    })
+}
+
+/// The mode `pixmith_tween_set_extend` takes (1, hold, for a layer without tween state).
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tween_extend(doc: *const Editor, layer: u32) -> u32 {
+    crate::ffi::guarded("pixmith_tween_extend", std::ptr::null_mut(), || {
+        doc.as_ref().map_or(1, |e| extend_of(&e.sprite, layer as usize).code())
     })
 }
 
@@ -1912,13 +2019,21 @@ mod tests {
         .is_some());
         assert!(load(&e.sprite, 0).is_some());
         assert!(cel_px(&e, 1).is_some() && cel_px(&e, 3).is_some() && cel_px(&e, 4).is_none());
-        // Outside the key range is refused.
+        // Past the last key is refused when the layer shows its own cels there (`Rest`), allowed when it holds.
+        assert!(set_extend(&mut e, 0, Extend::Rest));
         assert!(bake_with(
             &mut e,
             0,
             BakeOptions { range: BakeRange::Frames(3, 5), new_layer: false, keep_source: true }
         )
         .is_none());
+        assert!(set_extend(&mut e, 0, Extend::Hold));
+        assert!(
+            bake_with(&mut e, 0, BakeOptions { range: BakeRange::Frames(3, 9), new_layer: false, keep_source: true })
+                .is_none(),
+            "the sprite has 6 frames"
+        );
+        assert!(set_extend(&mut e, 0, Extend::Rest));
         // New layer: original hidden and untouched, copy shows the same frames.
         let n = e.sprite.layers.len();
         let t =
@@ -1927,6 +2042,139 @@ mod tests {
         assert_eq!(t, 1);
         assert!(!e.sprite.layers[0].visible);
         for f in 0..=4 {
+            assert_eq!(frame_px(&e, f), shown[f], "frame {f}");
+        }
+    }
+
+    /// 16x16 sprite with 8 frames and a rotation track: 0 degrees at frame 0, 90 at frame 4.
+    fn bent_cycle() -> Editor {
+        let mut e = sprite16();
+        while e.sprite.frame_count() < 8 {
+            let n = e.sprite.frame_count();
+            e.sprite.add_frame(n - 1, false);
+        }
+        assert!(set_key(&mut e, 0, Prop::Rotation, 0, 0.0, lin()));
+        assert!(set_key(&mut e, 0, Prop::Rotation, 4, 90.0, lin()));
+        e
+    }
+
+    #[test]
+    fn frames_after_the_last_key_hold_by_default() {
+        let e = bent_cycle();
+        assert_eq!(extend_of(&e.sprite, 0), Extend::Hold);
+        let (first, bent) = (frame_px(&e, 0), frame_px(&e, 4));
+        assert_ne!(first, bent);
+        for f in 5..8 {
+            assert_eq!(frame_px(&e, f), bent, "frame {f} keeps the pose of the last key");
+        }
+        assert_eq!(e.sprite.render(3).len(), bent.len());
+        assert_eq!(transform_at(&e.sprite, 0, 7).unwrap()[2], 90.0);
+        // Before the first key the layer's own cels still show (the source image is the cel at the first key).
+        let mut e = sprite16();
+        let own = frame_px(&e, 0);
+        set_key(&mut e, 0, Prop::Rotation, 2, 0.0, lin());
+        set_key(&mut e, 0, Prop::Rotation, 4, 90.0, lin());
+        assert_eq!(frame_px(&e, 0), own);
+        assert!(tweened(&e.sprite, 1, 0).is_none() && tweened(&e.sprite, 5, 0).is_some());
+    }
+
+    #[test]
+    fn rest_option_keeps_the_old_behaviour_and_old_files_read_as_rest() {
+        let mut e = bent_cycle();
+        let own = frame_px(&e, 0);
+        assert!(set_extend(&mut e, 0, Extend::Rest));
+        for f in 5..8 {
+            assert_ne!(frame_px(&e, f), frame_px(&e, 4));
+        }
+        assert!(tweened(&e.sprite, 5, 0).is_none());
+        let _ = own;
+        // Rest is the absence of `ex`: a payload written before the option existed has none and reads as Rest.
+        let text = e.sprite.layers[0].user_data.text.clone().unwrap();
+        assert!(!text.contains("ex="), "{text}");
+        assert_eq!(load(&e.sprite, 0).unwrap().extend, Extend::Rest);
+        // Hold and loop are stored and survive a file round trip.
+        for x in [Extend::Hold, Extend::Loop] {
+            assert!(set_extend(&mut e, 0, x));
+            assert!(e.sprite.layers[0].user_data.text.as_deref().unwrap().contains(&format!("ex={}", x.name())));
+            let back = crate::formats::pxmt::read(&crate::formats::pxmt::write(&e.sprite).unwrap()).unwrap();
+            assert_eq!(extend_of(&back, 0), x);
+        }
+        // The setting is one undo step, and the ABI takes the same codes.
+        assert!(set_extend(&mut e, 0, Extend::Rest));
+        e.undo();
+        assert_eq!(extend_of(&e.sprite, 0), Extend::Loop);
+        unsafe {
+            let p: *mut Editor = &mut e;
+            assert!(pixmith_tween_set_extend(p, 0, 1));
+            assert_eq!(pixmith_tween_extend(p, 0), 1);
+            assert!(!pixmith_tween_set_extend(p, 0, 3));
+        }
+        assert_eq!(Extend::from_name("loop"), Some(Extend::Loop));
+        assert_eq!(Extend::from_name("nope"), None);
+    }
+
+    #[test]
+    fn loop_repeats_the_key_range() {
+        let mut e = bent_cycle();
+        assert!(set_extend(&mut e, 0, Extend::Loop));
+        // The key range 0..=4 repeats: frame 5 shows frame 0, 6 shows 1, 7 shows 2.
+        for (f, same) in [(5, 0), (6, 1), (7, 2)] {
+            assert_eq!(frame_px(&e, f), frame_px(&e, same), "frame {f}");
+        }
+        assert_eq!(transform_at(&e.sprite, 0, 5).unwrap()[2], 0.0);
+        assert_eq!(transform_at(&e.sprite, 0, 6).unwrap()[2], 22.5);
+        // A single key has nothing to repeat.
+        let mut one = sprite16();
+        set_key(&mut one, 0, Prop::Rotation, 1, 90.0, lin());
+        set_extend(&mut one, 0, Extend::Loop);
+        assert_eq!(frame_px(&one, 3), frame_px(&one, 1));
+    }
+
+    #[test]
+    fn bake_writes_the_held_and_looped_frames_too() {
+        for x in [Extend::Hold, Extend::Loop] {
+            let mut e = bent_cycle();
+            set_extend(&mut e, 0, x);
+            let shown: Vec<_> = (0..8).map(|f| frame_px(&e, f)).collect();
+            assert!(bake(&mut e, 0, false));
+            assert!(load(&e.sprite, 0).is_none(), "{x:?}: the tracks went away");
+            for f in 0..8 {
+                assert_eq!(frame_px(&e, f), shown[f], "{x:?}: frame {f} looks the same after the bake");
+            }
+        }
+        // Rest only bakes the key range, as before.
+        let mut e = bent_cycle();
+        set_extend(&mut e, 0, Extend::Rest);
+        let own = cel_px(&e, 6);
+        assert!(bake(&mut e, 0, false));
+        assert_eq!(cel_px(&e, 6), own);
+    }
+
+    #[test]
+    fn rig_children_use_the_same_rule() {
+        use super::rig::{set_parent, world_matrix};
+        let mut e = bent_cycle();
+        let child = e.sprite.add_layer(0);
+        e.sprite.draw_line(child, 0, 2, 2, 9, 2, [255, 255, 255, 255], 1);
+        assert!(set_parent(&mut e, child, Some(0)));
+        let at = |e: &Editor, f| world_matrix(&e.sprite, child, f).unwrap();
+        // The keyless child follows its parent, and holds the pose of the parent's last key like the parent.
+        assert_eq!(extend_of(&e.sprite, child), Extend::Hold);
+        assert_ne!(at(&e, 0), at(&e, 4));
+        assert_eq!(at(&e, 7), at(&e, 4));
+        assert_eq!(frame_px(&e, 7), frame_px(&e, 4));
+        assert!(tweened(&e.sprite, 7, child).is_some());
+        // Loop: frame 6 poses like frame 1, for the ancestors too.
+        set_extend(&mut e, child, Extend::Loop);
+        assert_eq!(at(&e, 6), at(&e, 1));
+        // Rest: the child shows its own cels after the parent's last key.
+        set_extend(&mut e, child, Extend::Rest);
+        assert!(tweened(&e.sprite, 7, child).is_none());
+        // Baking the child agrees with what is shown.
+        set_extend(&mut e, child, Extend::Hold);
+        let shown: Vec<_> = (0..8).map(|f| frame_px(&e, f)).collect();
+        assert!(bake_all(&mut e, false, false) >= 2);
+        for f in 0..8 {
             assert_eq!(frame_px(&e, f), shown[f], "frame {f}");
         }
     }

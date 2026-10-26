@@ -43,7 +43,7 @@ struct ViewOptionsView: View {
                 Toggle("Enabled", isOn: $model.frameDiff)
                 slider("Opacity", $s.diffOpacity, 0.1...1)
                 Toggle("Active layer only", isOn: $s.diffActiveLayer)
-                Toggle("Compare first frame with last", isOn: $s.diffWrap)
+                Toggle("Compare first frame with last in tag", isOn: $s.diffWrap)
             }
             Section("Tiled Mode") {
                 Picker("Mode", selection: $s.tiled) {
