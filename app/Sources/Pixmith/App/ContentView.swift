@@ -81,6 +81,7 @@ struct CanvasArea: View {
     @ObservedObject var model: SpriteModel
     @ObservedObject private var info = StatusInfo.shared
     @ObservedObject private var settings = ViewSettings.shared
+    @ObservedObject private var tiles = TilemapState.shared
 
     private var position: String? {
         guard let c = info.cursor, (0..<model.width).contains(c.x), (0..<model.height).contains(c.y) else { return nil }
@@ -101,6 +102,15 @@ struct CanvasArea: View {
                 .padding(.bottom, DS.Space.sm + 2)
                 .allowsHitTesting(false)
             }
+            .overlay(alignment: .bottom) {
+                if tiles.stampHint {
+                    DSOverlayChip(symbol: "square.on.square.dashed", text: "You're placing tiles. Press Tab or choose Pixels to draw.")
+                        .padding(.bottom, DS.Space.sm + 2)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(DS.Anim.quick, value: tiles.stampHint)
     }
 }
 

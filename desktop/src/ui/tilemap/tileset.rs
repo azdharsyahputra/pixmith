@@ -170,7 +170,7 @@ pub fn tileset_section(ui: &mut Ui, tab: &mut DocTab, tm: &mut TilemapState, err
 }
 
 /// A tile image as an egui texture, re-uploaded when the document changed.
-fn tile_texture(
+pub(super) fn tile_texture(
     ctx: &egui::Context,
     tm: &mut TilemapState,
     doc: &Doc,
@@ -266,7 +266,7 @@ fn tileset_body(ui: &mut Ui, tab: &mut DocTab, tm: &mut TilemapState, ts: u32, t
             }
             let response = ui.interact(rect, ui.id().with(("tile", i)), Sense::click());
             if response.clicked() {
-                tm.selected = i;
+                tm.pick_tile(i);
             }
             let painter = ui.painter();
             draw_checker(painter, rect, 4.0, 3.0);

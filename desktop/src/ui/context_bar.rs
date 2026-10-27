@@ -24,6 +24,7 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.x = space::SM - 2.0;
         let title = crate::ui::tilemap::bar_title(app).unwrap_or(app.tool.title());
         ui.label(egui::RichText::new(title).font(widgets::strong(ui.ctx(), theme::font::BODY_LARGE)).color(c.text));
+        crate::ui::tilemap::tile_mode_switch(app, ui);
         options(app, ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = space::XS;

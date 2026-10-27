@@ -43,6 +43,7 @@ final class CanvasNSView: NSView {
         m.drawTileGrid(ctx, size: rect.size, scale: window?.backingScaleFactor ?? 1, dirty: dirtyRect)
         m.drawMissingCells(ctx)
         m.drawTileCopies(ctx)
+        m.drawTileGhost(ctx)
         m.drawIsoOverlay(ctx, dirty: dirtyRect)
         drawSelectionOutline(ctx, m)
         drawSlices(ctx, m)
@@ -131,7 +132,8 @@ final class CanvasNSView: NSView {
         let p = pixel(e)
         model?.shapeMoved(p)
         model?.isoPointerMoved(p, in: self)
-        model?.tileCopiesPointerMoved(p, in: self)
+        model?.tileCopiesPointerMoved(p, at: convert(e.locationInWindow, from: nil), in: self)
+        model?.tileGhostPointerMoved(p, in: self)
     }
 
     override func mouseExited(with e: NSEvent) {
@@ -139,6 +141,7 @@ final class CanvasNSView: NSView {
         if let m = model { brushPreview.pointerMoved(nil, in: self, model: m) }
         model?.isoPointerMoved(nil, in: self)
         model?.tileCopiesPointerMoved(nil, in: self)
+        model?.tileGhostPointerMoved(nil, in: self)
     }
 
     override func otherMouseDown(with e: NSEvent) { _ = beginPan(e) }

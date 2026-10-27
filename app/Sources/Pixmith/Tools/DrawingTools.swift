@@ -324,6 +324,13 @@ struct ToolOptionsBar: View {
         HStack(spacing: 6) {
             Text(mode == .terrain ? "Terrain Brush" : mode == .stamp ? "Tile Stamp" : model.tool.dsTitle)
                 .font(DS.Font.bodyLarge.weight(.semibold)).lineLimit(1).fixedSize()
+            if model.isTilemapLayer {
+                DSSegmented(selection: Binding(get: { tiles.stamp }, set: { model.setTileMode($0) }), options: [
+                    .init(false, title: "Pixels", help: "Pixels: draw on the tiles (Tab)"),
+                    .init(true, title: "Tiles", help: "Tiles: place whole tiles from the tileset (Tab)"),
+                ])
+                .fixedSize()
+            }
             Group {
                 switch mode {
                 case .terrain: TerrainOptions(model: model)

@@ -17,7 +17,7 @@ mod slices;
 mod tileset;
 
 pub use crate::calls::SliceInfo;
-pub use bar::{bar_options, bar_title, tile_mode_options};
+pub use bar::{bar_options, bar_title, tile_mode_options, tile_mode_switch};
 pub use canvas::{Pointer, canvas_interact, canvas_paint};
 pub use sheets::show_sheets;
 pub use slices::slices_section;
@@ -306,6 +306,14 @@ pub struct TilemapState {
 
     drag: Option<Drag>,
     last_tool: Tool,
+    /// The primary color last frame; choosing another color leaves Tile Stamp. `None` until the first frame.
+    last_primary: Option<u32>,
+    /// Stamps in a row that changed nothing (the cell already held the tile), for the stuck hint.
+    noop_stamps: u32,
+    /// Until when (input time) the "You're placing tiles" hint shows on the canvas.
+    pub hint_until: Option<f64>,
+    /// A tile was picked in the Tileset panel this frame: Tiles mode, with the Pencil (see `apply_tile_pick`).
+    picked: bool,
     last_doc: usize,
     cache: Cache,
     textures: HashMap<(usize, u32, u32), (u64, egui::TextureHandle)>,
@@ -366,6 +374,10 @@ impl Default for TilemapState {
             slice_drag: None,
             drag: None,
             last_tool: Tool::Pencil,
+            last_primary: None,
+            noop_stamps: 0,
+            hint_until: None,
+            picked: false,
             last_doc: 0,
             cache: Cache::default(),
             textures: HashMap::new(),
@@ -397,6 +409,21 @@ impl TilemapState {
         }
     }
 
+    /// Picking a tile in the Tileset panel turns Tiles mode on.
+    pub fn pick_tile(&mut self, tile: u32) {
+        self.selected = tile;
+        self.set_stamp(true);
+        self.picked = true;
+    }
+
+    /// After a tile was picked: Tiles mode places tiles with the Pencil or Eraser, so another tool becomes the Pencil.
+    pub fn apply_tile_pick(&mut self, tool: &mut Tool) {
+        if std::mem::take(&mut self.picked) && !matches!(*tool, Tool::Pencil | Tool::Eraser) {
+            *tool = Tool::Pencil;
+            self.last_tool = Tool::Pencil;
+        }
+    }
+
     /// Choosing any tool, even the current one, leaves stamp mode and the terrain brush.
     pub fn leave_modes(&mut self) {
         self.stamp = false;
@@ -405,11 +432,16 @@ impl TilemapState {
 
     /// Call once per frame: a changed tool leaves the modes, a changed document drops slice drags and selection
     /// (`resetSliceTransients`).
-    pub fn sync(&mut self, tool: Tool, doc_id: usize) {
+    pub fn sync(&mut self, tool: Tool, doc_id: usize, primary: u32) {
         if tool != self.last_tool {
             self.last_tool = tool;
             self.leave_modes();
         }
+        // Choosing a color means drawing: back to Pixels.
+        if self.last_primary.is_some_and(|c| c != primary) {
+            self.stamp = false;
+        }
+        self.last_primary = Some(primary);
         if doc_id != self.last_doc {
             let first = self.last_doc == 0;
             self.last_doc = doc_id;
@@ -485,6 +517,29 @@ pub fn convert_to_normal(app: &mut PixmithApp) {
 }
 
 /// "Tile Stamp Mode" toggle; only meaningful on a tilemap layer (`is_tilemap_layer`).
+/// The Pixels / Tiles switch: Tiles places whole tiles with the Pencil and Eraser (the tile stamp), Pixels draws on
+/// them. Tiles picks the Pencil when another tool is selected.
+pub fn set_tile_mode(app: &mut PixmithApp, tiles: bool) {
+    if tiles {
+        if !matches!(app.tool, Tool::Pencil | Tool::Eraser) {
+            app.tool = Tool::Pencil;
+        }
+        app.tilemap.last_tool = app.tool;
+        app.tilemap.set_stamp(true);
+    } else {
+        app.tilemap.leave_modes();
+    }
+}
+
+/// The Pixels / Tiles shortcut (Tab): switches the mode on a tilemap layer.
+pub fn toggle_tile_mode(app: &mut PixmithApp) {
+    let tab = app.tab();
+    if tab.doc.layer_is_tilemap(tab.layer) {
+        let tiles = !app.tilemap.stamp;
+        set_tile_mode(app, tiles);
+    }
+}
+
 pub fn toggle_stamp(app: &mut PixmithApp) {
     let on = !app.tilemap.stamp;
     app.tilemap.set_stamp(on);
@@ -568,12 +623,12 @@ mod tests {
         let mut st = TilemapState { brush: true, ..Default::default() };
         st.set_stamp(true);
         assert!(st.stamp && !st.brush);
-        st.sync(Tool::Eraser, 1);
+        st.sync(Tool::Eraser, 1, 0);
         assert!(!st.stamp);
         st.brush = true;
-        st.sync(Tool::Eraser, 1);
+        st.sync(Tool::Eraser, 1, 0);
         assert!(st.brush, "same tool keeps the brush");
-        st.sync(Tool::Pencil, 1);
+        st.sync(Tool::Pencil, 1, 0);
         assert!(!st.brush);
     }
 }

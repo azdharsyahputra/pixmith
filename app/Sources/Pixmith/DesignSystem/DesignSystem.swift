@@ -143,7 +143,8 @@ enum DSColor {
     /// Faint frame-column guides in the timeline.
     static let guide = Color(nsColor: dynamic("guide", light: 0x00000009, dark: 0xFFFFFF09))
     /// Status chips floating over the canvas.
-    static let overlay = Color(nsColor: dynamic("overlay", light: 0xF6F6F7E6, dark: 0x262628E6))
+    static let overlayNS = dynamic("overlay", light: 0xF6F6F7E6, dark: 0x262628E6)
+    static let overlay = Color(nsColor: overlayNS)
 
     static let text = Color(nsColor: textNS)
     static let textSecondary = Color(nsColor: text2NS)

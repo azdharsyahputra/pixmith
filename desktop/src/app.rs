@@ -256,8 +256,10 @@ impl PixmithApp {
     pub fn ui(&mut self, root: &mut egui::Ui) {
         crate::live::frame(self, root.ctx());
         let doc_id = self.tab().doc.raw() as usize;
-        self.tilemap.sync(self.tool, doc_id);
+        self.tilemap.apply_tile_pick(&mut self.tool);
+        self.tilemap.sync(self.tool, doc_id, self.primary);
         self.tilemap.iso_default = self.canvas.tools.settings.iso();
+        ui::menus::shortcuts::take_tab(self, root.ctx());
         ui::menus::shortcuts_first(self, root.ctx());
         let c = self.colors();
         root.painter().rect_filled(root.max_rect(), 0.0, c.panel);

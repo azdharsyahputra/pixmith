@@ -6,16 +6,16 @@ struct KeyBinding: Codable, Hashable {
     var key: String
     var shift = false
 
-    var label: String { (shift ? "⇧" : "") + (key == " " ? "Space" : key.uppercased()) }
+    var label: String { (shift ? "⇧" : "") + (key == " " ? "Space" : key == "\t" ? "⇥" : key.uppercased()) }
 }
 
 /// Everything that can be triggered by a customizable single key.
 enum ShortcutAction: Hashable, Identifiable {
     case tool(Tool)
-    case swapColors, brushSmaller, brushLarger, previousFrame, nextFrame, playPause
+    case swapColors, brushSmaller, brushLarger, previousFrame, nextFrame, playPause, tileMode
 
     static var all: [ShortcutAction] {
-        Tool.allCases.map(ShortcutAction.tool) + [.swapColors, .brushSmaller, .brushLarger, .previousFrame, .nextFrame, .playPause]
+        Tool.allCases.map(ShortcutAction.tool) + [.swapColors, .brushSmaller, .brushLarger, .previousFrame, .nextFrame, .playPause, .tileMode]
     }
 
     var id: String {
@@ -27,6 +27,7 @@ enum ShortcutAction: Hashable, Identifiable {
         case .previousFrame: "previousFrame"
         case .nextFrame: "nextFrame"
         case .playPause: "playPause"
+        case .tileMode: "tileMode"
         }
     }
 
@@ -39,6 +40,7 @@ enum ShortcutAction: Hashable, Identifiable {
         case .previousFrame: "Previous Frame"
         case .nextFrame: "Next Frame"
         case .playPause: "Play / Pause"
+        case .tileMode: "Pixels / Tiles"
         }
     }
 
@@ -78,6 +80,7 @@ enum ShortcutAction: Hashable, Identifiable {
         case .previousFrame: return [k(",", false)]
         case .nextFrame: return [k(".", false)]
         case .playPause: return [k(" ", false)]
+        case .tileMode: return [k("\t", false)]
         }
     }
 }
@@ -135,6 +138,8 @@ final class Shortcuts: ObservableObject {
             return true
         }
         guard let a = action(for: e) else { return false }
+        // Pixels / Tiles only exists on tilemap layers; elsewhere the key keeps its normal job (focus navigation).
+        if a == .tileMode, !model.isTilemapLayer { return false }
         model.perform(a)
         return true
     }
@@ -152,7 +157,7 @@ final class Shortcuts: ObservableObject {
             break
         }
         guard let ch = e.charactersIgnoringModifiers?.lowercased(), ch.count == 1,
-              ch.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value < 0xF700 })
+              ch == "\t" || ch.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value < 0xF700 })
         else { return NSSound.beep() }
         let b = KeyBinding(key: ch, shift: e.modifierFlags.contains(.shift))
         recording = nil
@@ -182,6 +187,7 @@ extension SpriteModel {
         case .previousFrame: stop(); step(-1)
         case .nextFrame: stop(); step(1)
         case .playPause: togglePlay()
+        case .tileMode: toggleTileMode()
         }
     }
 }

@@ -7,6 +7,15 @@ import SwiftUI
 /// The boxes of the tile copies outlined under the pointer, to redraw only when they change.
 enum TileCopiesHover {
     static var boxes: [CGRect] = []
+    /// The pointer in canvas view points, where the label chip sits next to; nil until the pointer has moved.
+    static var pointer: CGPoint?
+    /// The area the label chip covered when last drawn, to redraw it as the pointer moves.
+    static var chip: CGRect = .zero
+}
+
+/// The cell box (canvas pixels) that shows the Tiles-mode ghost, to redraw only when it changes.
+enum TileGhostHover {
+    static var cell: CGRect?
 }
 
 final class TilemapState: ObservableObject {
@@ -42,12 +51,42 @@ final class TilemapState: ObservableObject {
     @Published var flipY = false
     @Published var flipD = false
     @Published var sheet: Sheet?
+    /// Shows the "You're placing tiles" hint chip over the canvas for a few seconds.
+    @Published var stampHint = false
+    /// Stamps in a row that changed nothing because the cell already held the tile.
+    private(set) var noopStamps = 0
+    private var hintGeneration = 0
     private var bag = Set<AnyCancellable>()
 
     private init() {
         pixmith_set_auto_tiles(autoTiles)
-        // Choosing any drawing tool leaves stamp mode.
+        // Choosing any drawing tool leaves stamp mode, including the one that is already selected (@Published sends
+        // on every assignment).
         SpriteModel.shared.$tool.dropFirst().sink { [weak self] _ in self?.stamp = false }.store(in: &bag)
+        // So does choosing a color: the user is about to draw pixels.
+        SpriteModel.shared.$color.dropFirst().sink { [weak self] _ in self?.stamp = false }.store(in: &bag)
+        $stamp.dropFirst().sink { [weak self] on in
+            self?.noopStamps = 0
+            if !on { self?.stampHint = false }
+        }.store(in: &bag)
+        // The canvas draws the ghost, the copies outline and its label from this state.
+        objectWillChange.sink { SpriteModel.shared.objectWillChange.send() }.store(in: &bag)
+    }
+
+    /// A stamp of a click changed a cell.
+    func stampChanged() { noopStamps = 0 }
+
+    /// A click stamped a tile the cell already held. The second one in a row shows the hint for a few seconds.
+    func stampDidNothing() {
+        noopStamps += 1
+        guard noopStamps >= 2 else { return }
+        noopStamps = 0
+        stampHint = true
+        hintGeneration += 1
+        let g = hintGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            if let self, self.hintGeneration == g { self.stampHint = false }
+        }
     }
 
     /// The selected tile index with the current flip flags.
@@ -85,12 +124,25 @@ extension SpriteModel {
         return String(cString: p)
     }
 
-    func tileImage(tileset ts: Int, tile: Int) -> CGImage? {
+    /// The tile's picture, shown with flip flags (the core's order: diagonal, then X, then Y; diagonal only for square tiles).
+    func tileImage(tileset ts: Int, tile: Int, flags: UInt32 = 0) -> CGImage? {
         let (w, h) = tileSize(of: ts)
         guard w > 0, h > 0 else { return nil }
         var buf = [UInt8](repeating: 0, count: w * h * 4)
-        guard pixmith_tileset_tile_pixels(doc, UInt32(ts), UInt32(tile), &buf, buf.count),
-              let provider = CGDataProvider(data: Data(buf) as CFData) else { return nil }
+        guard pixmith_tileset_tile_pixels(doc, UInt32(ts), UInt32(tile), &buf, buf.count) else { return nil }
+        if flags & (TilemapState.flipX | TilemapState.flipY | TilemapState.flipD) != 0 {
+            let src = buf
+            for cy in 0..<h {
+                for cx in 0..<w {
+                    var (a, b) = (cx, cy)
+                    if flags & TilemapState.flipY != 0 { b = h - 1 - b }
+                    if flags & TilemapState.flipX != 0 { a = w - 1 - a }
+                    if flags & TilemapState.flipD != 0, w == h { swap(&a, &b) }
+                    for k in 0..<4 { buf[(cy * w + cx) * 4 + k] = src[(b * w + a) * 4 + k] }
+                }
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(buf) as CFData) else { return nil }
         return CGImage(
             width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
             space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -182,14 +234,38 @@ extension SpriteModel {
         let value = e.modifierFlags.contains(.shift) ? 0 : state.value
         if pixmith_tile_stamp(doc, UInt32(layer), UInt32(frame), Int32(p.0), Int32(p.1), value) {
             revision &+= 1
+            state.stampChanged()
+        } else if began {
+            state.stampDidNothing()
         }
         return true
+    }
+
+    /// Tiles mode: the tile stamp is on for a tool it works with, and the terrain brush is not in the way.
+    var tilesMode: Bool {
+        TilemapState.shared.stamp && isTilemapLayer && (tool == .pencil || tool == .eraser)
+            && !(AutotileState.shared.brush && terrainMode >= 0)
+    }
+
+    /// Switches the tool options bar's Pixels | Tiles control. Tiles needs the pencil or eraser; the terrain brush is off in both.
+    func setTileMode(_ tiles: Bool) {
+        guard isTilemapLayer else { return }
+        if tiles, tool != .pencil, tool != .eraser { tool = .pencil }  // sends on $tool, which turns the stamp off
+        AutotileState.shared.brush = false
+        TilemapState.shared.stamp = tiles
+    }
+
+    /// The Pixels / Tiles shortcut.
+    func toggleTileMode() {
+        guard isTilemapLayer else { return }
+        setTileMode(!TilemapState.shared.stamp)
     }
 
     /// Boxes (canvas pixels) of the cells showing the same tile as the cell under `p`, when there are several:
     /// painting that tile with Auto Tiles off changes all of them.
     func tileCopies(at p: (Int, Int)?) -> [CGRect] {
-        guard let p, isTilemapLayer, !(AutotileState.shared.brush && terrainMode >= 0) else { return [] }
+        // Only while drawing pixels: Tiles mode shows the tile ghost instead, the terrain brush its own cells.
+        guard let p, isTilemapLayer, !TilemapState.shared.stamp, !(AutotileState.shared.brush && terrainMode >= 0) else { return [] }
         var buf = [Int32](repeating: 0, count: 4 * 4096)
         let n = pixmith_tile_copies_at(doc, UInt32(layer), UInt32(frame), Int32(p.0), Int32(p.1), &buf, buf.count)
         guard n >= 2 else { return [] }
@@ -199,18 +275,54 @@ extension SpriteModel {
     }
 
     /// Redraws the canvas when the pointer moves onto a cell whose copies differ from the outlined ones.
-    func tileCopiesPointerMoved(_ p: (Int, Int)?, in view: NSView) {
+    /// `pointer` is the pointer in the view's points; the label chip follows it while the outline is up.
+    func tileCopiesPointerMoved(_ p: (Int, Int)?, at pointer: CGPoint? = nil, in view: NSView) {
         let boxes = tileCopies(at: p)
-        if boxes == TileCopiesHover.boxes { return }
+        TileCopiesHover.pointer = pointer
+        if boxes == TileCopiesHover.boxes {
+            guard !boxes.isEmpty else { return }
+            // Same outline: only the chip moves.
+            view.setNeedsDisplay(TileCopiesHover.chip.insetBy(dx: -2, dy: -2))
+            if let chip = tileCopiesChip(boxes, at: p) { view.setNeedsDisplay(chip.rect.insetBy(dx: -2, dy: -2)) }
+            return
+        }
         TileCopiesHover.boxes = boxes
         view.needsDisplay = true
+    }
+
+    /// The chip next to the pointer for the outlined copies: tile N, how many cells, and what painting would change.
+    private func tileCopiesChip(_ boxes: [CGRect], at p: (Int, Int)?) -> (rect: CGRect, lines: [NSAttributedString])? {
+        guard let p, !boxes.isEmpty else { return nil }
+        var tile = pixmith_tile_at(doc, UInt32(layer), UInt32(frame), Int32(p.0), Int32(p.1))
+        var hit: [Int32] = [0, 0, 0]
+        if isIsoLayer {
+            tile = pixmith_tile_hit_at(doc, UInt32(layer), UInt32(frame), Int32(clamping: p.0), Int32(clamping: p.1), &hit)
+                ? UInt32(bitPattern: hit[2]) : 0
+        }
+        let n = boxes.count
+        let first = NSAttributedString(string: "Tile \(tile & 0x1FFF_FFFF) · \(n) cells",
+                                       attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: DSColor.textNS])
+        let second = NSAttributedString(string: TilemapState.shared.autoTiles ? "Painting changes this cell only" : "Painting changes all \(n)",
+                                        attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: DSColor.text2NS])
+        let (w1, w2) = (first.size(), second.size())
+        let size = CGSize(width: ceil(max(w1.width, w2.width)) + 2 * DS.Space.sm, height: ceil(w1.height + w2.height) + DS.Space.sm)
+        let at = TileCopiesHover.pointer ?? CGPoint(x: (CGFloat(p.0) + 0.5) * zoom, y: (CGFloat(p.1) + 0.5) * zoom)
+        let area = CGSize(width: CGFloat(width) * zoom, height: CGFloat(height) * zoom)
+        // 16 pt right and down of the pointer; kept inside the canvas view by flipping to the other side.
+        var o = CGPoint(x: at.x + 16, y: at.y + 16)
+        if o.x + size.width > area.width { o.x = at.x - 16 - size.width }
+        if o.y + size.height > area.height { o.y = at.y - 16 - size.height }
+        return (CGRect(origin: CGPoint(x: max(0, o.x), y: max(0, o.y)), size: size), [first, second])
     }
 
     /// Outlines the copies of the tile under the pointer (squares, or diamonds on isometric layers).
     func drawTileCopies(_ ctx: CGContext) {
         let boxes = tileCopies(at: StatusInfo.shared.cursor.map { ($0.x, $0.y) })
         TileCopiesHover.boxes = boxes
-        guard !boxes.isEmpty else { return }
+        guard !boxes.isEmpty else {
+            TileCopiesHover.chip = .zero
+            return
+        }
         ctx.saveGState()
         ctx.setFillColor(DSColor.accentNS.withAlphaComponent(0.14).cgColor)
         ctx.setStrokeColor(DSColor.accentNS.cgColor)
@@ -221,6 +333,85 @@ extension SpriteModel {
         }
         ctx.drawPath(using: .fillStroke)
         ctx.restoreGState()
+        drawTileCopiesChip(ctx, boxes)
+    }
+
+    private func drawTileCopiesChip(_ ctx: CGContext, _ boxes: [CGRect]) {
+        let p = StatusInfo.shared.cursor.map { ($0.x, $0.y) }
+        guard let chip = tileCopiesChip(boxes, at: p) else { return }
+        TileCopiesHover.chip = chip.rect
+        ctx.saveGState()
+        ctx.setFillColor(DSColor.overlayNS.cgColor)
+        ctx.addPath(CGPath(roundedRect: chip.rect, cornerWidth: DS.Radius.field, cornerHeight: DS.Radius.field, transform: nil))
+        ctx.fillPath()
+        ctx.restoreGState()
+        var y = chip.rect.minY + DS.Space.sm / 2
+        for line in chip.lines {
+            line.draw(at: CGPoint(x: chip.rect.minX + DS.Space.sm, y: y))
+            y += line.size().height
+        }
+    }
+
+    // MARK: Tiles-mode ghost
+
+    /// The cell box (canvas pixels) under the pointer while Tiles mode is on: the tile box for square tilemaps, the
+    /// diamond's box for isometric ones.
+    func tileGhostCell(at p: (Int, Int)?) -> CGRect? {
+        guard let p, tilesMode, let ts = tilesetIndex else { return nil }
+        if isIsoLayer {
+            guard let g = isoLayerGrid, let c = isoCell(at: p) else { return nil }
+            let b = g.box(c)
+            return CGRect(x: b.x, y: b.y, width: g.w, height: g.h)
+        }
+        let (tw, th) = tileSize(of: ts)
+        var o: [Int32] = [0, 0]
+        guard tw > 0, th > 0, pixmith_tile_grid_origin(doc, UInt32(layer), UInt32(frame), &o) else { return nil }
+        func snap(_ v: Int, _ origin: Int32, _ step: Int) -> Int {
+            let d = v - Int(origin)
+            return Int(origin) + (d >= 0 ? d / step : -((-d + step - 1) / step)) * step
+        }
+        return CGRect(x: snap(p.0, o[0], tw), y: snap(p.1, o[1], th), width: tw, height: th)
+    }
+
+    /// Redraws the canvas when the pointer moves to another cell (or out) while Tiles mode is on.
+    func tileGhostPointerMoved(_ p: (Int, Int)?, in view: NSView) {
+        let new = tileGhostCell(at: p)
+        if new == TileGhostHover.cell { return }
+        TileGhostHover.cell = new
+        view.needsDisplay = true
+    }
+
+    /// The selected tile at 65% opacity in the cell under the pointer, with a 1px accent outline of the cell.
+    /// Isometric layers put the image where the core does (its pivot on the diamond's center); the diamond itself is
+    /// the hover highlight of `drawIsoOverlay`.
+    func drawTileGhost(_ ctx: CGContext) {
+        let cell = tileGhostCell(at: StatusInfo.shared.cursor.map { ($0.x, $0.y) })
+        TileGhostHover.cell = cell
+        guard let cell, let ts = tilesetIndex else { return }
+        let z = zoom
+        let iso = isIsoLayer
+        let st = TilemapState.shared
+        // The diagonal flip does not exist for isometric tiles.
+        let value = iso ? st.value & ~TilemapState.flipD : st.value
+        let tile = Int(value & 0x1FFF_FFFF)
+        if tile > 0, tile < tileCount(of: ts), let img = tileImage(tileset: ts, tile: tile, flags: value & 0xE000_0000) {
+            let (tw, th) = tileSize(of: ts)
+            var origin = cell.origin
+            if iso, var pv = tilePivot(ts, tile) {
+                if value & TilemapState.flipX != 0 { pv.x = tw - pv.x }
+                if value & TilemapState.flipY != 0 { pv.y = th - pv.y }
+                origin = CGPoint(x: cell.midX - CGFloat(pv.x), y: cell.midY - CGFloat(pv.y))
+            }
+            CanvasOverlays.drawImage(ctx, img, in: CGRect(x: origin.x * z, y: origin.y * z, width: CGFloat(tw) * z, height: CGFloat(th) * z),
+                                     alpha: 0.65)
+        }
+        if !iso {
+            ctx.saveGState()
+            ctx.setStrokeColor(DSColor.accentNS.cgColor)
+            ctx.setLineWidth(1)
+            ctx.stroke(CGRect(x: cell.minX * z, y: cell.minY * z, width: cell.width * z, height: cell.height * z).insetBy(dx: 0.5, dy: 0.5))
+            ctx.restoreGState()
+        }
     }
 
     /// Draws tile boundaries over the canvas while a tilemap layer is selected.
@@ -382,7 +573,10 @@ struct TilemapPanel: View {
         }
         .overlay(alignment: .topLeading) { AutotileBadge(model: model, tile: i) }
         .contentShape(Rectangle())
-        .onTapGesture { state.selected = i }
+        .onTapGesture {
+            state.selected = i
+            model.setTileMode(true)
+        }
         .contextMenu {
             Button("Duplicate Tile") { model.duplicateTile(i) }
             Button("Delete Tile") { model.deleteTile(i) }.disabled(i == 0)

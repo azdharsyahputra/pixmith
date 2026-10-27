@@ -42,6 +42,11 @@ final class AutotileState: ObservableObject {
     private init() {
         SpriteModel.shared.$tool.dropFirst().sink { [weak self] _ in self?.brush = false }.store(in: &bag)
         TilemapState.shared.$stamp.sink { [weak self] on in if on { self?.brush = false } }.store(in: &bag)
+        // The terrain brush replaces Tiles mode; the canvas redraws (no Tiles ghost, copies outline back).
+        $brush.dropFirst().sink { on in
+            if on { TilemapState.shared.stamp = false }
+            SpriteModel.shared.objectWillChange.send()
+        }.store(in: &bag)
     }
 
     static let modeNames = ["Sides (16)", "Blob (47)", "Corners / dual grid (16)"]

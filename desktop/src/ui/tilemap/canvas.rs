@@ -74,7 +74,20 @@ pub fn canvas_interact(
         terrain_event(tm, tab, ptr, button, mods.shift, p, true);
     } else if stamp {
         let mut open = false;
+        let before = tab.doc.tile_value_at(layer, tab.frame, p.0, p.1);
         stamp_event(tm, tab, p, mods, &mut open);
+        if !mods.alt {
+            // Two stamps in a row that change nothing: the user probably wants to draw (the stuck hint).
+            if tab.doc.tile_value_at(layer, tab.frame, p.0, p.1) == before {
+                tm.noop_stamps += 1;
+                if tm.noop_stamps >= 2 {
+                    tm.noop_stamps = 0;
+                    tm.hint_until = Some(ctx.input(|i| i.time) + 4.0);
+                }
+            } else {
+                tm.noop_stamps = 0;
+            }
+        }
         drag.kind = DragKind::Stamp { edit_open: open };
     } else {
         slices::press(tm, tab, ptr, p);
@@ -246,7 +259,7 @@ fn finish_terrain(tm: &mut TilemapState, tab: &mut DocTab, ptr: &Pointer) {
 /// pixel under the pointer.
 pub fn canvas_paint(
     painter: &Painter,
-    tm: &TilemapState,
+    tm: &mut TilemapState,
     tab: &DocTab,
     srect: Rect,
     ppp: f32,
@@ -264,22 +277,135 @@ pub fn canvas_paint(
             tile_grid(painter, tab, srect, ppp, dark, (tw, th));
             terrain_overlay(painter, tm, tab, srect, dark, (tw, th));
         }
-        if let Some(at) = cursor
-            && !(tm.brush && tab.doc.terrain_mode(layer) >= 0)
-        {
-            tile_copies(painter, tab, srect, &c, iso.is_some(), at);
+        let terrain = tm.brush && tab.doc.terrain_mode(layer) >= 0;
+        if let Some(at) = cursor {
+            if tm.stamp {
+                stamp_ghost(painter, tm, tab, srect, &c, ts, iso.as_ref(), at);
+            } else if !terrain {
+                tile_copies(painter, tm, tab, srect, &c, iso.is_some(), at);
+            }
         }
     }
+    stuck_hint(painter, tm, &c);
     slices::paint(painter, tm, tab, srect, &c);
 }
 
-/// Outlines the cells that show the same tile as the cell under the cursor when there are several: painting that
-/// tile with Auto Tiles off changes all of them.
-fn tile_copies(painter: &Painter, tab: &DocTab, srect: Rect, c: &Colors, iso: bool, at: (i32, i32)) {
+/// Tiles mode: the selected tile, half transparent, where a click would place it, with the cell outlined.
+#[allow(clippy::too_many_arguments)]
+fn stamp_ghost(
+    painter: &Painter,
+    tm: &mut TilemapState,
+    tab: &DocTab,
+    srect: Rect,
+    c: &Colors,
+    ts: u32,
+    iso: Option<&Iso>,
+    at: (i32, i32),
+) {
+    let (layer, z) = (tab.layer, tab.zoom);
+    let (tw, th) = tab.doc.tile_size(ts);
+    let id = tm.value() & 0x1FFF_FFFF;
+    let painter = painter.with_clip_rect(srect.intersect(painter.clip_rect()));
+    let stroke = Stroke::new(1.5, c.accent);
+    // The cell box and where the tile image goes.
+    let (cell, image) = if let Some(grid) = iso {
+        let Some((i, j)) = tab.doc.layer_cell_at(layer, at.0, at.1) else { return };
+        let Some((bx, by)) = tab.doc.layer_cell_origin(layer, i, j) else { return };
+        let (cw, ch) = (grid.w as f32, grid.h as f32);
+        let (mut px, mut py) = tab.doc.tile_pivot(ts, id).unwrap_or((tw as i32 / 2, th as i32 / 2));
+        if tm.flip_x {
+            px = tw as i32 - px;
+        }
+        if tm.flip_y {
+            py = th as i32 - py;
+        }
+        let ox = bx as f32 + cw / 2.0 - px as f32;
+        let oy = by as f32 + ch / 2.0 - py as f32;
+        (Rect::from_min_size(pos2(bx as f32, by as f32), vec2(cw, ch)), pos2(ox, oy))
+    } else {
+        let (gx, gy) = tab.doc.tile_grid_origin(layer, tab.frame);
+        let x = gx + (at.0 - gx).div_euclid(tw as i32) * tw as i32;
+        let y = gy + (at.1 - gy).div_euclid(th as i32) * th as i32;
+        let r = Rect::from_min_size(pos2(x as f32, y as f32), vec2(tw as f32, th as f32));
+        (r, r.min)
+    };
+    let screen = |p: Pos2| srect.min + p.to_vec2() * z;
+    if id != 0 {
+        let ctx = painter.ctx().clone();
+        if let Some(tex) = super::tileset::tile_texture(&ctx, tm, &tab.doc, tab.revision, ts, id, (tw, th)) {
+            let r = Rect::from_min_size(screen(image), vec2(tw as f32, th as f32) * z);
+            let (u0, u1) = if tm.flip_x { (1.0, 0.0) } else { (0.0, 1.0) };
+            let (v0, v1) = if tm.flip_y { (1.0, 0.0) } else { (0.0, 1.0) };
+            let uv = Rect::from_min_max(pos2(u0, v0), pos2(u1, v1));
+            painter.image(tex, r, uv, Color32::from_white_alpha(166));
+        }
+    }
+    let r = Rect::from_min_max(screen(cell.min), screen(cell.max));
+    if iso.is_some() {
+        let pts = [
+            pos2(r.center().x, r.top()),
+            pos2(r.right(), r.center().y),
+            pos2(r.center().x, r.bottom()),
+            pos2(r.left(), r.center().y),
+        ];
+        painter.add(egui::Shape::closed_line(pts.to_vec(), stroke));
+    } else {
+        painter.rect_stroke(r, 0.0, stroke, StrokeKind::Inside);
+    }
+}
+
+/// A small two-line note on the overlay plate (the canvas's status chips).
+fn note_chip(painter: &Painter, c: &Colors, left_top: Pos2, lines: &[&str]) {
+    use crate::theme::{font, radius, space, ui_font};
+    let galleys: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .map(|(k, t)| {
+            let color = if k == 0 { c.text } else { c.text_secondary };
+            painter.layout_no_wrap(t.to_string(), ui_font(font::CAPTION), color)
+        })
+        .collect();
+    let w = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max) + 2.0 * space::SM;
+    let h = galleys.iter().map(|g| g.size().y + 2.0).sum::<f32>() + 2.0 * space::XS + 2.0;
+    let rect = Rect::from_min_size(left_top, vec2(w, h));
+    painter.rect_filled(rect, radius::FIELD, c.overlay);
+    let mut y = rect.top() + space::XS + 1.0;
+    for g in galleys {
+        let gh = g.size().y;
+        painter.galley(pos2(rect.left() + space::SM, y), g, c.text);
+        y += gh + 2.0;
+    }
+}
+
+/// Tiles mode, after two stamps in a row that changed nothing: says how to get back to drawing.
+fn stuck_hint(painter: &Painter, tm: &mut TilemapState, c: &Colors) {
+    let Some(until) = tm.hint_until else { return };
+    let now = painter.ctx().input(|i| i.time);
+    if now >= until || !tm.stamp {
+        tm.hint_until = None;
+        return;
+    }
+    let text = "You're placing tiles. Press Tab or choose Pixels to draw.";
+    let galley = painter.layout_no_wrap(text.to_owned(), crate::theme::ui_font(crate::theme::font::CAPTION), c.text);
+    let area = painter.clip_rect();
+    let left_top = pos2(area.center().x - galley.size().x / 2.0 - 8.0, area.bottom() - 64.0);
+    note_chip(painter, c, left_top, &[text]);
+    painter.ctx().request_repaint_after(std::time::Duration::from_secs_f64(until - now));
+}
+
+/// Outlines the cells that show the same tile as the cell under the cursor when there are several (painting that
+/// tile with Auto Tiles off changes all of them), with a note next to the cursor saying what painting will do.
+fn tile_copies(painter: &Painter, tm: &TilemapState, tab: &DocTab, srect: Rect, c: &Colors, iso: bool, at: (i32, i32)) {
     let boxes = tab.doc.tile_copies_at(tab.layer, tab.frame, at.0, at.1);
     if boxes.len() < 2 {
         return;
     }
+    let value = if iso {
+        tab.doc.tile_hit_at(tab.layer, tab.frame, at.0, at.1).map_or(0, |(_, v)| v)
+    } else {
+        tab.doc.tile_value_at(tab.layer, tab.frame, at.0, at.1)
+    };
+    let n = boxes.len();
     let painter = painter.with_clip_rect(srect.intersect(painter.clip_rect()));
     let (z, fill, stroke) = (tab.zoom, c.accent.gamma_multiply(0.14), Stroke::new(1.5, c.accent));
     for [x, y, w, h] in boxes {
@@ -292,6 +418,11 @@ fn tile_copies(painter: &Painter, tab: &DocTab, srect: Rect, c: &Colors, iso: bo
             painter.rect(r, 0.0, fill, stroke, egui::StrokeKind::Inside);
         }
     }
+    let title = format!("Tile {} \u{b7} {n} cells", value & 0x1FFF_FFFF);
+    let effect =
+        if tm.auto_tiles { "Painting changes this cell only".to_string() } else { format!("Painting changes all {n}") };
+    let cursor = srect.min + vec2(at.0 as f32 + 1.0, at.1 as f32 + 1.0) * z + vec2(16.0, 16.0);
+    note_chip(&painter, c, cursor, &[&title, &effect]);
 }
 
 /// A diamond (or any convex polygon) in sprite pixel coordinates, filled and outlined.

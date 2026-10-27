@@ -23,7 +23,11 @@ impl KeyBinding {
         format!(
             "{}{}",
             if self.shift { "\u{21e7}" } else { "" },
-            if self.key == " " { "Space".into() } else { self.key.to_uppercase() }
+            match self.key.as_str() {
+                " " => "Space".into(),
+                "\t" => "\u{21e5}".into(),
+                k => k.to_uppercase(),
+            }
         )
     }
 }
@@ -38,6 +42,8 @@ pub enum Action {
     PreviousFrame,
     NextFrame,
     PlayPause,
+    /// Pixels / Tiles on a tilemap layer.
+    TileMode,
 }
 
 /// The tools in the order of `Tool.allCases` in `SpriteModel.swift`.
@@ -77,6 +83,7 @@ impl Action {
                 Action::PreviousFrame,
                 Action::NextFrame,
                 Action::PlayPause,
+                Action::TileMode,
             ])
             .collect()
     }
@@ -94,6 +101,7 @@ impl Action {
             Action::PreviousFrame => "previousFrame".into(),
             Action::NextFrame => "nextFrame".into(),
             Action::PlayPause => "playPause".into(),
+            Action::TileMode => "tileMode".into(),
         }
     }
 
@@ -111,6 +119,7 @@ impl Action {
             Action::PreviousFrame => "Previous Frame".into(),
             Action::NextFrame => "Next Frame".into(),
             Action::PlayPause => "Play / Pause".into(),
+            Action::TileMode => "Pixels / Tiles".into(),
         }
     }
 
@@ -147,6 +156,7 @@ impl Action {
             Action::PreviousFrame => vec![k(",", false)],
             Action::NextFrame => vec![k(".", false)],
             Action::PlayPause => vec![k(" ", false)],
+            Action::TileMode => vec![k("\t", false)],
         }
     }
 }
@@ -308,6 +318,9 @@ pub fn key_char(key: Key) -> Option<String> {
     if key == Key::Space {
         return Some(" ".into());
     }
+    if key == Key::Tab {
+        return Some("\t".into());
+    }
     let name = key.symbol_or_name();
     let mut chars = name.chars();
     let (c, rest) = (chars.next()?, chars.next());
@@ -372,11 +385,29 @@ pub fn dispatch(app: &mut PixmithApp, ctx: &egui::Context) {
     }
 }
 
+/// Tab moves the keyboard focus between widgets in egui. While it is bound to a shortcut (Pixels / Tiles by
+/// default) and no text field has the focus, it runs that shortcut instead; called before anything is laid out.
+pub fn take_tab(app: &mut PixmithApp, ctx: &egui::Context) {
+    if ctx.egui_wants_keyboard_input() || super::blocked(app) || app.menus.shortcuts.recording.is_some() {
+        return;
+    }
+    let Some(action) = app.menus.shortcuts.action_for("\t", false) else { return };
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
+        ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        perform(app, ctx, action);
+    }
+}
+
 /// `SpriteModel.perform`.
 pub fn perform(app: &mut PixmithApp, ctx: &egui::Context, action: Action) {
     let now = ctx.input(|i| i.time);
     match action {
-        Action::Tool(t) => app.tool = t,
+        Action::Tool(t) => {
+            // Choosing a tool, even the selected one, means drawing: it leaves Tile Stamp and the terrain brush.
+            app.tool = t;
+            app.tilemap.leave_modes();
+        }
+        Action::TileMode => crate::ui::tilemap::toggle_tile_mode(app),
         Action::SwapColors => std::mem::swap(&mut app.primary, &mut app.secondary),
         Action::BrushSmaller => app.brush_size = app.brush_size.saturating_sub(1).max(1),
         Action::BrushLarger => app.brush_size = (app.brush_size + 1).min(64),

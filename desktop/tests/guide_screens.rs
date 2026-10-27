@@ -741,6 +741,18 @@ fn new_mirror_axis(app: &mut PixmithApp) {
     app.timeline.collapsed = true;
 }
 
+/// Tiles mode on the dungeon wall: the Pixels / Tiles switch in the bar and the torch tile following the pointer.
+fn new_tile_mode_tiles(app: &mut PixmithApp) {
+    new_auto_tiles(app);
+    app.tilemap.selected = 3;
+    pixmith_desktop::ui::tilemap::set_tile_mode(app, true);
+}
+
+/// Pixels mode: hovering a brick outlines its copies and says what painting will change.
+fn new_tile_mode_pixels(app: &mut PixmithApp) {
+    new_auto_tiles(app);
+}
+
 /// A layered campfire animation: the preview docked in the inspector shows the frame being edited.
 fn new_preview_docked(app: &mut PixmithApp) {
     let doc = Doc::open(&showcase("campfire.aseprite")).expect("campfire");
@@ -812,6 +824,8 @@ fn guide_screens() {
             ..shot("new-preview-docked", new_preview_docked)
         },
         Shot { region: Region::WithTimeline, ..shot("new-timeline", new_timeline) },
+        Shot { hover: Some((72, 40)), ..shot("new-tile-mode-tiles", new_tile_mode_tiles) },
+        Shot { hover: Some((40, 52)), ..shot("new-tile-mode-pixels", new_tile_mode_pixels) },
     ];
     let only: Vec<String> = std::env::var("GUIDE_ONLY")
         .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())

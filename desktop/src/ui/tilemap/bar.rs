@@ -53,6 +53,23 @@ pub fn bar_options(app: &mut PixmithApp, ui: &mut Ui) -> bool {
     true
 }
 
+/// The Pixels / Tiles switch, right after the bar's title on a tilemap layer.
+pub fn tile_mode_switch(app: &mut PixmithApp, ui: &mut Ui) {
+    let tab = app.tab();
+    if !tab.doc.layer_is_tilemap(tab.layer) {
+        return;
+    }
+    let options = [
+        (SegGlyph::Text("Pixels"), "Pixels: draw on the tiles (Tab)"),
+        (SegGlyph::Text("Tiles"), "Tiles: place whole tiles from the tileset (Tab)"),
+    ];
+    group(ui, |ui| {
+        if let Some(i) = widgets::bar_segmented(ui, app.tilemap.stamp as usize, &options) {
+            super::set_tile_mode(app, i == 1);
+        }
+    });
+}
+
 /// The Auto Tiles chip, shown with the painting tools' options on a tilemap layer.
 pub fn tile_mode_options(app: &mut PixmithApp, ui: &mut Ui) {
     let tab = app.tab();

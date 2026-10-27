@@ -624,7 +624,7 @@ fn pick(state: &mut CanvasState, tab: &DocTab, primary: &mut u32, p: (i32, i32))
 fn paint(
     state: &CanvasState,
     sel: &SelectionState,
-    tilemap: &crate::ui::tilemap::TilemapState,
+    tilemap: &mut crate::ui::tilemap::TilemapState,
     tab: &DocTab,
     tool: Tool,
     painter: &egui::Painter,
