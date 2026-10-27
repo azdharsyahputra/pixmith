@@ -247,6 +247,7 @@ fn options(app: &mut PixmithApp, ui: &mut egui::Ui) {
         Tool::Picker => group(ui, |ui| widgets::hint_label(ui, &["\u{2325}"], "picks from any tool")),
         Tool::Slice => group(ui, |ui| widgets::hint_label(ui, &[], "Drag to create a slice; double-click to edit")),
     }
+    crate::ui::tilemap::tile_mode_options(app, ui);
 }
 
 /// `stairs`: three steps rising to the right.

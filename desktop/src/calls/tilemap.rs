@@ -241,6 +241,14 @@ impl Doc {
             .then_some(((out[0], out[1]), out[2] as u32))
     }
 
+    /// Boxes `[x, y, w, h]` of the cells showing the same tile as the cell under canvas pixel `(x, y)`.
+    pub fn tile_copies_at(&self, layer: u32, frame: u32, x: i32, y: i32) -> Vec<[i32; 4]> {
+        let mut out = vec![0i32; 4 * 4096];
+        let n = unsafe { tm::pixmith_tile_copies_at(self.raw(), layer, frame, x, y, out.as_mut_ptr(), out.len()) };
+        out.truncate(n.min(4096) * 4);
+        out.as_chunks::<4>().0.to_vec()
+    }
+
     /// The point of a tile's image (from its top-left corner) that sits on the diamond's center.
     pub fn tile_pivot(&self, ts: u32, tile: u32) -> Option<(i32, i32)> {
         let mut out = [0i32; 2];

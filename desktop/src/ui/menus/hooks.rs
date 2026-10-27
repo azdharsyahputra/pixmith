@@ -143,6 +143,15 @@ pub fn toggle_preview(app: &mut PixmithApp) {
     tools::toggle_preview(app);
 }
 
+pub fn preview_docked(app: &PixmithApp) -> bool {
+    tools::is_preview_docked(app)
+}
+
+/// View > Dock Preview
+pub fn toggle_preview_docked(app: &mut PixmithApp) {
+    tools::toggle_preview_docked(app);
+}
+
 pub fn has_reference_image(app: &PixmithApp) -> bool {
     tools::has_reference(app)
 }

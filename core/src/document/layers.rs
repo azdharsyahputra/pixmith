@@ -13,6 +13,16 @@ use std::sync::Arc;
 #[derive(Clone, Debug, Default)]
 pub struct PendingLinks(Option<(usize, usize, Vec<usize>)>);
 
+impl PendingLinks {
+    /// The frames linked to `frame` of `layer` that will take its pending edit.
+    pub(crate) fn siblings(&self, layer: usize, frame: usize) -> &[usize] {
+        match &self.0 {
+            Some((l, f, sibs)) if *l == layer && *f == frame => sibs,
+            _ => &[],
+        }
+    }
+}
+
 /// Pending bookkeeping never affects document equality.
 impl PartialEq for PendingLinks {
     fn eq(&self, _: &Self) -> bool {

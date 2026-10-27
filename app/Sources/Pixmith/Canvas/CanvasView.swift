@@ -41,6 +41,7 @@ final class CanvasNSView: NSView {
         let rect = CGRect(x: 0, y: 0, width: CGFloat(m.width) * m.zoom, height: CGFloat(m.height) * m.zoom)
         m.drawTileGrid(ctx, size: rect.size, scale: window?.backingScaleFactor ?? 1, dirty: dirtyRect)
         m.drawMissingCells(ctx)
+        m.drawTileCopies(ctx)
         m.drawIsoOverlay(ctx, dirty: dirtyRect)
         drawSelectionOutline(ctx, m)
         drawSlices(ctx, m)
@@ -124,11 +125,13 @@ final class CanvasNSView: NSView {
         let p = pixel(e)
         model?.shapeMoved(p)
         model?.isoPointerMoved(p, in: self)
+        model?.tileCopiesPointerMoved(p, in: self)
     }
 
     override func mouseExited(with e: NSEvent) {
         StatusInfo.shared.cursor = nil
         model?.isoPointerMoved(nil, in: self)
+        model?.tileCopiesPointerMoved(nil, in: self)
     }
 
     override func mouseUp(with e: NSEvent) {

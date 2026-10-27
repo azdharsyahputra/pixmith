@@ -8,6 +8,7 @@ struct SidePanel: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
+                DockedPreviewSection(model: model, state: PreviewController.shared.state)
                 ColorSection(model: model)
                 PaletteEditor(model: model)
                 LayerSection(model: model)

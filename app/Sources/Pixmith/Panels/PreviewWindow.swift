@@ -17,42 +17,59 @@ enum PreviewZoom: String, CaseIterable, Identifiable {
     }
 }
 
-/// Playback state of the preview window, independent of the main editor's play/pause and current frame.
+/// State of the preview, floating or docked. While paused it follows the editor's current frame (and so shows every
+/// stroke as it is drawn); only Play runs its own playback, independent of the main editor's play/pause.
 final class PreviewState: ObservableObject {
+    /// The frame shown while playing.
     @Published var frame = 0
-    @Published var isPlaying = true
+    @Published var isPlaying = false
     @Published var zoom: PreviewZoom = PreviewZoom(rawValue: UserDefaults.standard.string(forKey: "previewZoom") ?? "") ?? .x2 {
         didSet { UserDefaults.standard.set(zoom.rawValue, forKey: "previewZoom") }
     }
+    /// Shown as a section of the side panel instead of a floating window.
+    @Published var docked = UserDefaults.standard.bool(forKey: "previewDocked") {
+        didSet { UserDefaults.standard.set(docked, forKey: "previewDocked") }
+    }
     private var reversed = false
-    private var active = false
+    private(set) var active = false
     private var cursor = PlaybackCursor()
     private var task: Task<Void, Never>?
 
-    /// Called when the window is shown / hidden; the loop only runs while the window is visible.
+    /// The frame to draw: the playing frame, or the editor's current one while paused.
+    func shownFrame(_ model: SpriteModel) -> Int {
+        (isPlaying ? frame : model.frame).clamped(to: 0...max(0, model.frameCount - 1))
+    }
+
+    /// Called when the preview is shown / hidden; the loop only runs while it is visible.
     func setActive(_ on: Bool, model: SpriteModel) {
         active = on
         task?.cancel()
         task = nil
         guard on else { return }
-        frame = ViewSettings.shared.previewRange(for: model).clamp(frame)
+        frame = ViewSettings.shared.previewRange(for: model).clamp(isPlaying ? frame : model.frame)
         if isPlaying { startLoop(model) }
     }
 
+    /// Play starts at the editor's frame; pausing goes back to following it.
     func togglePlay(model: SpriteModel) {
         isPlaying.toggle()
         task?.cancel()
         task = nil
-        if isPlaying, active { startLoop(model) }
+        if isPlaying {
+            frame = model.frame
+            if active { startLoop(model) }
+        }
     }
 
+    /// Moves the editor's frame, which the paused preview follows; stepping while playing pauses first.
     func step(_ delta: Int, model: SpriteModel) {
+        let current = shownFrame(model)
         isPlaying = false
         task?.cancel()
         task = nil
-        let r = ViewSettings.shared.previewRange(for: model)
-        let n = r.count
-        frame = r.lowerBound + ((frame.clamped(to: r) - r.lowerBound + delta) % n + n) % n
+        let n = max(model.frameCount, 1)
+        model.stop()
+        model.frame = ((current + delta) % n + n) % n
     }
 
     /// Plays inside the active tag (the one containing the editor's current frame) honoring its direction,
@@ -92,16 +109,37 @@ final class PreviewController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private weak var model: SpriteModel?
 
+    /// Wide enough for the whole control bar.
+    private static let minWidth: CGFloat = 290
+
     var isVisible: Bool { panel?.isVisible ?? false }
 
     func toggle(model: SpriteModel) {
-        isVisible ? panel?.close() : show(model: model)
+        if state.docked {
+            // Docked: View > Preview expands or collapses the side panel section.
+            let key = "panel.preview.collapsed"
+            UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: key), forKey: key)
+        } else {
+            isVisible ? panel?.close() : show(model: model)
+        }
+    }
+
+    /// Moves the preview between the floating window and the side panel section (View > Dock Preview).
+    func setDocked(_ on: Bool, model: SpriteModel) {
+        guard state.docked != on else { return }
+        state.docked = on
+        if on {
+            UserDefaults.standard.set(false, forKey: "panel.preview.collapsed")
+            panel?.close()
+        } else {
+            show(model: model)
+        }
     }
 
     func show(model: SpriteModel) {
         self.model = model
         if panel == nil {
-            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 280, height: 340),
+            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 300, height: 340),
                             styleMask: [.titled, .closable, .resizable, .utilityWindow],
                             backing: .buffered, defer: false)
             p.title = "Preview"
@@ -110,6 +148,7 @@ final class PreviewController: NSObject, NSWindowDelegate {
             p.becomesKeyOnlyIfNeeded = true
             p.isReleasedWhenClosed = false
             p.delegate = self
+            p.contentMinSize = NSSize(width: Self.minWidth, height: 160)
             p.setFrameAutosaveName("PixmithPreview")
             if !p.setFrameUsingName("PixmithPreview") { p.center() }
             panel = p
@@ -135,38 +174,103 @@ final class PreviewController: NSObject, NSWindowDelegate {
             size.width = min(size.width, screen.visibleFrame.width * 0.9)
             size.height = min(size.height, screen.visibleFrame.height * 0.9)
         }
-        size.width = max(size.width, 220)
+        size.width = max(size.width, Self.minWidth)
         size.height = max(size.height, 120 + controls)
         panel.setContentSize(size)
     }
 }
 
+/// The preview's content: the floating window (canvas above a control bar) or, with `docked`, the body of the side
+/// panel section.
 struct PreviewView: View {
     @ObservedObject var model: SpriteModel
     @ObservedObject var state: PreviewState
+    var docked = false
+
+    private var shown: Int { state.shownFrame(model) }
 
     var body: some View {
+        if docked { dockedBody } else { floatingBody }
+    }
+
+    private var floatingBody: some View {
         VStack(spacing: 0) {
-            PreviewCanvas(model: model, frame: state.frame, zoom: state.zoom)
+            PreviewCanvas(model: model, frame: shown, zoom: state.zoom)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             DSDivider()
             HStack(spacing: DS.Space.xxs) {
-                IconButton(state.isPlaying ? "pause.fill" : "play.fill", help: "Play / pause the preview",
-                           selected: state.isPlaying) { state.togglePlay(model: model) }
-                IconButton("backward.frame.fill", help: "Previous frame") { state.step(-1, model: model) }
-                IconButton("forward.frame.fill", help: "Next frame") { state.step(1, model: model) }
-                Text("\(state.frame.clamped(to: 0...max(0, model.frameCount - 1)) + 1) / \(model.frameCount)")
+                transport
+                Text("\(shown + 1) / \(model.frameCount)")
                     .font(DS.Font.numberLarge).foregroundStyle(DSColor.textSecondary)
                     .padding(.leading, DS.Space.xs)
                 Spacer()
-                DSPopup(selection: $state.zoom, options: PreviewZoom.allCases.map { ($0, $0.title) }, width: 76, help: "Preview zoom")
-                    .onChange(of: state.zoom) { z in PreviewController.shared.fitWindow(to: z, model: model) }
+                zoomPopup
+                IconButton("sidebar.right", help: "Dock the preview in the side panel") {
+                    PreviewController.shared.setDocked(true, model: model)
+                }
             }
             .padding(.horizontal, DS.Space.sm)
             .frame(height: 40)
             .background(DSColor.panel)
         }
         .background(DSColor.workspace)
+    }
+
+    private var dockedBody: some View {
+        VStack(spacing: DS.Space.sm - 2) {
+            PreviewCanvas(model: model, frame: shown, zoom: state.zoom)
+                .frame(maxWidth: .infinity)
+                .frame(height: dockedHeight)
+                .background(DSColor.workspace)
+                .clipShape(RoundedRectangle(cornerRadius: DS.Radius.field))
+            HStack(spacing: DS.Space.xxs) {
+                transport
+                Spacer()
+                zoomPopup
+            }
+            .padding(.horizontal, -DS.Space.xs)
+        }
+        .onAppear { state.setActive(true, model: model) }
+        // Moving to the floating window activates it instead.
+        .onDisappear { if state.docked { state.setActive(false, model: model) } }
+    }
+
+    /// Fixed zooms show the sprite at its size, within limits; Fit uses a fixed height.
+    private var dockedHeight: CGFloat {
+        guard let n = state.zoom.scale else { return 176 }
+        return CGFloat(model.height * n).clamped(to: 64...240)
+    }
+
+    private var transport: some View {
+        HStack(spacing: DS.Space.xxs) {
+            IconButton(state.isPlaying ? "pause.fill" : "play.fill", help: "Play / pause the preview. Paused, it shows the editor's frame.",
+                       selected: state.isPlaying) { state.togglePlay(model: model) }
+            IconButton("backward.frame.fill", help: "Previous frame") { state.step(-1, model: model) }
+            IconButton("forward.frame.fill", help: "Next frame") { state.step(1, model: model) }
+        }
+    }
+
+    private var zoomPopup: some View {
+        DSPopup(selection: $state.zoom, options: PreviewZoom.allCases.map { ($0, $0.title) }, width: 76, help: "Preview zoom")
+            .onChange(of: state.zoom) { z in if !docked { PreviewController.shared.fitWindow(to: z, model: model) } }
+    }
+}
+
+/// The preview as a collapsible section near the top of the side panel (View > Dock Preview).
+struct DockedPreviewSection: View {
+    @ObservedObject var model: SpriteModel
+    @ObservedObject var state: PreviewState
+
+    var body: some View {
+        if state.docked {
+            InspectorSection("Preview", id: "preview", subtitle: "frame \(state.shownFrame(model) + 1) / \(model.frameCount)") {
+                IconButton("macwindow", help: "Float the preview in its own window", compact: true) {
+                    PreviewController.shared.setDocked(false, model: model)
+                }
+            } content: {
+                PreviewView(model: model, state: state, docked: true)
+            }
+        }
     }
 }
 

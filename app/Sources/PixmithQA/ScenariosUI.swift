@@ -71,6 +71,7 @@ func registerUI() {
         expectEq(ViewSettings.shared.previewRange(for: m), 0...5, "all frames when tags are not looped")
         m.loopTags = true
         st.step(1, model: m)
+        expect(!st.isPlaying && st.shownFrame(m) == m.frame, "a paused preview follows the editor's frame")
         // The floating panels open without trouble and render.
         PreviewController.shared.show(model: m)
         expect(PreviewController.shared.isVisible || true)

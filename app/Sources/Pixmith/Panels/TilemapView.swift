@@ -4,6 +4,11 @@ import PixmithCore
 import SwiftUI
 
 /// UI state for tilemap editing that is independent of the document.
+/// The boxes of the tile copies outlined under the pointer, to redraw only when they change.
+enum TileCopiesHover {
+    static var boxes: [CGRect] = []
+}
+
 final class TilemapState: ObservableObject {
     static let shared = TilemapState()
 
@@ -24,6 +29,14 @@ final class TilemapState: ObservableObject {
 
     /// While on, canvas clicks place the selected tile instead of drawing pixels.
     @Published var stamp = false
+    /// Auto Tiles (`tiles.auto`): painting a cell whose tile other cells show too gives it its own copy; off, painting
+    /// edits the tile everywhere it is used.
+    @Published var autoTiles = UserDefaults.standard.object(forKey: "tiles.auto") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(autoTiles, forKey: "tiles.auto")
+            pixmith_set_auto_tiles(autoTiles)
+        }
+    }
     @Published var selected = 1
     @Published var flipX = false
     @Published var flipY = false
@@ -32,6 +45,7 @@ final class TilemapState: ObservableObject {
     private var bag = Set<AnyCancellable>()
 
     private init() {
+        pixmith_set_auto_tiles(autoTiles)
         // Choosing any drawing tool leaves stamp mode.
         SpriteModel.shared.$tool.dropFirst().sink { [weak self] _ in self?.stamp = false }.store(in: &bag)
     }
@@ -170,6 +184,43 @@ extension SpriteModel {
             revision &+= 1
         }
         return true
+    }
+
+    /// Boxes (canvas pixels) of the cells showing the same tile as the cell under `p`, when there are several:
+    /// painting that tile with Auto Tiles off changes all of them.
+    func tileCopies(at p: (Int, Int)?) -> [CGRect] {
+        guard let p, isTilemapLayer, !(AutotileState.shared.brush && terrainMode >= 0) else { return [] }
+        var buf = [Int32](repeating: 0, count: 4 * 4096)
+        let n = pixmith_tile_copies_at(doc, UInt32(layer), UInt32(frame), Int32(p.0), Int32(p.1), &buf, buf.count)
+        guard n >= 2 else { return [] }
+        return (0..<min(n, 4096)).map { k in
+            CGRect(x: Int(buf[k * 4]), y: Int(buf[k * 4 + 1]), width: Int(buf[k * 4 + 2]), height: Int(buf[k * 4 + 3]))
+        }
+    }
+
+    /// Redraws the canvas when the pointer moves onto a cell whose copies differ from the outlined ones.
+    func tileCopiesPointerMoved(_ p: (Int, Int)?, in view: NSView) {
+        let boxes = tileCopies(at: p)
+        if boxes == TileCopiesHover.boxes { return }
+        TileCopiesHover.boxes = boxes
+        view.needsDisplay = true
+    }
+
+    /// Outlines the copies of the tile under the pointer (squares, or diamonds on isometric layers).
+    func drawTileCopies(_ ctx: CGContext) {
+        let boxes = tileCopies(at: StatusInfo.shared.cursor.map { ($0.x, $0.y) })
+        TileCopiesHover.boxes = boxes
+        guard !boxes.isEmpty else { return }
+        ctx.saveGState()
+        ctx.setFillColor(DSColor.accentNS.withAlphaComponent(0.14).cgColor)
+        ctx.setStrokeColor(DSColor.accentNS.cgColor)
+        ctx.setLineWidth(1.5)
+        for b in boxes {
+            let r = CGRect(x: b.minX * zoom, y: b.minY * zoom, width: b.width * zoom, height: b.height * zoom)
+            if isIsoLayer { IsoGrid.addDiamond(ctx, r) } else { ctx.addRect(r.insetBy(dx: 0.75, dy: 0.75)) }
+        }
+        ctx.drawPath(using: .fillStroke)
+        ctx.restoreGState()
     }
 
     /// Draws tile boundaries over the canvas while a tilemap layer is selected.

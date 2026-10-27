@@ -62,6 +62,13 @@ uint32_t pixmith_tile_in_cell(const PixmithDoc *doc, uint32_t layer, uint32_t fr
 bool pixmith_tile_stamp_cell(PixmithDoc *doc, uint32_t layer, uint32_t frame, int32_t i, int32_t j, uint32_t tile);
 // The tile you see at a pixel (front-most visible tile): out[3] = i, j, tile value. False when empty.
 bool pixmith_tile_hit_at(const PixmithDoc *doc, uint32_t layer, uint32_t frame, int32_t x, int32_t y, int32_t *out);
+// Tile edit mode for drawing on tilemaps: true (Auto) gives a painted cell its own copy of a tile other cells show
+// too; false (Manual) edits the shared tile everywhere.
+void pixmith_set_auto_tiles(bool on);
+// Boxes (x, y, w, h per cell) of the cells showing the same tile as the cell under (x, y), into out (cap int32s).
+// Returns the cell count (may exceed what fit).
+size_t pixmith_tile_copies_at(const PixmithDoc *doc, uint32_t layer, uint32_t frame, int32_t x, int32_t y, int32_t *out,
+                              size_t cap);
 // Grid math without a document (overlays): cell containing a pixel / pixel of a cell's box corner, into out[2].
 bool pixmith_iso_cell_at(int32_t w, int32_t h, int32_t gx, int32_t gy, int32_t x, int32_t y, int32_t *out);
 bool pixmith_iso_cell_origin(int32_t w, int32_t h, int32_t gx, int32_t gy, int32_t i, int32_t j, int32_t *out);

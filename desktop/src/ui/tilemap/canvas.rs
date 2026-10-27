@@ -256,15 +256,42 @@ pub fn canvas_paint(
     let c = if dark { Colors::dark() } else { Colors::light() };
     let layer = tab.layer;
     if let Some(ts) = tab.doc.tileset_of_layer(layer) {
-        if let Some(grid) = super::active_iso(tab) {
-            iso_overlays(painter, tm, tab, srect, ppp, dark, &grid, cursor);
+        let iso = super::active_iso(tab);
+        if let Some(grid) = &iso {
+            iso_overlays(painter, tm, tab, srect, ppp, dark, grid, cursor);
         } else {
             let (tw, th) = tab.doc.tile_size(ts);
             tile_grid(painter, tab, srect, ppp, dark, (tw, th));
             terrain_overlay(painter, tm, tab, srect, dark, (tw, th));
         }
+        if let Some(at) = cursor
+            && !(tm.brush && tab.doc.terrain_mode(layer) >= 0)
+        {
+            tile_copies(painter, tab, srect, &c, iso.is_some(), at);
+        }
     }
     slices::paint(painter, tm, tab, srect, &c);
+}
+
+/// Outlines the cells that show the same tile as the cell under the cursor when there are several: painting that
+/// tile with Auto Tiles off changes all of them.
+fn tile_copies(painter: &Painter, tab: &DocTab, srect: Rect, c: &Colors, iso: bool, at: (i32, i32)) {
+    let boxes = tab.doc.tile_copies_at(tab.layer, tab.frame, at.0, at.1);
+    if boxes.len() < 2 {
+        return;
+    }
+    let painter = painter.with_clip_rect(srect.intersect(painter.clip_rect()));
+    let (z, fill, stroke) = (tab.zoom, c.accent.gamma_multiply(0.14), Stroke::new(1.5, c.accent));
+    for [x, y, w, h] in boxes {
+        let (x, y, w, h) = (x as f64, y as f64, w as f64, h as f64);
+        if iso {
+            let pts = [(x + w / 2.0, y), (x + w, y + h / 2.0), (x + w / 2.0, y + h), (x, y + h / 2.0)];
+            poly(&painter, srect, z, &pts, fill, stroke);
+        } else {
+            let r = Rect::from_min_size(srect.min + vec2(x as f32, y as f32) * z, vec2(w as f32, h as f32) * z);
+            painter.rect(r, 0.0, fill, stroke, egui::StrokeKind::Inside);
+        }
+    }
 }
 
 /// A diamond (or any convex polygon) in sprite pixel coordinates, filled and outlined.

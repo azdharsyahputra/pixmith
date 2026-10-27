@@ -51,8 +51,16 @@ impl ToolsState {
         {
             self.settings.apply_text(&text);
         }
+        // A docked preview is a section of the inspector, which starts expanded.
+        self.preview.open = self.settings.preview_docked;
         self.saved_settings = self.settings.to_text();
         self.settings_path = path;
+    }
+
+    /// Moves the preview between the floating window and the inspector section, and shows it there.
+    pub fn set_preview_docked(&mut self, docked: bool) {
+        self.settings.preview_docked = docked;
+        self.preview.show();
     }
 
     fn persist(&mut self) {
@@ -120,6 +128,16 @@ pub fn toggle_preview(app: &mut PixmithApp) {
 
 pub fn is_preview_open(app: &PixmithApp) -> bool {
     app.canvas.tools.preview.open
+}
+
+/// View > Dock Preview
+pub fn toggle_preview_docked(app: &mut PixmithApp) {
+    let t = &mut app.canvas.tools;
+    t.set_preview_docked(!t.settings.preview_docked);
+}
+
+pub fn is_preview_docked(app: &PixmithApp) -> bool {
+    app.canvas.tools.settings.preview_docked
 }
 
 /// The pixel grid switch (also the `#` button in the timeline header).

@@ -462,3 +462,25 @@ mod ui {
         assert!(!h.state().tilemap.stamp, "stamp mode ends with the tilemap");
     }
 }
+
+#[test]
+fn auto_tiles_give_a_painted_cell_its_own_copy_and_copies_are_outlined() {
+    let mut doc = Doc::new(32, 32);
+    let layer = doc.new_tilemap_layer(0, 16, 16);
+    let ts = doc.tileset_of_layer(layer).unwrap();
+    let tile = doc.add_tile(ts).unwrap();
+    doc.begin_edit("Stamp Tile");
+    assert!(doc.stamp_tile(layer, 0, 0, 0, tile));
+    assert!(doc.stamp_tile(layer, 0, 16, 16, tile));
+    assert_eq!(doc.tile_copies_at(layer, 0, 20, 20), vec![[0, 0, 16, 16], [16, 16, 16, 16]]);
+
+    let mut app = pixmith_desktop::PixmithApp::default();
+    app.tilemap.set_auto_tiles(true);
+    doc.begin_edit("Pencil");
+    doc.stroke_begin(layer, 0, 20, 20, RED, 1, 0);
+    doc.stroke_end();
+    app.tilemap.set_auto_tiles(false);
+    assert_ne!(doc.tile_value_at(layer, 0, 20, 20), tile, "the painted cell got its own tile");
+    assert_eq!(doc.tile_value_at(layer, 0, 4, 4), tile, "the other cell keeps the original");
+    assert_eq!(doc.tile_copies_at(layer, 0, 20, 20).len(), 1);
+}

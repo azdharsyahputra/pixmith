@@ -17,7 +17,7 @@ mod slices;
 mod tileset;
 
 pub use crate::calls::SliceInfo;
-pub use bar::{bar_options, bar_title};
+pub use bar::{bar_options, bar_title, tile_mode_options};
 pub use canvas::{Pointer, canvas_interact, canvas_paint};
 pub use sheets::show_sheets;
 pub use slices::slices_section;
@@ -268,6 +268,9 @@ pub(super) struct Cache {
 pub struct TilemapState {
     /// While on, canvas clicks place the selected tile instead of drawing pixels.
     pub stamp: bool,
+    /// Auto tiles (`tiles.auto`): painting a cell whose tile other cells show too gives it its own copy; off, painting
+    /// edits the tile everywhere it is used.
+    pub auto_tiles: bool,
     pub selected: u32,
     pub flip_x: bool,
     pub flip_y: bool,
@@ -308,10 +311,33 @@ pub struct TilemapState {
     textures: HashMap<(usize, u32, u32), (u64, egui::TextureHandle)>,
 }
 
+/// Storage key of the Auto Tiles choice.
+const AUTO_TILES_KEY: &str = "tiles.auto";
+
+impl TilemapState {
+    /// Restores the Auto Tiles choice and hands it to the core.
+    pub fn load(&mut self, storage: Option<&dyn eframe::Storage>) {
+        if let Some(v) = storage.and_then(|st| st.get_string(AUTO_TILES_KEY)) {
+            self.auto_tiles = v.trim() != "0";
+        }
+        pixmith_core::document::tilemap::set_auto_tiles(self.auto_tiles);
+    }
+
+    pub fn save(&self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(AUTO_TILES_KEY, if self.auto_tiles { "1" } else { "0" }.to_string());
+    }
+
+    pub fn set_auto_tiles(&mut self, on: bool) {
+        self.auto_tiles = on;
+        pixmith_core::document::tilemap::set_auto_tiles(on);
+    }
+}
+
 impl Default for TilemapState {
     fn default() -> TilemapState {
         TilemapState {
             stamp: false,
+            auto_tiles: true,
             selected: 1,
             flip_x: false,
             flip_y: false,

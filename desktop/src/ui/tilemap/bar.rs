@@ -1,7 +1,7 @@
 //! Context bar options while the terrain brush or the tile stamp is on (`ToolOptionsBar`, `TerrainOptions`).
 
 use super::{TerrainTool, TilemapState};
-use crate::app::PixmithApp;
+use crate::app::{PixmithApp, Tool};
 use crate::theme::{self, Colors, font, metric, radius, space};
 use crate::ui::widgets::{self, SegGlyph};
 use eframe::egui::{self, Sense, Ui, pos2, vec2};
@@ -51,6 +51,26 @@ pub fn bar_options(app: &mut PixmithApp, ui: &mut Ui) -> bool {
         terrain_options(app, ui);
     }
     true
+}
+
+/// The Auto Tiles chip, shown with the painting tools' options on a tilemap layer.
+pub fn tile_mode_options(app: &mut PixmithApp, ui: &mut Ui) {
+    let tab = app.tab();
+    let paints = !matches!(
+        app.tool,
+        Tool::Marquee | Tool::Lasso | Tool::Polygon | Tool::Wand | Tool::Move | Tool::Picker | Tool::Slice
+    );
+    if mode(app) != Mode::Tool || !paints || !tab.doc.layer_is_tilemap(tab.layer) {
+        return;
+    }
+    let on = app.tilemap.auto_tiles;
+    group(ui, |ui| {
+        let help = "On: painting a tile that other cells also show gives this cell its own copy. \
+                    Off: painting edits the tile everywhere it is used (outlined while you hover).";
+        if widgets::bar_text_chip(ui, "Auto Tiles", on, help).clicked() {
+            app.tilemap.set_auto_tiles(!on);
+        }
+    });
 }
 
 /// Items of one option group, separated from the previous one by a hairline.

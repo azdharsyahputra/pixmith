@@ -283,7 +283,9 @@ struct ToolOptionsBar: View {
                     DSGroupDivider()
                     HintLabel(keys: ["⇧"], text: "erase")
                     HintLabel(keys: ["⌥"], text: "pick")
-                case .tool: options
+                case .tool:
+                    options
+                    tileModeOption
                 }
             }
             .fixedSize()
@@ -365,6 +367,16 @@ struct ToolOptionsBar: View {
     }
 
     /// Items of one option group, separated from the previous one by a hairline.
+    /// The Auto Tiles chip, with the painting tools' options on a tilemap layer.
+    @ViewBuilder private var tileModeOption: some View {
+        if model.isTilemapLayer, ![.marquee, .lasso, .polygon, .wand, .move, .picker, .slice].contains(model.tool) {
+            group {
+                DSChip("Auto Tiles", help: "On: painting a tile that other cells also show gives this cell its own copy. "
+                    + "Off: painting edits the tile everywhere it is used (outlined while you hover).", isOn: $tiles.autoTiles)
+            }
+        }
+    }
+
     private func group<C: View>(@ViewBuilder _ content: () -> C) -> some View {
         HStack(spacing: 6) {
             DSGroupDivider()

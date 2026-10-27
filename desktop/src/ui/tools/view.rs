@@ -191,6 +191,8 @@ pub struct ViewSettings {
     pub reference_y: i32,
     pub reference_scale: f64,
     pub preview_zoom: PreviewZoom,
+    /// The preview is a section of the inspector instead of a floating window.
+    pub preview_docked: bool,
 }
 
 impl Default for ViewSettings {
@@ -228,6 +230,7 @@ impl Default for ViewSettings {
             reference_y: 0,
             reference_scale: 100.0,
             preview_zoom: PreviewZoom::X2,
+            preview_docked: false,
         }
     }
 }
@@ -272,6 +275,7 @@ impl ViewSettings {
             format!("customGridColor={}", hex(self.custom_grid_color)),
             format!("customGridOpacity={}", self.custom_grid_opacity),
             format!("previewZoom={zoom}"),
+            format!("previewDocked={}", self.preview_docked),
             String::new(),
         ]
         .join("\n")
@@ -311,6 +315,7 @@ impl ViewSettings {
                     self.preview_zoom =
                         i.and_then(|n| PreviewZoom::ALL.get(n as usize).copied()).unwrap_or(self.preview_zoom)
                 }
+                "previewDocked" => self.preview_docked = b.unwrap_or(self.preview_docked),
                 _ => {}
             }
         }
@@ -811,6 +816,7 @@ mod tests {
         let mut s = ViewSettings { onion_past: 3, tiled: TiledMode::Both, custom_grid: true, ..Default::default() };
         s.grid_color = [1, 2, 3];
         s.preview_zoom = PreviewZoom::Fit;
+        s.preview_docked = true;
         s.custom_grid_x = -4;
         s.custom_grid_type = GridType::Isometric;
         s.iso_grid_w = 104;

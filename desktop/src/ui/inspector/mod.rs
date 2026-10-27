@@ -56,13 +56,27 @@ pub struct InspectorState {
 pub fn show(app: &mut PixmithApp, ui: &mut Ui) {
     let c = Colors::of(ui.ctx());
     let rect = ui.max_rect();
-    let PixmithApp { tabs, active, tool, primary, secondary, inspector: st, error, tilemap, .. } = app;
+    let PixmithApp {
+        tabs,
+        active,
+        tool,
+        primary,
+        secondary,
+        inspector: st,
+        error,
+        tilemap,
+        canvas,
+        timeline,
+        dark,
+        ..
+    } = app;
     let tab = &mut tabs[*active];
     let mut changed = false;
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        crate::ui::tools::preview::docked_section(ui, &mut canvas.tools, tab, timeline.loop_tags, *dark);
         color::section(ui, st, primary, secondary, &tab.doc);
         changed |= palette::section(ui, &mut st.palette, primary, secondary, &mut tab.doc, error);
         changed |= layer_section(ui, st, tab);

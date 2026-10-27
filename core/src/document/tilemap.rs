@@ -160,6 +160,21 @@ impl Tileset {
         self.tiles.len() as u32 - 1
     }
 
+    /// Appends a copy of tile `id` (with its pivot) and returns its index; `None` when the tileset is full.
+    fn copy_tile(&mut self, id: usize) -> Option<u32> {
+        if id >= self.tiles.len() || self.tiles.len() >= MAX_TILES {
+            return None;
+        }
+        self.tiles.push(Arc::new((*self.tiles[id]).clone()));
+        let new = self.tiles.len() as u32 - 1;
+        if let Some(spec) = self.iso.as_mut() {
+            if let Some(&p) = spec.pivots.get(&(id as u32)) {
+                spec.pivots.insert(new, p);
+            }
+        }
+        Some(new)
+    }
+
     /// Whether a tile value refers to a tile that should be drawn.
     fn usable(&self, id: usize) -> bool {
         id < self.tiles.len() && !(id == 0 && self.zero_is_empty())
@@ -493,6 +508,109 @@ fn pixels_outside_grid(
     bb
 }
 
+thread_local! {
+    /// The tile edit mode of this thread (the UI's), see [`set_auto_tiles`].
+    static AUTO_TILES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Sets the tile edit mode for drawing on tilemaps on this thread. Auto (Aseprite's default): painting a cell
+/// whose tile other cells also show gives that cell its own copy of the tile, so the other cells keep theirs.
+/// Manual (the default here, for scripts and tests): painting edits the shared tile, so every cell showing it changes.
+pub fn set_auto_tiles(on: bool) {
+    AUTO_TILES.with(|c| c.set(on));
+}
+
+/// Whether painting on tilemaps on this thread copies shared tiles (see [`set_auto_tiles`]).
+pub fn auto_tiles() -> bool {
+    AUTO_TILES.with(|c| c.get())
+}
+
+/// How many cells show each tile of tileset `ti` outside the cel being edited (`layer` in `frame` and the frames
+/// it is linked to). A cel linked across frames counts once.
+fn tile_uses_elsewhere(s: &Sprite, ti: usize, layer: usize, frame: usize) -> Vec<u32> {
+    let mut uses = vec![0u32; s.tilesets[ti].tiles.len()];
+    let siblings = s.links.siblings(layer, frame);
+    let own = s.cels.get(frame).and_then(|r| r.get(layer)).and_then(|c| c.as_ref()).map(Arc::as_ptr);
+    let mut seen = std::collections::HashSet::new();
+    for (f, row) in s.cels.iter().enumerate() {
+        for (l, cel) in row.iter().enumerate() {
+            if tileset_of(s, l) != Some(ti) || (l == layer && (f == frame || siblings.contains(&f))) {
+                continue;
+            }
+            let Some(c) = cel else { continue };
+            if Some(Arc::as_ptr(c)) == own || !seen.insert(Arc::as_ptr(c)) {
+                continue;
+            }
+            count_uses(&mut uses, c.tiles.as_ref());
+        }
+    }
+    uses
+}
+
+fn count_uses(uses: &mut [u32], grid: Option<&TileGrid>) {
+    for v in grid.map_or(&[][..], |g| &g.tiles) {
+        if let Some(n) = uses.get_mut((v & TILE_ID_MASK) as usize) {
+            *n += 1;
+        }
+    }
+}
+
+/// In auto mode, gives the cell holding tile `id` its own copy when other cells show the tile too. `uses` counts
+/// the cells showing each tile and follows the change. Returns the tile to write to.
+fn own_tile(ts: &mut Tileset, uses: &mut Option<Vec<u32>>, id: usize) -> usize {
+    let Some(u) = uses.as_mut() else { return id };
+    if u.get(id).is_none_or(|&n| n <= 1) {
+        return id;
+    }
+    let Some(new) = ts.copy_tile(id) else { return id };
+    u[id] -= 1;
+    u.push(1);
+    new as usize
+}
+
+/// The cells of a tilemap cel that show the same tile (in any orientation) as the cell under canvas pixel
+/// (`px`, `py`), as canvas rectangles `[x, y, w, h]`: the tile box for square tilemaps, the diamond's box for
+/// isometric ones. Painting that tile in manual mode changes all of them. Empty when the cell is empty.
+pub fn copies_of_tile_at(s: &Sprite, layer: usize, frame: usize, px: i32, py: i32) -> Vec<[i32; 4]> {
+    let Some(ti) = tileset_of(s, layer) else { return Vec::new() };
+    let ts = &s.tilesets[ti];
+    let Some(grid) =
+        s.cels.get(frame).and_then(|r| r.get(layer)).and_then(|c| c.as_ref()).and_then(|c| c.tiles.as_ref())
+    else {
+        return Vec::new();
+    };
+    let clamp = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    if let Some(iso) = ts.iso_grid(layer_offset(s, layer)) {
+        let Some((_, value)) = tile_hit_at(s, layer, frame, px, py) else { return Vec::new() };
+        let id = value & TILE_ID_MASK;
+        let (cw, ch) = (iso.w as i32, iso.h as i32);
+        let mut out = Vec::new();
+        grid.for_each_cell_in_draw_order(|i, j, v| {
+            if v & TILE_ID_MASK == id {
+                let (x, y) = iso.cell_origin((i, j));
+                out.push([clamp(x), clamp(y), cw, ch]);
+            }
+        });
+        return out;
+    }
+    let (tw, th) = (ts.tile_w, ts.tile_h);
+    let (tx, ty) = grid.cell_of(px, py, tw, th);
+    let Some(k) = grid.index(tx, ty) else { return Vec::new() };
+    let id = grid.tiles[k] & TILE_ID_MASK;
+    if !ts.usable(id as usize) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (k, v) in grid.tiles.iter().enumerate() {
+        if v & TILE_ID_MASK == id {
+            let (cx, cy) = ((k % grid.w as usize) as i64, (k / grid.w as usize) as i64);
+            let (x, y) = (grid.x as i64 + cx * tw as i64, grid.y as i64 + cy * th as i64);
+            out.push([clamp(x), clamp(y), tw as i32, th as i32]);
+        }
+    }
+    out
+}
+
 /// Writes pixel edits on a tilemap cel back into the tile images, then re-renders every cel
 /// that shows a modified tile. `bbox` (x0, y0, x1, y1 exclusive) limits the area to inspect.
 /// Empty cells that received pixels get a fresh tile; the cel's grid grows to hold pixels
@@ -504,11 +622,15 @@ pub fn sync_cel(s: &mut Sprite, layer: usize, frame: usize, bbox: Option<(i32, i
         sync_cel_iso(s, layer, frame, ti, bbox);
         return;
     }
+    let mut uses = auto_tiles().then(|| tile_uses_elsewhere(s, ti, layer, frame));
     let Some(Some(arc)) = s.cels.get_mut(frame).and_then(|r| r.get_mut(layer)) else { return };
     let ts = &mut s.tilesets[ti];
     let (tw, th) = (ts.tile_w, ts.tile_h);
     let cel = Arc::make_mut(arc);
     let mut grid = cel.tiles.take().unwrap_or_else(TileGrid::empty);
+    if let Some(u) = uses.as_mut() {
+        count_uses(u, Some(&grid));
+    }
     if cel.pixels.len() != w * h * 4 {
         cel.pixels.resize(w * h * 4, 0);
     }
@@ -560,7 +682,10 @@ pub fn sync_cel(s: &mut Sprite, layer: usize, frame: usize, bbox: Option<(i32, i
                 continue;
             }
             let (id, flags) = if usable {
-                (id, value & FLIP_MASK)
+                let flags = value & FLIP_MASK;
+                let own = own_tile(ts, &mut uses, id);
+                grid.tiles[i] = own as u32 | flags;
+                (own, flags)
             } else {
                 if ts.tiles.len() >= MAX_TILES {
                     continue;
@@ -655,12 +780,16 @@ fn iso_owner(grid: &TileGrid, ts: &Tileset, iso: &Iso, px: i32, py: i32) -> ((i6
 fn sync_cel_iso(s: &mut Sprite, layer: usize, frame: usize, ti: usize, bbox: Option<(i32, i32, i32, i32)>) {
     let (w, h) = (s.width as usize, s.height as usize);
     let off = layer_offset(s, layer);
+    let mut uses = auto_tiles().then(|| tile_uses_elsewhere(s, ti, layer, frame));
     let Some(Some(arc)) = s.cels.get_mut(frame).and_then(|r| r.get_mut(layer)) else { return };
     let ts = &mut s.tilesets[ti];
     let Some(iso) = ts.iso_grid(off) else { return };
     let (tw, th) = (ts.tile_w as usize, ts.tile_h as usize);
     let cel = Arc::make_mut(arc);
     let mut grid = cel.tiles.take().unwrap_or_else(TileGrid::empty);
+    if let Some(u) = uses.as_mut() {
+        count_uses(u, Some(&grid));
+    }
     if cel.pixels.len() != w * h * 4 {
         cel.pixels.resize(w * h * 4, 0);
     }
@@ -703,7 +832,10 @@ fn sync_cel_iso(s: &mut Sprite, layer: usize, frame: usize, ti: usize, bbox: Opt
             changed.push(n);
             continue;
         }
-        let id = (value & TILE_ID_MASK) as usize;
+        let id = own_tile(ts, &mut uses, (value & TILE_ID_MASK) as usize);
+        if let Some(k) = grid.index_cell(cell.0, cell.1) {
+            grid.tiles[k] = id as u32 | (value & FLIP_MASK);
+        }
         let (u, v) = source_pixel(cx, cy, value, tw, th);
         let tile = Arc::make_mut(&mut ts.tiles[id]);
         tile[(v * tw + u) * 4..][..4].copy_from_slice(&c);
@@ -1482,19 +1614,7 @@ pub fn prepare_scale(s: &mut Sprite, nw: u32, nh: u32) {
 
 /// Appends a copy of a tile and returns its index.
 pub fn duplicate_tile(s: &mut Sprite, ts: usize, tile: u32) -> Option<u32> {
-    let t = s.tilesets.get_mut(ts)?;
-    let src = t.tiles.get(tile as usize)?.clone();
-    if t.tiles.len() >= MAX_TILES {
-        return None;
-    }
-    t.tiles.push(Arc::new((*src).clone()));
-    let new = t.tiles.len() as u32 - 1;
-    if let Some(spec) = t.iso.as_mut() {
-        if let Some(&p) = spec.pivots.get(&tile) {
-            spec.pivots.insert(new, p);
-        }
-    }
-    Some(new)
+    s.tilesets.get_mut(ts)?.copy_tile(tile as usize)
 }
 
 /// Deletes a tile. Cells showing it become empty, and later tile indices shift down by one in
@@ -2303,6 +2423,38 @@ pub unsafe extern "C" fn pixmith_tile_hit_at(
     })
 }
 
+/// Sets the tile edit mode for drawing on tilemaps (see [`set_auto_tiles`]); the UI calls it on its own thread.
+#[no_mangle]
+pub extern "C" fn pixmith_set_auto_tiles(on: bool) {
+    crate::ffi::guarded("pixmith_set_auto_tiles", std::ptr::null_mut(), || set_auto_tiles(on))
+}
+
+/// Writes the boxes (x, y, w, h per cell) of the cells showing the same tile as the cell under (x, y) into `out`
+/// (capacity `cap` i32 values; see [`copies_of_tile_at`]). Returns the number of cells (may exceed what fit).
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_tile_copies_at(
+    doc: *const Editor,
+    layer: u32,
+    frame: u32,
+    x: i32,
+    y: i32,
+    out: *mut i32,
+    cap: usize,
+) -> usize {
+    crate::ffi::guarded("pixmith_tile_copies_at", std::ptr::null_mut(), || {
+        let Some(s) = sp(doc) else { return 0 };
+        let boxes = copies_of_tile_at(s, layer as usize, frame as usize, x, y);
+        if !out.is_null() {
+            for (k, b) in boxes.iter().enumerate().take(cap / 4) {
+                for (n, v) in b.iter().enumerate() {
+                    *out.add(k * 4 + n) = *v;
+                }
+            }
+        }
+        boxes.len()
+    })
+}
+
 /// Grid math without a document, for overlays: the cell `(i, j)` of the isometric grid (`w` x `h` cells, cell (0, 0)'s
 /// box at (`gx`, `gy`)) that contains pixel (x, y), into `out[2]`.
 #[no_mangle]
@@ -2459,6 +2611,70 @@ mod tests {
         s.draw_line(l, 0, 4, 4, 4, 4, BLUE, 1);
         let r1 = s.render(1);
         assert_eq!(&r1[(4 * 16 + 4) * 4..][..4], &BLUE);
+    }
+
+    #[test]
+    fn auto_mode_gives_the_painted_cell_its_own_tile() {
+        let (mut s, l) = tilemap_sprite();
+        let id = add_corner_tile(&mut s, 0);
+        assert!(stamp(&mut s, l, 0, 0, 0, id));
+        assert!(stamp(&mut s, l, 0, 8, 8, id | FLIP_X));
+        assert_eq!(copies_of_tile_at(&s, l, 0, 9, 9), vec![[0, 0, 8, 8], [8, 8, 8, 8]]);
+        set_auto_tiles(true);
+        s.draw_line(l, 0, 11, 11, 11, 11, RED, 1);
+        s.draw_line(l, 0, 12, 11, 12, 11, RED, 1);
+        set_auto_tiles(false);
+        // The painted cell got a copy (keeping its flip); the other cell and the original tile are untouched.
+        assert_eq!(px(&s, 11, 11), RED);
+        assert_eq!(px(&s, 3, 3), [0; 4]);
+        assert_eq!(s.tilesets[0].tiles.len(), 3, "one copy for the whole stroke");
+        let g = s.cels[0][l].as_ref().unwrap().tiles.as_ref().unwrap();
+        assert_eq!(g.tiles.iter().filter(|&&v| v == 2 | FLIP_X).count(), 1);
+        assert_eq!(copies_of_tile_at(&s, l, 0, 1, 1), vec![[0, 0, 8, 8]]);
+        // A tile shown once is edited in place.
+        set_auto_tiles(true);
+        s.draw_line(l, 0, 2, 2, 2, 2, BLUE, 1);
+        set_auto_tiles(false);
+        assert_eq!(s.tilesets[0].tiles.len(), 3);
+        assert_eq!(&s.tilesets[0].tiles[id as usize][(2 * 8 + 2) * 4..][..4], &BLUE);
+    }
+
+    #[test]
+    fn auto_mode_counts_linked_frames_once() {
+        let (mut s, l) = tilemap_sprite();
+        let id = add_corner_tile(&mut s, 0);
+        stamp(&mut s, l, 0, 0, 0, id);
+        s.add_frame(0, false);
+        s.add_frame(1, false);
+        assert!(s.link_cels(l, 0, 2));
+        set_auto_tiles(true);
+        s.draw_line(l, 0, 4, 4, 4, 4, BLUE, 1);
+        set_auto_tiles(false);
+        assert_eq!(s.tilesets[0].tiles.len(), 2, "the only cell edits its tile in place");
+        assert_eq!(&s.render(2)[(4 * 16 + 4) * 4..][..4], &BLUE);
+    }
+
+    #[test]
+    fn auto_mode_on_isometric_tilemaps() {
+        let mut s = Sprite::new(64, 48);
+        let l = add_iso_tilemap_layer(&mut s, 0, 16, 8, 16, 8, (0, 0));
+        let id = s.tilesets[0].add_blank();
+        Arc::make_mut(&mut s.tilesets[0].tiles[id as usize])
+            .chunks_exact_mut(4)
+            .for_each(|p| p.copy_from_slice(&GREEN));
+        assert!(stamp_cell(&mut s, l, 0, 1, 0, id));
+        assert!(stamp_cell(&mut s, l, 0, 2, 2, id));
+        let (x, y) = cell_origin(&s, l, 2, 2).unwrap();
+        let (cx, cy) = (x as i32 + 8, y as i32 + 4);
+        assert_eq!(copies_of_tile_at(&s, l, 0, cx, cy).len(), 2);
+        set_auto_tiles(true);
+        s.draw_line(l, 0, cx, cy, cx, cy, RED, 1);
+        set_auto_tiles(false);
+        assert_eq!(px(&s, cx as usize, cy as usize), RED);
+        let (ox, oy) = cell_origin(&s, l, 1, 0).unwrap();
+        assert_eq!(px(&s, ox as usize + 8, oy as usize + 4), GREEN, "the other cell keeps the original tile");
+        assert_eq!(s.tilesets[0].tiles.len(), 3);
+        assert_eq!(copies_of_tile_at(&s, l, 0, cx, cy).len(), 1);
     }
 
     #[test]

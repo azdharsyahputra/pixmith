@@ -247,6 +247,7 @@ extension Comparable {
 struct ViewCommands: Commands {
     @ObservedObject var model: SpriteModel
     @ObservedObject private var settings = ViewSettings.shared
+    @ObservedObject private var preview = PreviewController.shared.state
 
     var body: some Commands {
         CommandGroup(after: .toolbar) {
@@ -256,6 +257,8 @@ struct ViewCommands: Commands {
             Divider()
             Button("Preview") { PreviewController.shared.toggle(model: model) }
                 .keyboardShortcut("p", modifiers: [.command, .option])
+            Toggle("Dock Preview", isOn: Binding(get: { preview.docked },
+                                                 set: { PreviewController.shared.setDocked($0, model: model) }))
             Picker("Tiled Mode", selection: $settings.tiled) {
                 ForEach(TiledMode.allCases) { Text($0.title).tag($0) }
             }

@@ -674,4 +674,41 @@ mod ui {
         assert!(tools::is_preview_open(h.state()));
         assert_eq!(h.state().tab().frame, 0, "the editor stays on its own frame");
     }
+
+    #[test]
+    fn paused_preview_follows_the_editor_frame_and_docks_in_the_inspector() {
+        let mut h = harness();
+        {
+            let tab = h.state_mut().tab_mut();
+            for _ in 0..2 {
+                let last = tab.doc.frame_count() - 1;
+                tab.doc.add_frame(last, false);
+            }
+            tab.changed();
+        }
+        tools::open_preview(h.state_mut());
+        h.run_ok();
+        assert!(!h.state().canvas.tools.preview.playing, "the preview starts paused");
+        for f in [2, 1, 0] {
+            h.state_mut().tab_mut().frame = f;
+            h.run_ok();
+            let app = h.state();
+            assert_eq!(app.canvas.tools.preview.shown_frame(app.tab()), f);
+        }
+        // Docked, it is an inspector section that View > Preview expands and collapses.
+        tools::toggle_preview_docked(h.state_mut());
+        h.run_ok();
+        assert!(tools::is_preview_docked(h.state()) && tools::is_preview_open(h.state()));
+        tools::toggle_preview(h.state_mut());
+        h.run_ok();
+        assert!(!tools::is_preview_open(h.state()));
+        tools::toggle_preview(h.state_mut());
+        h.state_mut().tab_mut().frame = 2;
+        h.run_ok();
+        let app = h.state();
+        assert_eq!(app.canvas.tools.preview.shown_frame(app.tab()), 2);
+        tools::toggle_preview_docked(h.state_mut());
+        h.run_ok();
+        assert!(!tools::is_preview_docked(h.state()) && tools::is_preview_open(h.state()));
+    }
 }

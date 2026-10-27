@@ -202,6 +202,7 @@ impl PixmithApp {
         };
         app.inspector.picker.load(cc.storage);
         app.timeline.load(cc.storage);
+        app.tilemap.load(cc.storage);
         // Pixmith opens on Home; opening a file straight away (command line, drop) goes to the editor instead.
         app.go_home();
         ui::menus::apply_appearance(&mut app, &cc.egui_ctx);
@@ -337,5 +338,6 @@ impl eframe::App for PixmithApp {
         self.projects.save(storage);
         self.inspector.picker.save(storage);
         self.timeline.save(storage);
+        self.tilemap.save(storage);
     }
 }

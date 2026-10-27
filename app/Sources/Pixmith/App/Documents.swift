@@ -245,10 +245,10 @@ extension SpriteModel {
     /// Auxiliary panels read the shared model, so they follow the switch; the preview keeps its own playback state.
     private func followActiveDocument() {
         let preview = PreviewController.shared
-        guard preview.isVisible else { return }
+        guard preview.state.active else { return }
         preview.state.frame = 0
         preview.state.setActive(true, model: self)
-        preview.fitWindow(to: preview.state.zoom, model: self)
+        if preview.isVisible { preview.fitWindow(to: preview.state.zoom, model: self) }
     }
 
     // MARK: Transient interaction state
