@@ -9,12 +9,23 @@ private enum Flag {
     static let mirrorX: UInt32 = 1, mirrorY: UInt32 = 2, pixelPerfect: UInt32 = 4, filled: UInt32 = 8, constrain: UInt32 = 16
 }
 
+/// Twice the position of the symmetry axes in pixels from the left / top edge (even: between two pixels, odd:
+/// through the middle of one); `nil` is the canvas center.
+struct MirrorAxes: Equatable {
+    var x2: Int?
+    var y2: Int?
+}
+
 final class DrawingOptions: ObservableObject {
     @Published var secondary: UInt32 = 0xFFFFFFFF
     @Published var filled = false { didSet { refreshCanvas() } }
     @Published var pixelPerfect = false
     @Published var mirrorX = false { didSet { refreshCanvas() } }
     @Published var mirrorY = false { didSet { refreshCanvas() } }
+    /// The symmetry axes per document, twice their position in pixels; missing means the canvas center.
+    @Published var mirrorAxes: [UUID: MirrorAxes] = [:] { didSet { refreshCanvas() } }
+    /// Where the last pencil or eraser stroke ended, for Shift-click lines: document, layer, frame and pixel.
+    var lastPoint: (doc: UUID?, layer: Int, frame: Int, at: (Int, Int))?
     @Published var contiguous = true
     @Published var sprayDensity = 40.0
     @Published var retouchStrength = 50.0
@@ -60,6 +71,25 @@ final class DrawingOptions: ObservableObject {
 extension SpriteModel {
     var symFlags: UInt32 { (opts.mirrorX ? Flag.mirrorX : 0) | (opts.mirrorY ? Flag.mirrorY : 0) }
 
+    /// The active document's symmetry axes, twice their position in pixels (the canvas center unless moved).
+    var mirrorX2: Int { activeSlotID.flatMap { opts.mirrorAxes[$0]?.x2 } ?? width }
+    var mirrorY2: Int { activeSlotID.flatMap { opts.mirrorAxes[$0]?.y2 } ?? height }
+
+    /// Moves the active document's left/right axis (`x2`) or top/bottom axis (`y2`); `nil` centers it.
+    func moveMirrorAxis(x2: Int?? = .none, y2: Int?? = .none) {
+        guard let id = activeSlotID else { return }
+        var a = opts.mirrorAxes[id] ?? MirrorAxes()
+        if let x2 { a.x2 = x2.map { min(max($0, 0), 2 * width) } }
+        if let y2 { a.y2 = y2.map { min(max($0, 0), 2 * height) } }
+        opts.mirrorAxes[id] = a
+    }
+
+    /// Hands the active document's axes to the core; called when a gesture starts on the canvas.
+    func applyMirrorAxes() {
+        let a = activeSlotID.flatMap { opts.mirrorAxes[$0] }
+        pixmith_set_mirror_axes(Int32(a?.x2 ?? -1), Int32(a?.y2 ?? -1))
+    }
+
 
     // MARK: Mouse
 
@@ -68,6 +98,19 @@ extension SpriteModel {
         let right = e.type == .rightMouseDown
         let c = right ? opts.secondary : color
         let constrain = e.modifierFlags.contains(.shift)
+        // Shift-click with the pencil or eraser draws a straight line from where the last stroke on this cel ended
+        // (⌘ snaps it to pixel-art angles); dragging then continues from the line's end.
+        var p = p
+        var lineFrom: (Int, Int)?
+        if tool == .pencil || tool == .eraser, constrain, let last = opts.lastPoint,
+           last.doc == activeSlotID, last.layer == layer, last.frame == frame {
+            lineFrom = last.at
+            if e.modifierFlags.contains(.command) {
+                var end: [Int32] = [0, 0]
+                pixmith_constrain_line(Int32(last.at.0), Int32(last.at.1), Int32(p.0), Int32(p.1), &end)
+                p = (Int(end[0]), Int(end[1]))
+            }
+        }
         if shapeDown(p, tool: tool, event: e) { return true }
         switch tool {
         case .curve, .contour, .shapePolygon, .text:
@@ -88,8 +131,10 @@ extension SpriteModel {
             applyInk(reverse: right)
             let flags = symFlags | (opts.pixelPerfect ? Flag.pixelPerfect : 0)
             let pen = pressureStyle(e, color: tool == .eraser ? 0 : c)
-            pixmith_stroke_begin(doc, UInt32(layer), UInt32(frame), Int32(p.0), Int32(p.1),
+            let from = lineFrom ?? p
+            pixmith_stroke_begin(doc, UInt32(layer), UInt32(frame), Int32(from.0), Int32(from.1),
                               pen?.color ?? (tool == .eraser ? 0 : c), pen?.size ?? UInt32(brushSize), flags)
+            if lineFrom != nil { pixmith_stroke_to(doc, Int32(p.0), Int32(p.1)) }
         case .blur, .jumble:
             beginStroke(tool == .blur ? "Blur" : "Jumble")
             let pen = pressureStyle(e, color: c)
@@ -160,6 +205,7 @@ extension SpriteModel {
         if shapeUp() { return true }
         guard let d = opts.drag else { return false }
         d.timer?.invalidate()
+        if d.tool == .pencil || d.tool == .eraser { opts.lastPoint = (activeSlotID, layer, frame, d.last) }
         pixmith_stroke_end()
         opts.drag = nil
         changed()
@@ -191,12 +237,14 @@ extension SpriteModel {
         ctx.setLineDash(phase: 0, lengths: [4, 3])
         ctx.setLineWidth(1)
         if opts.mirrorX {
-            ctx.move(to: CGPoint(x: size.width / 2, y: 0))
-            ctx.addLine(to: CGPoint(x: size.width / 2, y: size.height))
+            let x = CGFloat(mirrorX2) / 2 * zoom
+            ctx.move(to: CGPoint(x: x, y: 0))
+            ctx.addLine(to: CGPoint(x: x, y: size.height))
         }
         if opts.mirrorY {
-            ctx.move(to: CGPoint(x: 0, y: size.height / 2))
-            ctx.addLine(to: CGPoint(x: size.width, y: size.height / 2))
+            let y = CGFloat(mirrorY2) / 2 * zoom
+            ctx.move(to: CGPoint(x: 0, y: y))
+            ctx.addLine(to: CGPoint(x: size.width, y: y))
         }
         ctx.strokePath()
         ctx.restoreGState()
@@ -290,9 +338,24 @@ struct ToolOptionsBar: View {
             }
             .fixedSize()
             Spacer(minLength: DS.Space.sm)
-            DSChip(symbol: "flip.horizontal", help: "Mirror left/right across the canvas center", isOn: $opts.mirrorX)
+            DSChip(symbol: "flip.horizontal", help: "Mirror left/right across a vertical axis", isOn: $opts.mirrorX)
+            if opts.mirrorX {
+                DSNumberField("X", value: Binding(get: { Double(model.mirrorX2) / 2 },
+                                                  set: { model.moveMirrorAxis(x2: Int(($0 * 2).rounded())) }),
+                              range: 0...Double(model.width), step: 0.5, digits: 1, width: 64,
+                              help: "Mirror axis, in pixels from the left edge (.5 runs through a pixel)")
+            }
             DSChip(symbol: "arrow.up.and.down.righttriangle.up.righttriangle.down",
-                   help: "Mirror top/bottom across the canvas center", isOn: $opts.mirrorY)
+                   help: "Mirror top/bottom across a horizontal axis", isOn: $opts.mirrorY)
+            if opts.mirrorY {
+                DSNumberField("Y", value: Binding(get: { Double(model.mirrorY2) / 2 },
+                                                  set: { model.moveMirrorAxis(y2: Int(($0 * 2).rounded())) }),
+                              range: 0...Double(model.height), step: 0.5, digits: 1, width: 64,
+                              help: "Mirror axis, in pixels from the top edge (.5 runs through a pixel)")
+            }
+            if (opts.mirrorX && model.mirrorX2 != model.width) || (opts.mirrorY && model.mirrorY2 != model.height) {
+                IconButton("scope", help: "Center the mirror axes") { model.moveMirrorAxis(x2: .some(nil), y2: .some(nil)) }
+            }
         }
     }
 

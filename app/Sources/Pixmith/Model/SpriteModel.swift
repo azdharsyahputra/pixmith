@@ -415,7 +415,17 @@ final class SpriteModel: ObservableObject {
             if Shortcuts.shared.recording != nil { return Shortcuts.shared.handle(e, model: self) ? nil : e }
             guard MainWindow.isKey else { return e }
             if handleShapeKey(e) { return nil }
+            // Space is the hand while held (see CanvasPan); its shortcut runs on release.
+            if e.keyCode == 49 {
+                CanvasPan.spaceDown(e)
+                return nil
+            }
             return Shortcuts.shared.handle(e, model: self) ? nil : e
+        }
+        NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] e in
+            guard let self, e.keyCode == 49, CanvasPan.space != nil else { return e }
+            if let down = CanvasPan.spaceUp(), MainWindow.isKey { _ = Shortcuts.shared.handle(down, model: self) }
+            return nil
         }
     }
 }

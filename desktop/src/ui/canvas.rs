@@ -109,6 +109,9 @@ struct ToolGesture {
     constrain: bool,
     /// The document the gesture started in; a tab switch ends it.
     doc: usize,
+    /// The pixel under the pointer when a snapped Shift-click line ended elsewhere: the drag resumes once the pointer
+    /// leaves it.
+    pointer: Option<(i32, i32)>,
 }
 
 /// State of this region that outlives a frame.
@@ -137,9 +140,24 @@ pub struct CanvasState {
     pub grid: Option<Color32>,
     /// Preferred zoom for a newly shown sprite (`Prefs.defaultZoom`); it shrinks to fit.
     pub default_zoom: Option<u32>,
+    /// Where the last pencil or eraser stroke ended, for Shift-click lines: document, layer, frame and pixel.
+    pub last_point: Option<(usize, u32, u32, (i32, i32))>,
 }
 
 impl CanvasState {
+    /// The canvas is panning with the pointer.
+    pub fn panning(&self) -> bool {
+        matches!(self.gesture, Some(Gesture::Pan(_)))
+    }
+
+    /// The tool of the pointer gesture in progress, if a tool owns it.
+    pub fn gesture_tool(&self) -> Option<Tool> {
+        match self.gesture {
+            Some(Gesture::Tool(g)) => Some(g.tool),
+            _ => None,
+        }
+    }
+
     /// Keeps `tab`'s current zoom and pan instead of fitting it on first display.
     pub fn keep_view(&mut self, tab: &DocTab) {
         self.fitted.insert(tab.doc.raw() as usize, (tab.doc.width(), tab.doc.height()));
@@ -248,12 +266,14 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
     let srect = sprite_rect(rect, tab, ppp);
     // Selection tools and the free transform own the pointer; the drawing tools get the rest.
     // "Edit on canvas" of the Tween panel takes the mouse before the tools do.
+    let mut owned = true;
     if crate::ui::gamedev::tween_canvas::input(&mut gamedev.tween, tab, &response, srect, &ctx) {
         // The tween overlay consumed the pointer this frame.
     } else if selection::input(sel, tab, *tool, state.gesture.is_none(), &response, srect, &ctx) {
         let pos = ctx.input(|i| i.pointer.latest_pos());
         state.cursor = pos.filter(|_| response.hovered() || sel.dragging()).map(|p| pixel_at(srect, tab.zoom, p));
     } else {
+        owned = false;
         interact(state, tilemap, tab, *tool, primary, *secondary, *brush_size, &response, srect, &ctx);
     }
     selection::update_outline(sel, tab);
@@ -265,6 +285,22 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
     tools.diff.prepare(&ctx, tab, &tools.settings, timeline.frame_diff, busy);
     paint(state, sel, tilemap, tab, *tool, &ui.painter_at(rect), &c, *dark, rect, srect, ppp, timeline.show_grid);
     crate::ui::gamedev::tween_canvas::paint(&gamedev.tween, tab, &ui.painter_at(rect), &c, srect);
+    crate::ui::brush_preview::paint(
+        &ui.painter_at(rect),
+        &crate::ui::brush_preview::Args {
+            state,
+            tilemap,
+            tab,
+            tool: *tool,
+            color: *primary,
+            size: *brush_size,
+            srect,
+            ppp,
+            hovered: response.hovered(),
+            owned: owned || gamedev.tween.edit_on_canvas,
+            pointer: ctx.input(|i| i.pointer.latest_pos()),
+        },
+    );
     if response.hovered() {
         ctx.set_cursor_icon(if ctx.input(|i| i.key_down(Key::Space)) {
             egui::CursorIcon::Grab
@@ -308,6 +344,7 @@ fn navigate(state: &mut CanvasState, tab: &mut DocTab, response: &egui::Response
             state.gesture = Some(Gesture::Pan(PointerButton::Middle));
         } else if primary && space {
             state.gesture = Some(Gesture::Pan(PointerButton::Primary));
+            crate::ui::menus::shortcuts::space_panned(ctx);
         }
     }
     // Tiled axes reach as far as the copies drawn on each side (`CanvasLayout.margins`).
@@ -341,6 +378,7 @@ fn interact(
         )
     });
     let doc_id = tab.doc.raw() as usize;
+    pixmith_core::paint::shapes::set_mirror_axes(tab.mirror_axes.0, tab.mirror_axes.1);
     if let Some(Gesture::Tool(g)) = state.gesture
         && g.doc != doc_id
     {
@@ -387,7 +425,10 @@ fn interact(
         if !down {
             finish(state, tab, &g);
             state.gesture = None;
-        } else if let Some(p) = p {
+        } else if let Some(p) = p
+            && g.pointer != Some(p)
+        {
+            g.pointer = None;
             let constrain = mods.shift;
             if p != g.last || constrain != g.constrain {
                 drag(state, tab, &g, primary, brush, p, constrain);
@@ -443,7 +484,7 @@ fn begin(
     let tool = if mods.alt && !is_selection(tool) { Tool::Picker } else { tool };
     let (layer, frame) = (tab.layer, tab.frame);
     let sym = state.opts.sym_flags();
-    let mut gesture = ToolGesture { tool, button, start: p, last: p, color, constrain: mods.shift, doc };
+    let mut gesture = ToolGesture { tool, button, start: p, last: p, color, constrain: mods.shift, doc, pointer: None };
     match tool {
         Tool::Picker => pick(state, tab, primary, p),
         Tool::Fill => {
@@ -456,13 +497,27 @@ fn begin(
             return None;
         }
         Tool::Pencil | Tool::Eraser => {
+            // Shift-click draws a straight line from where the last stroke on this cel ended (Ctrl/Cmd snaps it to
+            // pixel-art angles); the drag then continues from the line's end.
+            let from = state.last_point.filter(|l| mods.shift && (l.0, l.1, l.2) == (doc, layer, frame)).map(|l| l.3);
+            let pointer = p;
+            let p = match from {
+                Some(a) if mods.command => pixmith_core::paint::shapes::constrain_line(a, p),
+                _ => p,
+            };
+            (gesture.start, gesture.last) = (p, p);
+            gesture.pointer = (p != pointer).then_some(pointer);
             begin_edit(tab, if tool == Tool::Eraser { "Erase" } else { "Draw" });
             apply_ink(state, tab, *primary, secondary, right);
             let flags = sym | if state.opts.pixel_perfect { flag::PIXEL_PERFECT } else { 0 };
             let c = if tool == Tool::Eraser { 0 } else { color };
             gesture.color = c;
             let pen = draw::pressure_style(state, c, brush);
-            tab.doc.stroke_begin(layer, frame, p.0, p.1, pen.map_or(c, |v| v.0), pen.map_or(brush, |v| v.1), flags);
+            let a = from.unwrap_or(p);
+            tab.doc.stroke_begin(layer, frame, a.0, a.1, pen.map_or(c, |v| v.0), pen.map_or(brush, |v| v.1), flags);
+            if from.is_some() {
+                tab.doc.stroke_to(p.0, p.1);
+            }
             mutated(tab);
         }
         Tool::Blur | Tool::Jumble => retouch::down(state, tab, tool, brush, p),
@@ -535,6 +590,9 @@ fn drag(
 }
 
 fn finish(state: &mut CanvasState, tab: &mut DocTab, g: &ToolGesture) {
+    if matches!(g.tool, Tool::Pencil | Tool::Eraser) {
+        state.last_point = Some((g.doc, tab.layer, tab.frame, g.last));
+    }
     draw::up(state, tab, g.tool);
     if retouch::is_retouch(g.tool) {
         retouch::up(tab);
@@ -600,12 +658,12 @@ fn paint(
     selection::paint(sel, tab, tool, painter, srect);
     crate::ui::tilemap::canvas_paint(painter, tilemap, tab, srect, ppp, dark, state.cursor);
 
-    // Mirror guides: pink dashes through the canvas center.
+    // Mirror guides: pink dashes along the symmetry axes.
     if state.opts.mirror_x || state.opts.mirror_y {
         let pink = if dark { Color32::from_rgb(0xFF, 0x37, 0x5F) } else { Color32::from_rgb(0xFF, 0x2D, 0x55) }
             .gamma_multiply(0.8);
         let stroke = egui::Stroke::new(1.0, pink);
-        let center = srect.center();
+        let center = srect.min + Vec2::new(tab.mirror_x2() as f32, tab.mirror_y2() as f32) / 2.0 * tab.zoom;
         if state.opts.mirror_x {
             painter.extend(egui::Shape::dashed_line(
                 &[Pos2::new(center.x, srect.top()), Pos2::new(center.x, srect.bottom())],

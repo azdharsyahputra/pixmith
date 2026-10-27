@@ -1,7 +1,8 @@
 //! Shape, stroke and spray tools with symmetry, plus their C ABI.
 //!
 //! Option flags shared by the FFI calls: bit 0 mirror left/right, bit 1 mirror top/bottom,
-//! bit 2 pixel-perfect, bit 3 filled, bit 4 constrain (45° lines, squares and circles).
+//! bit 2 pixel-perfect, bit 3 filled, bit 4 constrain (lines at pixel-art angles, squares and circles).
+//! Mirroring is across the canvas center unless [`set_mirror_axes`] moved the axes.
 
 use crate::document::{Cel, Editor, Sprite};
 use crate::paint::ink::{self, Brush, Ink, Settings};
@@ -49,18 +50,46 @@ pub fn line_points(a: Pt, b: Pt) -> Vec<Pt> {
     }
 }
 
-/// Snaps the end of a line to the nearest multiple of 45°.
+/// Snaps the end of a line to the nearest pixel-art angle: horizontal, 2:1, 45°, 1:2 or vertical. A 2:1 line ends one
+/// pixel past its last step so that every step is two pixels long (the isometric line).
 pub fn constrain_line(a: Pt, b: Pt) -> Pt {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let (ax, ay) = (dx.abs(), dy.abs());
-    if ax > 2 * ay {
+    let (sx, sy) = (if dx < 0 { -1 } else { 1 }, if dy < 0 { -1 } else { 1 });
+    // Steps along a 2:1 direction: the end (2k + 1, k) projects to k + 0.4 on it.
+    let steps = |long: i32, short: i32| ((2 * long + short) as f64 / 5.0 - 0.4).round().max(0.0) as i32;
+    let angle = (ay as f64).atan2(ax as f64).to_degrees();
+    if angle < 13.28 {
         (b.0, a.1)
-    } else if ay > 2 * ax {
-        (a.0, b.1)
-    } else {
+    } else if angle < 35.78 {
+        let k = steps(ax, ay);
+        (a.0 + (2 * k + 1) * sx, a.1 + k * sy)
+    } else if angle < 54.22 {
         let m = ax.max(ay);
-        (a.0 + m * if dx < 0 { -1 } else { 1 }, a.1 + m * if dy < 0 { -1 } else { 1 })
+        (a.0 + m * sx, a.1 + m * sy)
+    } else if angle < 76.72 {
+        let k = steps(ay, ax);
+        (a.0 + k * sx, a.1 + (2 * k + 1) * sy)
+    } else {
+        (a.0, b.1)
     }
+}
+
+thread_local! {
+    /// Mirror axes of this thread (the UI's) in doubled pixel coordinates, see [`set_mirror_axes`].
+    static MIRROR_AXES: std::cell::Cell<(Option<i32>, Option<i32>)> = const { std::cell::Cell::new((None, None)) };
+}
+
+/// Moves the symmetry axes used for drawing on this thread. `x2` / `y2` are twice the axis position in pixels from the
+/// left / top edge: even values lie between two pixels, odd ones through the middle of a pixel. `None` is the center.
+pub fn set_mirror_axes(x2: Option<i32>, y2: Option<i32>) {
+    MIRROR_AXES.with(|c| c.set((x2, y2)));
+}
+
+/// The doubled axis positions for a canvas of `dims`: pixel `x` mirrors to `ax - 1 - x`, `y` to `ay - 1 - y`.
+pub(crate) fn mirror_axes(dims: (i32, i32)) -> (i32, i32) {
+    let (x, y) = MIRROR_AXES.with(|c| c.get());
+    (x.unwrap_or(dims.0), y.unwrap_or(dims.1))
 }
 
 /// Makes the box from `a` to `b` square, growing along the longer side.
@@ -136,7 +165,7 @@ fn is_corner(a: Pt, b: Pt, c: Pt) -> bool {
         && (a.1 - c.1).abs() == 1
 }
 
-/// Writes brush stamps into a cel through the current ink, mirrored across the canvas center.
+/// Writes brush stamps into a cel through the current ink, mirrored across the symmetry axes.
 pub(crate) struct Painter<'a> {
     px: &'a mut [u8],
     w: i32,
@@ -144,6 +173,8 @@ pub(crate) struct Painter<'a> {
     color: [u8; 4],
     size: i32,
     sym: u32,
+    /// Doubled mirror axes (see [`mirror_axes`]).
+    axes: (i32, i32),
     settings: Rc<Settings>,
     /// Pixels already painted in this gesture; used by inks that must not stack on themselves.
     touched: Option<&'a mut [bool]>,
@@ -164,6 +195,7 @@ impl<'a> Painter<'a> {
             color,
             size: size.clamp(1, 64) as i32,
             sym,
+            axes: mirror_axes(s),
             settings: ink::settings(),
             touched: None,
             use_brush: true,
@@ -217,7 +249,8 @@ impl<'a> Painter<'a> {
 
     /// Fills an inclusive rectangle plus its mirror images.
     pub(crate) fn rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
-        let (mx0, mx1, my0, my1) = (self.w - 1 - x1, self.w - 1 - x0, self.h - 1 - y1, self.h - 1 - y0);
+        let (ax, ay) = self.axes;
+        let (mx0, mx1, my0, my1) = (ax - 1 - x1, ax - 1 - x0, ay - 1 - y1, ay - 1 - y0);
         self.raw(x0, y0, x1, y1);
         if self.sym & SYM_X != 0 {
             self.raw(mx0, y0, mx1, y1);
@@ -252,7 +285,7 @@ impl<'a> Painter<'a> {
 
     /// Paints one pixel plus its mirror images in the same order as `rect`.
     fn put(&mut self, x: i32, y: i32, color: [u8; 4]) {
-        let (mx, my) = (self.w - 1 - x, self.h - 1 - y);
+        let (mx, my) = (self.axes.0 - 1 - x, self.axes.1 - 1 - y);
         let one = |s: &mut Self, x: i32, y: i32| {
             if x < 0 || y < 0 || x >= s.w || y >= s.h {
                 return;
@@ -319,15 +352,16 @@ impl<'a> Painter<'a> {
 }
 
 pub(crate) fn mirrors(p: Pt, s: (i32, i32), sym: u32) -> Vec<Pt> {
+    let (ax, ay) = mirror_axes(s);
     let mut out = vec![p];
     if sym & SYM_X != 0 {
-        out.push((s.0 - 1 - p.0, p.1));
+        out.push((ax - 1 - p.0, p.1));
     }
     if sym & SYM_Y != 0 {
-        out.push((p.0, s.1 - 1 - p.1));
+        out.push((p.0, ay - 1 - p.1));
     }
     if sym & SYM_X != 0 && sym & SYM_Y != 0 {
-        out.push((s.0 - 1 - p.0, s.1 - 1 - p.1));
+        out.push((ax - 1 - p.0, ay - 1 - p.1));
     }
     out
 }
@@ -608,6 +642,29 @@ pub unsafe extern "C" fn pixmith_shape(
     })
 }
 
+/// The end of a line from `(x0, y0)` toward `(x1, y1)` snapped to a pixel-art angle (see [`constrain_line`]), into
+/// `out[2]`.
+#[no_mangle]
+pub unsafe extern "C" fn pixmith_constrain_line(x0: i32, y0: i32, x1: i32, y1: i32, out: *mut i32) {
+    crate::ffi::guarded("pixmith_constrain_line", std::ptr::null_mut(), || {
+        if out.is_null() {
+            return;
+        }
+        let a = (crate::ffi::clampc(x0), crate::ffi::clampc(y0));
+        let (x, y) = constrain_line(a, (crate::ffi::clampc(x1), crate::ffi::clampc(y1)));
+        *out = x;
+        *out.add(1) = y;
+    })
+}
+
+/// Moves the symmetry axes (see [`set_mirror_axes`]); a negative value puts that axis back on the canvas center.
+#[no_mangle]
+pub extern "C" fn pixmith_set_mirror_axes(x2: i32, y2: i32) {
+    crate::ffi::guarded("pixmith_set_mirror_axes", std::ptr::null_mut(), || {
+        set_mirror_axes((x2 >= 0).then_some(x2), (y2 >= 0).then_some(y2))
+    })
+}
+
 /// Starts a freehand stroke at `(x, y)`; call `pixmith_begin_stroke` first for undo.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
@@ -770,6 +827,11 @@ mod tests {
         assert_eq!(constrain_line((0, 0), (10, 2)), (10, 0));
         assert_eq!(constrain_line((0, 0), (2, -10)), (0, -10));
         assert_eq!(constrain_line((5, 5), (1, 2)), (1, 1));
+        // 2:1 and 1:2, ending so that every step is two pixels long.
+        assert_eq!(constrain_line((0, 0), (10, 5)), (11, 5));
+        assert_eq!(constrain_line((0, 0), (-10, 4)), (-9, 4));
+        assert_eq!(constrain_line((0, 0), (5, -11)), (5, -11));
+        assert_eq!(constrain_line((3, 3), (3 + 2, 3 + 1)), (3 + 3, 3 + 1));
         assert_eq!(constrain_square((0, 0), (3, -7)), (7, -7));
     }
 
@@ -832,6 +894,22 @@ mod tests {
         s.draw_shape(0, 0, Shape::Ellipse, (2, 2), (8, 4), RED, 1, FILLED | CONSTRAIN);
         let px = lit(&s);
         assert_eq!(px.iter().map(|p| p.0).max(), px.iter().map(|p| p.1).max());
+    }
+
+    #[test]
+    fn moved_mirror_axes() {
+        let mut s = Sprite::new(10, 6);
+        // Between pixels 2 and 3 (x2 = 6): pixel 1 mirrors to 4.
+        set_mirror_axes(Some(6), None);
+        s.draw_shape(0, 0, Shape::Line, (1, 1), (1, 1), RED, 1, SYM_X);
+        // Through the middle of pixel 7 (x2 = 15): pixel 7 is its own mirror, 9 mirrors to 5.
+        set_mirror_axes(Some(15), Some(5));
+        s.draw_shape(0, 0, Shape::Line, (9, 0), (9, 0), RED, 1, SYM_X | SYM_Y);
+        set_mirror_axes(None, None);
+        let red = |x: usize, y: usize| s.cels[0][0].as_ref().unwrap().pixels[(y * 10 + x) * 4..][..4] == RED;
+        assert!(red(1, 1) && red(4, 1));
+        assert!(red(9, 0) && red(5, 0) && red(9, 4) && red(5, 4));
+        assert_eq!(s.cels[0][0].as_ref().unwrap().pixels.chunks(4).filter(|p| p[3] != 0).count(), 6);
     }
 
     #[test]

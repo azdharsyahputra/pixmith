@@ -202,4 +202,82 @@ mod ui {
         h.run();
         assert_eq!(h.state().brush_size, 2);
     }
+
+    /// Clicks sprite pixel `(x, y)` with `modifiers` held.
+    fn click_with(h: &mut Harness<PixmithApp>, (x, y): (i32, i32), modifiers: egui::Modifiers) {
+        let pos = at(h, x, y);
+        h.event(egui::Event::ModifiersChanged(modifiers));
+        hover(h, pos);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers });
+            h.run();
+        }
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run();
+    }
+
+    #[test]
+    fn shift_click_draws_a_line_from_the_last_stroke_and_cmd_snaps_it_to_2_to_1() {
+        let mut h = harness();
+        click_with(&mut h, (2, 10), egui::Modifiers::NONE);
+        click_with(&mut h, (12, 10), egui::Modifiers::SHIFT);
+        for x in 2..=12 {
+            assert_eq!(at_pixel(&h, x, 10), RED, "pixel {x},10");
+        }
+        // From (12, 10) toward (21, 15): snapped to the 2:1 line ending at (21, 14), in steps of two pixels.
+        click_with(&mut h, (21, 15), egui::Modifiers::SHIFT | egui::Modifiers::COMMAND);
+        for (x, y) in [(13, 10), (14, 11), (15, 11), (16, 12), (17, 12), (20, 14), (21, 14)] {
+            assert_eq!(at_pixel(&h, x, y), RED, "pixel {x},{y}");
+        }
+        assert_eq!(at_pixel(&h, 21, 15) & 0xFF, 0);
+    }
+
+    #[test]
+    fn mirroring_uses_the_moved_axis() {
+        let mut h = harness();
+        h.state_mut().canvas.opts.mirror_x = true;
+        h.state_mut().tab_mut().mirror_axes = (Some(10), None);
+        click_with(&mut h, (1, 1), egui::Modifiers::NONE);
+        assert_eq!(at_pixel(&h, 1, 1), RED);
+        assert_eq!(at_pixel(&h, 8, 1), RED, "mirrored across x = 5");
+        assert_eq!(at_pixel(&h, 30, 1) & 0xFF, 0, "not across the canvas center");
+    }
+
+    #[test]
+    fn space_tapped_plays_and_space_held_pans_without_playing() {
+        let mut h = harness();
+        let key = |h: &mut Harness<PixmithApp>, pressed: bool| {
+            h.event(egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            // Playback keeps repainting, so step a few frames instead of running until idle.
+            h.run_steps(4);
+        };
+        h.state_mut().tab_mut().doc.add_frame(0, false);
+        key(&mut h, true);
+        key(&mut h, false);
+        assert!(h.state().tab().playing, "a tap plays");
+        key(&mut h, true);
+        key(&mut h, false);
+        assert!(!h.state().tab().playing, "a second tap pauses");
+
+        // Larger than the view, so the pan is not held centered.
+        h.state_mut().tab_mut().zoom = 48.0;
+        h.run_steps(4);
+        let pan = h.state().tab().pan;
+        let a = at(&h, 16, 16);
+        key(&mut h, true);
+        hover(&mut h, a);
+        press(&mut h, a, egui::PointerButton::Primary, true);
+        hover(&mut h, a + egui::vec2(40.0, 25.0));
+        press(&mut h, a + egui::vec2(40.0, 25.0), egui::PointerButton::Primary, false);
+        key(&mut h, false);
+        assert_ne!(h.state().tab().pan, pan, "Space-drag pans");
+        assert!(!h.state().tab().playing, "releasing Space after a pan does not play");
+        assert_eq!(at_pixel(&h, 16, 16) & 0xFF, 0, "and does not draw");
+    }
 }

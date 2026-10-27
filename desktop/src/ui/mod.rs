@@ -1,5 +1,6 @@
 //! One module per region of the window (see `app.rs` for the layout) plus shared controls.
 
+pub mod brush_preview;
 pub mod canvas;
 pub mod context_bar;
 pub mod dialogs;

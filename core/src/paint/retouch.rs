@@ -140,6 +140,7 @@ impl Retouch {
     /// The brush pixels at `p` plus their mirror images, inside the canvas, in scan order without duplicates.
     fn cells(&self, dims: (i32, i32), p: Pt) -> Vec<usize> {
         let (w, h) = dims;
+        let (ax, ay) = crate::paint::shapes::mirror_axes(dims);
         let mut out = Vec::new();
         for (x, y) in brush_cells(self.size, p) {
             let mut add = |x: i32, y: i32| {
@@ -149,13 +150,13 @@ impl Retouch {
             };
             add(x, y);
             if self.sym & SYM_X != 0 {
-                add(w - 1 - x, y);
+                add(ax - 1 - x, y);
             }
             if self.sym & SYM_Y != 0 {
-                add(x, h - 1 - y);
+                add(x, ay - 1 - y);
             }
             if self.sym == SYM_X | SYM_Y {
-                add(w - 1 - x, h - 1 - y);
+                add(ax - 1 - x, ay - 1 - y);
             }
         }
         out.sort_unstable();

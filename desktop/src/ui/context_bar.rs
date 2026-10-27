@@ -28,12 +28,27 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = space::XS;
             let o = &mut app.canvas.opts;
-            if widgets::bar_chip(ui, icon::FLIP_VERTICAL, o.mirror_y, "Mirror top/bottom across the canvas center")
+            let tab = &mut app.tabs[app.active];
+            // Right to left: the reset, then each axis field right of its toggle.
+            if ((o.mirror_x && tab.mirror_axes.0.is_some()) || (o.mirror_y && tab.mirror_axes.1.is_some()))
+                && widgets::icon_button(ui, icon::CROSSHAIR_SIMPLE, 16.0)
+                    .on_hover_text("Center the mirror axes")
+                    .clicked()
+            {
+                tab.mirror_axes = (None, None);
+            }
+            if o.mirror_y {
+                axis_field(ui, "Y", tab, false);
+            }
+            if widgets::bar_chip(ui, icon::FLIP_VERTICAL, o.mirror_y, "Mirror top/bottom across a horizontal axis")
                 .clicked()
             {
                 o.mirror_y = !o.mirror_y;
             }
-            if widgets::bar_chip(ui, icon::FLIP_HORIZONTAL, o.mirror_x, "Mirror left/right across the canvas center")
+            if o.mirror_x {
+                axis_field(ui, "X", tab, true);
+            }
+            if widgets::bar_chip(ui, icon::FLIP_HORIZONTAL, o.mirror_x, "Mirror left/right across a vertical axis")
                 .clicked()
             {
                 o.mirror_x = !o.mirror_x;
@@ -122,6 +137,29 @@ fn pressure(ui: &mut egui::Ui, o: &mut DrawOptions) {
     .clicked()
     {
         o.pressure_alpha = !o.pressure_alpha;
+    }
+}
+
+/// The position of a mirror axis in pixels from the left / top edge, in half-pixel steps (`DSNumberField`).
+fn axis_field(ui: &mut egui::Ui, label: &str, tab: &mut crate::app::DocTab, x: bool) {
+    let (size, current) = if x { (tab.doc.width(), tab.mirror_x2()) } else { (tab.doc.height(), tab.mirror_y2()) };
+    let mut v = current as f64 / 2.0;
+    let help = if x {
+        "Mirror axis, in pixels from the left edge (.5 runs through a pixel)"
+    } else {
+        "Mirror axis, in pixels from the top edge (.5 runs through a pixel)"
+    };
+    let opts = widgets::NumberOpts {
+        range: (0.0, size as f64),
+        step: 0.5,
+        digits: 1,
+        width: Some(64.0),
+        help,
+        ..Default::default()
+    };
+    if widgets::ds_number_field(ui, ("mirror-axis", label), label, &mut v, &opts).changed {
+        let v = Some((v * 2.0).round() as i32);
+        if x { tab.mirror_axes.0 = v } else { tab.mirror_axes.1 = v }
     }
 }
 

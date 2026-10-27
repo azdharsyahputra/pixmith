@@ -10,6 +10,11 @@
 // checkpoint first, so repeated calls while dragging preview in a single undo step.
 void pixmith_shape(PixmithDoc *doc, uint32_t kind, uint32_t layer, uint32_t frame, int32_t x0, int32_t y0,
                 int32_t x1, int32_t y1, uint32_t rgba, uint32_t size, uint32_t flags, bool restore);
+// Symmetry axes as twice their position in pixels from the left / top edge (even: between pixels, odd: through a
+// pixel); a negative value is the canvas center. Applies to drawing on the calling thread.
+void pixmith_set_mirror_axes(int32_t x2, int32_t y2);
+// The end of a line from (x0, y0) toward (x1, y1) snapped to a pixel-art angle (0, 2:1, 45, 1:2, 90 degrees).
+void pixmith_constrain_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t *out);
 void pixmith_stroke_begin(PixmithDoc *doc, uint32_t layer, uint32_t frame, int32_t x, int32_t y,
                        uint32_t rgba, uint32_t size, uint32_t flags);
 void pixmith_stroke_to(PixmithDoc *doc, int32_t x, int32_t y);

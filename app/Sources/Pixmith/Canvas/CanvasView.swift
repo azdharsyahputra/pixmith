@@ -19,6 +19,7 @@ final class CanvasNSView: NSView {
     weak var model: SpriteModel?
     private var last: (Int, Int)?
     private var erasing = false
+    private let brushPreview = BrushPreview()
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -48,6 +49,7 @@ final class CanvasNSView: NSView {
         drawTransformOverlay(ctx, m)
         drawWarpOverlay(ctx, m)
         m.drawTweenOverlay(ctx)
+        brushPreview.draw(ctx, model: m, dirty: dirtyRect, scale: window?.backingScaleFactor ?? 1)
         m.drawMirrorGuides(ctx, size: rect.size)
     }
 
@@ -56,11 +58,14 @@ final class CanvasNSView: NSView {
         let z = model?.zoom ?? 1
         let pos = (Int((p.x / z).rounded(.down)), Int((p.y / z).rounded(.down)))
         if StatusInfo.shared.cursor?.x != pos.0 || StatusInfo.shared.cursor?.y != pos.1 { StatusInfo.shared.cursor = pos }
+        if let m = model { brushPreview.pointerMoved(pos, in: self, model: m) }
         return pos
     }
 
     override func mouseDown(with e: NSEvent) {
+        if beginPan(e) { return }
         guard let m = model else { return }
+        m.applyMirrorAxes()
         TimelineSelection.shared.focused = false
         let p = pixel(e)
         IsoGrid.lastClick = p
@@ -93,6 +98,7 @@ final class CanvasNSView: NSView {
     }
 
     override func mouseDragged(with e: NSEvent) {
+        if continuePan(e) { return }
         guard let m = model else { return }
         let p = pixel(e)
         m.isoPointerMoved(p, in: self)
@@ -130,11 +136,17 @@ final class CanvasNSView: NSView {
 
     override func mouseExited(with e: NSEvent) {
         StatusInfo.shared.cursor = nil
+        if let m = model { brushPreview.pointerMoved(nil, in: self, model: m) }
         model?.isoPointerMoved(nil, in: self)
         model?.tileCopiesPointerMoved(nil, in: self)
     }
 
+    override func otherMouseDown(with e: NSEvent) { _ = beginPan(e) }
+    override func otherMouseDragged(with e: NSEvent) { _ = continuePan(e) }
+    override func otherMouseUp(with e: NSEvent) { _ = endPan() }
+
     override func mouseUp(with e: NSEvent) {
+        if endPan() { return }
         if let m = model, m.tweenDragging { m.tweenMouseUp(); return }
         if let m = model, m.warpMouseUp() { return }
         if let m = model, m.transformActive { _ = m.transformMouseUp(); return }

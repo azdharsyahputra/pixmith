@@ -137,6 +137,8 @@ pub struct DocTab {
     /// Offset of the sprite's center from the canvas area's center, in points.
     pub pan: egui::Vec2,
     pub playing: bool,
+    /// Twice the symmetry axes' position in pixels (`MirrorAxes`); `None` is the canvas center.
+    pub mirror_axes: (Option<i32>, Option<i32>),
     /// Bumped after every change so the canvas re-uploads its texture.
     pub revision: u64,
 }
@@ -144,7 +146,16 @@ pub struct DocTab {
 impl DocTab {
     pub fn new(doc: Doc) -> DocTab {
         let layer = doc.layer_count().saturating_sub(1);
-        DocTab { doc, layer, frame: 0, zoom: 8.0, pan: egui::Vec2::ZERO, playing: false, revision: 0 }
+        DocTab {
+            doc,
+            layer,
+            frame: 0,
+            zoom: 8.0,
+            pan: egui::Vec2::ZERO,
+            playing: false,
+            mirror_axes: (None, None),
+            revision: 0,
+        }
     }
 
     /// Tab title: file name, or "Untitled".
@@ -158,6 +169,15 @@ impl DocTab {
     }
 
     /// Call after any change to the document.
+    /// The symmetry axes, twice their position in pixels (the canvas center unless moved).
+    pub fn mirror_x2(&self) -> i32 {
+        self.mirror_axes.0.unwrap_or(self.doc.width() as i32)
+    }
+
+    pub fn mirror_y2(&self) -> i32 {
+        self.mirror_axes.1.unwrap_or(self.doc.height() as i32)
+    }
+
     pub fn changed(&mut self) {
         self.revision += 1;
     }

@@ -314,19 +314,37 @@ pub fn key_char(key: Key) -> Option<String> {
     (rest.is_none() && c.is_ascii_graphic()).then(|| c.to_ascii_lowercase().to_string())
 }
 
-/// The key presses of this frame, as (key, shift).
+/// Marks that the canvas was dragged with Space held, so releasing Space does not run its shortcut.
+pub fn space_panned(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(SPACE_PANNED), true));
+}
+
+const SPACE_PANNED: &str = "space-panned";
+
+/// The key presses of this frame, as (key, shift). Space is the canvas hand while held, so it counts on release,
+/// and not at all when the canvas was dragged meanwhile.
 fn presses(ctx: &egui::Context) -> Vec<(Key, bool)> {
-    ctx.input(|i| {
-        i.events
-            .iter()
-            .filter_map(|e| match e {
-                Event::Key { key, pressed: true, modifiers, .. } if !modifiers.command && !modifiers.alt => {
-                    Some((*key, modifiers.shift))
+    let id = egui::Id::new(SPACE_PANNED);
+    let events = ctx.input(|i| i.events.clone());
+    let mut out = Vec::new();
+    for e in events {
+        match e {
+            Event::Key { key: Key::Space, pressed, repeat, modifiers, .. } if !modifiers.command && !modifiers.alt => {
+                if pressed {
+                    if !repeat {
+                        ctx.data_mut(|d| d.remove_temp::<bool>(id));
+                    }
+                } else if !ctx.data_mut(|d| d.remove_temp::<bool>(id)).unwrap_or(false) {
+                    out.push((Key::Space, modifiers.shift));
                 }
-                _ => None,
-            })
-            .collect()
-    })
+            }
+            Event::Key { key, pressed: true, modifiers, .. } if !modifiers.command && !modifiers.alt => {
+                out.push((key, modifiers.shift));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Runs this frame's single-key shortcuts, or records a key for the Keyboard tab. Called from the canvas, with
