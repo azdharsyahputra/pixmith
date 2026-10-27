@@ -395,7 +395,7 @@ struct ToolOptionsBar: View {
         case .line:
             group { BrushOptionsView(model: model) }
             group { InkOptionsView(model: model, brush: false) }
-            group { HintLabel(keys: ["⇧"], text: "45° angles") }
+            group { HintLabel(keys: ["⇧"], text: "2:1 and 45° angles") }
         case .rectangle, .ellipse:
             group { BrushOptionsView(model: model) }
             group {

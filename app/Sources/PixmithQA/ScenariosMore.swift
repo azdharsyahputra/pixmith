@@ -375,6 +375,8 @@ func registerMore() {
         m.color = RED
         d.stroke([(1, 1), (10, 1), (10, 10)])
         put(d, 3, 6, BLUE)
+        // Away from the canvas, so the brush preview does not tint the pixels sampled below.
+        d.leave()
         // Checkerboard and the pixel grid show where the sprite is transparent.
         var rep = d.snapshot("view-grid")
         let sprite = d.shown(3, 6, in: rep)

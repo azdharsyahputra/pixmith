@@ -249,7 +249,7 @@ fn options(app: &mut PixmithApp, ui: &mut egui::Ui) {
         Tool::Line => {
             group(ui, |ui| brush(ui, size, o));
             group(ui, |ui| ink(ui, o));
-            group(ui, |ui| widgets::hint_label(ui, &["\u{21e7}"], "45\u{b0} angles"));
+            group(ui, |ui| widgets::hint_label(ui, &["\u{21e7}"], "2:1 and 45\u{b0} angles"));
         }
         Tool::Rectangle | Tool::Ellipse => {
             group(ui, |ui| brush(ui, size, o));

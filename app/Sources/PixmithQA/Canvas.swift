@@ -73,6 +73,15 @@ final class CanvasDriver {
         canvas.mouseMoved(with: mouse(.mouseMoved, x, y, flags: [], clicks: 0))
     }
 
+    /// The pointer leaves the canvas (hides the brush preview).
+    func leave() {
+        eventNumber += 1
+        let e = NSEvent.enterExitEvent(with: .mouseExited, location: point(-1, -1), modifierFlags: [],
+                                       timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                       context: nil, eventNumber: eventNumber, trackingNumber: 0, userData: nil)!
+        canvas.mouseExited(with: e)
+    }
+
     func click(_ x: Int, _ y: Int, flags: NSEvent.ModifierFlags = [], right: Bool = false, clicks: Int = 1) {
         down(x, y, flags: flags, right: right, clicks: clicks)
         up(x, y, flags: flags, right: right)

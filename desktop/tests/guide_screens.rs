@@ -42,10 +42,12 @@ struct Shot {
     region: Region,
     collapse: &'static [&'static str],
     setup: fn(&mut PixmithApp),
+    /// Sprite pixel the pointer rests on (brush preview, tile copies).
+    hover: Option<(i32, i32)>,
 }
 
 const fn shot(id: &'static str, setup: fn(&mut PixmithApp)) -> Shot {
-    Shot { id, size: [W, H], region: Region::Canvas, collapse: &[], setup }
+    Shot { id, size: [W, H], region: Region::Canvas, collapse: &[], setup, hover: None }
 }
 
 /// Renders one shot and saves the cropped PNG. Returns the size written.
@@ -91,6 +93,20 @@ fn render(s: &Shot) -> (u32, u32) {
     // The marching ants and the text cursor ask for repaints, so `run` would complain; `run_ok` does not.
     harness.run_ok();
     harness.run_ok();
+    if let Some((x, y)) = s.hover {
+        use pixmith_desktop::theme::metric;
+        let area = egui::Rect::from_min_max(
+            egui::pos2(metric::TOOL_RAIL, 2.0 * metric::BAR_HEIGHT),
+            egui::pos2(w - metric::INSPECTOR_WIDTH, h - timeline_h),
+        );
+        let app = harness.state();
+        let tab = &app.tabs[app.active];
+        let srect = pixmith_desktop::ui::canvas::sprite_rect(area, tab, 2.0);
+        let pos = srect.min + egui::vec2(x as f32 + 0.5, y as f32 + 0.5) * tab.zoom;
+        harness.event(egui::Event::PointerMoved(pos));
+        harness.run_ok();
+        harness.run_ok();
+    }
     let image = harness.render().expect("render");
     let px = |v: f32| (v * 2.0).round() as u32;
     let (x0, y0, x1, y1) = match s.region {
@@ -651,6 +667,101 @@ fn live_link(app: &mut PixmithApp) {
     app.menus.prefs_tab = pixmith_desktop::ui::menus::PrefsTab::General;
 }
 
+// ---- What's new (devlog) ----
+
+/// Art for the devlog scenes (`tests/fixtures/showcase`).
+fn showcase(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/showcase").join(name)
+}
+
+fn showcase_png(name: &str) -> Doc {
+    Doc::import_png(&showcase(name)).expect("showcase art")
+}
+
+/// The brush preview: a 2 px gold brush over a treasure chest.
+fn new_brush_preview(app: &mut PixmithApp) {
+    put(app, showcase_png("chest.png"), 14.0, Tool::Pencil);
+    app.primary = 0xFEAE34FF;
+    app.brush_size = 2;
+    app.timeline.collapsed = true;
+}
+
+/// Auto Tiles: a dungeon wall as a 16 px tilemap; the pointer rests on a plain brick tile and every cell that shows
+/// the same tile is outlined (the torches, moss and crack are tiles of their own).
+fn new_auto_tiles(app: &mut PixmithApp) {
+    let mut doc = showcase_png("dungeon.png");
+    assert!(doc.convert_layer_to_tilemap(0, 16, 16, true));
+    put(app, doc, 7.0, Tool::Pencil);
+    app.tabs[0].layer = 0;
+    app.primary = 0x3E8948FF;
+    app.tilemap.auto_tiles = true;
+    app.timeline.collapsed = true;
+}
+
+/// 2:1 lines: an isometric crate drawn on a grass block with the Line tool and Shift, two faces filled so far.
+fn new_iso_lines(app: &mut PixmithApp) {
+    let mut doc = showcase_png("iso_island.png");
+    doc.rename_layer(0, "Island");
+    let crate_layer = doc.add_layer(0);
+    doc.rename_layer(crate_layer, "Crate");
+    let ink = 0x3E2731FF;
+    doc.begin_edit("Crate");
+    // Each 2:1 edge runs 17 pixels across and 8 down, in pairs of two.
+    for (a, b) in [
+        ((31, 22), (48, 14)),
+        ((48, 14), (65, 22)),
+        ((65, 22), (48, 30)),
+        ((48, 30), (31, 22)),
+        ((31, 22), (31, 34)),
+        ((65, 22), (65, 34)),
+        ((48, 30), (48, 42)),
+        ((31, 34), (48, 42)),
+        ((48, 42), (65, 34)),
+    ] {
+        doc.draw_shape(ShapeKind::Line, crate_layer, 0, a, b, ink, 1, flag::CONSTRAIN, false);
+    }
+    doc.fill_at(crate_layer, 0, 48, 22, 0xE4A672FF, 0, true, 0);
+    doc.fill_at(crate_layer, 0, 39, 33, 0xB86F50FF, 0, true, 0);
+    // Plank seams on the filled side.
+    doc.draw_shape(ShapeKind::Line, crate_layer, 0, (32, 27), (47, 35), 0x733E39FF, 1, flag::CONSTRAIN, false);
+    doc.stroke_end();
+    put(app, doc, 9.0, Tool::Line);
+    app.tabs[0].layer = crate_layer;
+    app.primary = 0x9E543EFF;
+    app.timeline.collapsed = true;
+}
+
+/// A mirror axis moved off-center, through the middle of a potion on the left of the canvas: the brush preview
+/// shows both sides.
+fn new_mirror_axis(app: &mut PixmithApp) {
+    put(app, showcase_png("potion.png"), 12.0, Tool::Pencil);
+    app.tabs[0].mirror_axes = (Some(32), None);
+    app.canvas.opts.mirror_x = true;
+    app.primary = 0xFFBADEFF;
+    app.timeline.collapsed = true;
+}
+
+/// A layered campfire animation: the preview docked in the inspector shows the frame being edited.
+fn new_preview_docked(app: &mut PixmithApp) {
+    let doc = Doc::open(&showcase("campfire.aseprite")).expect("campfire");
+    put(app, doc, 14.0, Tool::Pencil);
+    app.tabs[0].layer = 2;
+    app.tabs[0].frame = 3;
+    app.tabs[0].changed();
+    app.canvas.tools.set_preview_docked(true);
+    app.canvas.tools.settings.preview_zoom = pixmith_desktop::ui::tools::view::PreviewZoom::X4;
+}
+
+/// The same campfire with the timeline dragged taller.
+fn new_timeline(app: &mut PixmithApp) {
+    let doc = Doc::open(&showcase("campfire.aseprite")).expect("campfire");
+    put(app, doc, 10.0, Tool::Pencil);
+    app.tabs[0].layer = 2;
+    app.tabs[0].frame = 3;
+    app.tabs[0].changed();
+    app.timeline.height = Some(300.0);
+}
+
 #[test]
 #[ignore = "needs a GPU; run with --ignored"]
 fn guide_screens() {
@@ -691,6 +802,16 @@ fn guide_screens() {
         shot("iso", iso),
         Shot { region: Region::Whole, ..shot("export-godot", export_godot) },
         Shot { region: Region::Whole, ..shot("live-link", live_link) },
+        Shot { hover: Some((32, 21)), ..shot("new-brush-preview", new_brush_preview) },
+        Shot { hover: Some((10, 23)), ..shot("new-mirror-axis", new_mirror_axis) },
+        Shot { hover: Some((57, 33)), ..shot("new-iso-lines", new_iso_lines) },
+        Shot { hover: Some((88, 22)), ..shot("new-auto-tiles", new_auto_tiles) },
+        Shot {
+            region: Region::Wide,
+            collapse: &["color", "palette"],
+            ..shot("new-preview-docked", new_preview_docked)
+        },
+        Shot { region: Region::WithTimeline, ..shot("new-timeline", new_timeline) },
     ];
     let only: Vec<String> = std::env::var("GUIDE_ONLY")
         .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
@@ -710,6 +831,7 @@ fn guide_screens() {
         scratch.set_ink(0, false, &[]);
         Doc::set_brush_circle(false);
         Doc::brush_reset();
+        pixmith_core::paint::shapes::set_mirror_axes(None, None);
     }
     assert!(failed.is_empty(), "scenes that panicked: {failed:?}");
 }

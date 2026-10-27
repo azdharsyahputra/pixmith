@@ -1,6 +1,6 @@
 #!/bin/sh
-# Runs the same checks as .github/workflows/ci.yml for core and desktop (fmt, clippy, tests), so a push never
-# reaches GitHub red. The pre-push hook runs it; run it by hand with `scripts/ci-local.sh`.
+# Runs the same checks as .github/workflows/ci.yml (core and desktop: fmt, clippy, tests; on macOS also the app's
+# scenarios), so a push never reaches GitHub red. The pre-push hook runs it; run it by hand with `scripts/ci-local.sh`.
 #
 # Tests use a throwaway HOME and support folder (never the real Pixmith data) but the real cargo cache.
 # PIXMITH_JOBS sets the build jobs (default 4).
@@ -19,4 +19,10 @@ for crate in core desktop; do
     run cargo clippy -j "$jobs" --all-targets -- -D warnings
     run cargo test -j "$jobs"
 done
+# The macOS app's scenario runner (the `app` job): build.sh, then every pixmith-qa scenario.
+if [ "$(uname)" = Darwin ]; then
+    cd "$root"
+    run ./build.sh
+    run env PIXMITH_JOBS="$jobs" PIXMITH_QA_OUT="$tmp/qa-out" ./scripts/qa.sh
+fi
 echo "ci-local: all green"
