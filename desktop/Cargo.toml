@@ -1,6 +1,6 @@
 [package]
 name = "pixmith-desktop"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2024"
 description = "Pixmith, the lightweight pixel-art editor: cross-platform desktop front end built with egui"
 license = "MIT"
