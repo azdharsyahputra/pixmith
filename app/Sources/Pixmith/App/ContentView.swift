@@ -61,10 +61,12 @@ struct EditorScreen: View {
             TitleRow(model: model)
             HStack(spacing: 0) {
                 ToolsPanel(model: model)
-                VStack(spacing: 0) {
-                    ContextBar(model: model)
-                    CanvasArea(model: model)
-                    TimelinePanel(model: model).id(model.activeSlotID)
+                GeometryReader { column in
+                    VStack(spacing: 0) {
+                        ContextBar(model: model)
+                        CanvasArea(model: model)
+                        TimelinePanel(model: model, maxHeight: column.size.height * 0.7).id(model.activeSlotID)
+                    }
                 }
                 SidePanel(model: model).id(model.activeSlotID)
             }

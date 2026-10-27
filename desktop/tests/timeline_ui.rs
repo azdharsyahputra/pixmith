@@ -5,10 +5,15 @@ use egui_kittest::Harness;
 use pixmith_desktop::{PixmithApp, theme};
 
 fn harness(setup: impl FnOnce(&mut PixmithApp)) -> Harness<'static, PixmithApp> {
+    harness_stepping(0.25, setup)
+}
+
+/// A harness whose frames advance `dt` seconds (the default 0.25 s is longer than the double-click window).
+fn harness_stepping(dt: f32, setup: impl FnOnce(&mut PixmithApp)) -> Harness<'static, PixmithApp> {
     let mut app = PixmithApp::default();
     setup(&mut app);
     let mut installed = false;
-    let mut h = Harness::builder().with_size([1280.0, 800.0]).build_ui_state(
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).with_step_dt(dt).build_ui_state(
         move |ui, app: &mut PixmithApp| {
             if !installed {
                 theme::install(ui.ctx());
@@ -107,4 +112,60 @@ fn collapsing_shrinks_the_panel() {
     h.state_mut().timeline.collapsed = true;
     h.run();
     assert!(pixmith_desktop::ui::timeline::panel_height(h.state()) < expanded);
+}
+
+fn drag(h: &mut Harness<'static, PixmithApp>, from: Pos2, to: Pos2) {
+    h.event(Event::PointerMoved(from));
+    h.step();
+    h.event(Event::PointerButton {
+        pos: from,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    h.step();
+    for k in 1..=4 {
+        h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 4.0)));
+        h.step();
+    }
+    h.event(Event::PointerButton {
+        pos: to,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    h.run_steps(5);
+}
+
+#[test]
+fn dragging_the_top_edge_resizes_and_double_click_resets() {
+    use pixmith_desktop::ui::timeline::{MIN_HEIGHT, panel_height};
+    let mut h = harness_stepping(1.0 / 60.0, with_frames_and_layers);
+    let auto = panel_height(h.state());
+    let top = 800.0 - auto + 1.0;
+
+    drag(&mut h, pos2(700.0, top), pos2(700.0, top - 100.0));
+    let taller = panel_height(h.state());
+    assert!((taller - (auto + 100.0)).abs() <= 2.0, "auto {auto}, after drag {taller}");
+    assert_eq!(h.state().timeline.height.map(f32::round), Some(taller.round()));
+
+    // Never past 70% of the column, never below the minimum.
+    let top = 800.0 - taller + 1.0;
+    drag(&mut h, pos2(700.0, top), pos2(700.0, 5.0));
+    let max = h.state().timeline.max_height;
+    assert!(panel_height(h.state()) <= max + 0.5 && max < 800.0 * 0.7 + 0.5);
+    let top = 800.0 - panel_height(h.state()) + 1.0;
+    drag(&mut h, pos2(700.0, top), pos2(700.0, 799.0));
+    assert_eq!(panel_height(h.state()), MIN_HEIGHT);
+
+    let at = pos2(700.0, 800.0 - MIN_HEIGHT + 1.0);
+    h.event(Event::PointerMoved(at));
+    h.step();
+    for pressed in [true, false, true, false] {
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(5);
+    assert_eq!(h.state().timeline.height, None);
+    assert_eq!(panel_height(h.state()), auto);
 }

@@ -78,6 +78,10 @@ struct LayerDrag {
 pub struct TimelineState {
     /// The panel is folded to its header (`panel.timeline.collapsed`).
     pub collapsed: bool,
+    /// The height the panel was dragged to (`panel.timeline.height`); `None` grows with the layer count.
+    pub height: Option<f32>,
+    /// Tallest the panel may be: 70% of the column it sits in, set every frame by the app.
+    pub max_height: f32,
     /// Loop inside the tag containing the current frame.
     pub loop_tags: bool,
     /// Onion skin on the canvas.
@@ -109,7 +113,24 @@ pub struct TimelineState {
     frame_started: Option<f64>,
 }
 
+/// Storage key of the dragged panel height.
+const HEIGHT_KEY: &str = "panel.timeline.height";
+/// Shortest a dragged panel may be: the header, the frame numbers and two rows.
+pub const MIN_HEIGHT: f32 = 120.0;
+
 impl TimelineState {
+    /// Restores the panel height an earlier run saved.
+    pub fn load(&mut self, storage: Option<&dyn eframe::Storage>) {
+        self.height = storage
+            .and_then(|st| st.get_string(HEIGHT_KEY))
+            .and_then(|t| t.trim().parse::<f32>().ok())
+            .filter(|h| h.is_finite() && *h >= MIN_HEIGHT);
+    }
+
+    pub fn save(&self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(HEIGHT_KEY, self.height.map(|h| h.round().to_string()).unwrap_or_default());
+    }
+
     /// A tag or layer sheet is open.
     pub fn sheet_open(&self) -> bool {
         self.tag_sheet.is_some() || self.layer_sheet.is_some()
@@ -120,6 +141,8 @@ impl Default for TimelineState {
     fn default() -> TimelineState {
         TimelineState {
             collapsed: false,
+            height: None,
+            max_height: f32::INFINITY,
             loop_tags: true,
             onion_skin: false,
             frame_diff: false,
@@ -193,13 +216,37 @@ impl TimelineState {
     }
 }
 
-/// Height of the panel: the header alone when collapsed, else it grows with the layer count up to 252 pt.
+/// Height of the panel: the header alone when collapsed, the dragged height when there is one, else it grows with
+/// the layer count up to 252 pt. Never taller than `max_height`.
 pub fn panel_height(app: &PixmithApp) -> f32 {
-    if app.timeline.collapsed {
+    let st = &app.timeline;
+    if st.collapsed {
         return metric::TIMELINE_HEADER;
     }
+    let upper = st.max_height.max(MIN_HEIGHT);
+    if let Some(h) = st.height {
+        return h.clamp(MIN_HEIGHT, upper);
+    }
     let rows = app.tab().doc.layer_count() as f32;
-    metric::TIMELINE_HEIGHT.min(168.0_f32.max(metric::TIMELINE_HEADER + 48.0 + rows * metric::TIMELINE_ROW + 8.0))
+    let auto =
+        metric::TIMELINE_HEIGHT.min(168.0_f32.max(metric::TIMELINE_HEADER + 48.0 + rows * metric::TIMELINE_ROW + 8.0));
+    auto.min(upper)
+}
+
+/// The grip on the panel's top edge: drag it to resize the panel, double-click it to go back to the automatic height.
+fn resize_handle(st: &mut TimelineState, ui: &mut egui::Ui, rect: Rect, c: &Colors) {
+    let grip = Rect::from_min_max(pos2(rect.left(), rect.top() - 3.0), pos2(rect.right(), rect.top() + 3.0));
+    let r = ui.interact(grip, ui.id().with("timeline_resize"), egui::Sense::click_and_drag());
+    if r.double_clicked() {
+        st.height = None;
+    } else if r.dragged() {
+        let upper = st.max_height.max(MIN_HEIGHT);
+        st.height = Some((rect.height() - r.drag_delta().y).clamp(MIN_HEIGHT, upper));
+    }
+    if r.hovered() || r.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(rect.width(), 2.0)), 0.0, c.accent);
+    }
 }
 
 pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
@@ -225,6 +272,9 @@ pub fn show(app: &mut PixmithApp, ui: &mut egui::Ui) {
     }
     // The hairline on the top edge.
     ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(rect.width(), 1.0)), 0.0, c.separator);
+    if !st.collapsed {
+        resize_handle(st, ui, rect, &c);
+    }
 
     if let Some(mut sheet) = st.tag_sheet.take()
         && !sheets::show_tag(&ctx, &mut sheet, tab)

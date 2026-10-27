@@ -173,15 +173,25 @@ private struct ScrollOffsetKey: PreferenceKey {
 
 /// Persisted collapsed state of the timeline panel.
 private let timelineCollapsedKey = "panel.timeline.collapsed"
+/// Persisted height the timeline panel was dragged to; 0 grows with the layer count.
+private let timelineHeightKey = "panel.timeline.height"
 
 /// The timeline panel: transport and frame controls on top, then the layers column next to the frames grid.
 struct TimelinePanel: View {
     @ObservedObject var model: SpriteModel
+    /// Tallest the panel may be: 70% of the canvas column.
+    var maxHeight: CGFloat = .infinity
     @AppStorage(timelineCollapsedKey) private var collapsed = false
+    @AppStorage(timelineHeightKey) private var storedHeight: Double = 0
+
+    /// Shortest a dragged panel may be: the header, the frame numbers and two rows.
+    static let minHeight: CGFloat = 120
 
     var body: some View {
         let rows = CGFloat(model.layerCount)
-        let expanded = min(DS.Metric.timelineHeight, max(168, DS.Metric.timelineHeader + 48 + rows * DS.Metric.timelineRow + 8))
+        let auto = min(DS.Metric.timelineHeight, max(168, DS.Metric.timelineHeader + 48 + rows * DS.Metric.timelineRow + 8))
+        let upper = max(Self.minHeight, maxHeight)
+        let expanded = storedHeight > 0 ? min(max(CGFloat(storedHeight), Self.minHeight), upper) : min(auto, upper)
         VStack(spacing: 0) {
             TimelineHeader(model: model, collapsed: $collapsed)
             if !collapsed {
@@ -192,7 +202,48 @@ struct TimelinePanel: View {
         .frame(height: collapsed ? DS.Metric.timelineHeader : expanded)
         .background(DSColor.panel)
         .overlay(alignment: .top) { Rectangle().fill(DSColor.separator).frame(height: 1) }
+        .overlay(alignment: .top) {
+            if !collapsed {
+                TimelineResizeHandle(height: expanded, range: Self.minHeight...upper, stored: $storedHeight)
+            }
+        }
         .animation(DS.Anim.quick, value: collapsed)
+    }
+}
+
+/// The grip on the timeline's top edge: drag it to resize the panel, double-click it to go back to the automatic
+/// height.
+private struct TimelineResizeHandle: View {
+    let height: CGFloat
+    let range: ClosedRange<CGFloat>
+    @Binding var stored: Double
+    @State private var start: CGFloat?
+    @State private var hovering = false
+    @State private var cursorPushed = false
+
+    var body: some View {
+        Rectangle()
+            .fill(hovering || start != nil ? DSColor.accent : Color.clear)
+            .frame(height: 2)
+            .frame(maxWidth: .infinity, minHeight: 6, maxHeight: 6, alignment: .top)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                hovering = inside
+                if inside, !cursorPushed { NSCursor.resizeUpDown.push(); cursorPushed = true }
+                if !inside, cursorPushed, start == nil { NSCursor.pop(); cursorPushed = false }
+            }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { g in
+                    if start == nil { start = height }
+                    let h = (start ?? height) - g.translation.height
+                    stored = Double(min(max(h, range.lowerBound), range.upperBound).rounded())
+                }
+                .onEnded { _ in
+                    start = nil
+                    if !hovering, cursorPushed { NSCursor.pop(); cursorPushed = false }
+                })
+            .simultaneousGesture(TapGesture(count: 2).onEnded { stored = 0 })
+            .help("Drag to resize the timeline. Double-click to reset.")
     }
 }
 

@@ -201,6 +201,7 @@ impl PixmithApp {
             ..PixmithApp::default()
         };
         app.inspector.picker.load(cc.storage);
+        app.timeline.load(cc.storage);
         // Pixmith opens on Home; opening a file straight away (command line, drop) goes to the editor instead.
         app.go_home();
         ui::menus::apply_appearance(&mut app, &cc.egui_ctx);
@@ -269,6 +270,7 @@ impl PixmithApp {
                     .frame(bar(c.panel))
                     .show(root, |ui| ui::transform::show_bar(self, ui));
             }
+            self.timeline.max_height = root.available_height() * 0.7;
             egui::Panel::bottom("timeline")
                 .exact_size(ui::timeline::panel_height(self))
                 .resizable(false)
@@ -334,5 +336,6 @@ impl eframe::App for PixmithApp {
         self.menus.save(storage);
         self.projects.save(storage);
         self.inspector.picker.save(storage);
+        self.timeline.save(storage);
     }
 }
