@@ -313,73 +313,79 @@ final class LiveServer: ObservableObject {
         var authed = false
         var clientName = ""
         while !session.isStopped {
-            let bytes: [UInt8]
-            switch readLine(fd, &buffer, &scanned) {
-            case .closed: return
-            case .tooLong:
-                _ = send(fd, id: NSNull(), reply: .failure(LiveError(code: -32600, message: "message larger than 64 MiB")))
-                return
-            case .message(let b): bytes = b
-            }
-            if bytes.allSatisfy({ $0 == 0x20 || $0 == 0x09 || $0 == 0x0D }) { continue }
-            guard let parsed = try? JSONSerialization.jsonObject(with: Data(bytes)) else {
-                _ = send(fd, id: NSNull(), reply: .failure(LiveError(code: -32700, message: "invalid JSON")))
-                if authed { continue }
-                return
-            }
-            guard let message = parsed as? [String: Any], let method = message["method"] as? String else {
-                _ = send(fd, id: (parsed as? [String: Any])?["id"] ?? NSNull(),
-                         reply: .failure(LiveError(code: -32600, message: "not a JSON-RPC request")))
-                if authed { continue }
-                return
-            }
-            // Notifications are not used in protocol 1.
-            guard let id = message["id"] else {
-                if authed { continue }
-                return
-            }
-            let params = message["params"] as? [String: Any] ?? [:]
-            if !authed || method == "hello" {
-                if let error = hello(method == "hello" ? params : nil, session) {
-                    _ = send(fd, id: id, reply: .failure(error))
-                    if !authed { return }
-                    continue
+            // A detached thread drains its autorelease pool only when it ends, and a connection can stay open for
+            // days: without a pool per message, every document sent through it would stay in memory until then.
+            let open: Bool = autoreleasepool {
+                let bytes: [UInt8]
+                switch readLine(fd, &buffer, &scanned) {
+                case .closed: return false
+                case .tooLong:
+                    _ = send(fd, id: NSNull(), reply: .failure(LiveError(code: -32600, message: "message larger than 64 MiB")))
+                    return false
+                case .message(let b): bytes = b
                 }
-                if !authed {
-                    authed = true
-                    setReceiveTimeout(fd, seconds: 0)
-                    let client = Client(id: fd, name: Self.clip(params["client"]), version: Self.clip(params["client_version"]))
-                    clientName = client.name
-                    DispatchQueue.main.async { [weak self] in self?.clients.append(client) }
+                if bytes.allSatisfy({ $0 == 0x20 || $0 == 0x09 || $0 == 0x0D }) { return true }
+                guard let parsed = try? JSONSerialization.jsonObject(with: Data(bytes)) else {
+                    _ = send(fd, id: NSNull(), reply: .failure(LiveError(code: -32700, message: "invalid JSON")))
+                    if authed { return true }
+                    return false
                 }
-                if !send(fd, id: id, reply: .success(Self.helloResult())) { return }
-                continue
-            }
-            // The Game view relay is answered here, on the connection's own thread: never on the main thread, so it
-            // works while the app is busy and does not stall drawing.
-            if method.hasPrefix("game.") {
-                let reply = session.game.handle(method, params, fd: fd, client: clientName, stopped: { session.isStopped })
-                if !send(fd, id: id, reply: reply) { return }
-                continue
-            }
-            let box = ReplyBox()
-            let done = DispatchSemaphore(value: 0)
-            DispatchQueue.main.async {
-                box.reply = LiveHandler.handle(method, params)
-                done.signal()
-            }
-            let started = Date()
-            var reply: LiveReply?
-            while reply == nil {
-                if done.wait(timeout: .now() + 0.25) == .success {
-                    reply = box.reply
-                } else if session.isStopped {
-                    return
-                } else if Date().timeIntervalSince(started) > Self.answerTimeout {
-                    reply = .failure(.other("Pixmith did not answer in time"))
+                guard let message = parsed as? [String: Any], let method = message["method"] as? String else {
+                    _ = send(fd, id: (parsed as? [String: Any])?["id"] ?? NSNull(),
+                             reply: .failure(LiveError(code: -32600, message: "not a JSON-RPC request")))
+                    if authed { return true }
+                    return false
                 }
+                // Notifications are not used in protocol 1.
+                guard let id = message["id"] else {
+                    if authed { return true }
+                    return false
+                }
+                let params = message["params"] as? [String: Any] ?? [:]
+                if !authed || method == "hello" {
+                    if let error = hello(method == "hello" ? params : nil, session) {
+                        _ = send(fd, id: id, reply: .failure(error))
+                        if !authed { return false }
+                        return true
+                    }
+                    if !authed {
+                        authed = true
+                        setReceiveTimeout(fd, seconds: 0)
+                        let client = Client(id: fd, name: Self.clip(params["client"]), version: Self.clip(params["client_version"]))
+                        clientName = client.name
+                        DispatchQueue.main.async { [weak self] in self?.clients.append(client) }
+                    }
+                    if !send(fd, id: id, reply: .success(Self.helloResult())) { return false }
+                    return true
+                }
+                // The Game view relay is answered here, on the connection's own thread: never on the main thread, so it
+                // works while the app is busy and does not stall drawing.
+                if method.hasPrefix("game.") {
+                    let reply = session.game.handle(method, params, fd: fd, client: clientName, stopped: { session.isStopped })
+                    if !send(fd, id: id, reply: reply) { return false }
+                    return true
+                }
+                let box = ReplyBox()
+                let done = DispatchSemaphore(value: 0)
+                DispatchQueue.main.async {
+                    box.reply = LiveHandler.handle(method, params)
+                    done.signal()
+                }
+                let started = Date()
+                var reply: LiveReply?
+                while reply == nil {
+                    if done.wait(timeout: .now() + 0.25) == .success {
+                        reply = box.reply
+                    } else if session.isStopped {
+                        return false
+                    } else if Date().timeIntervalSince(started) > Self.answerTimeout {
+                        reply = .failure(.other("Pixmith did not answer in time"))
+                    }
+                }
+                if !send(fd, id: id, reply: reply!) { return false }
+                return true
             }
-            if !send(fd, id: id, reply: reply!) { return }
+            if !open { return }
         }
     }
 

@@ -5,25 +5,44 @@ import PixmithCore
 /// One rendered frame: straight-alpha pixels (for the eyedropper) and premultiplied pixels (for drawing),
 /// updated a rectangle at a time.
 final class FrameBuffer {
+    /// The pixel memory, in its own object: the images made over it keep it alive, and if they kept the FrameBuffer
+    /// alive instead, its `cached` image would hold it in a cycle that is never freed.
+    private final class Pixels {
+        let straight: UnsafeMutablePointer<UInt8>
+        let premul: UnsafeMutablePointer<UInt8>
+
+        init?(count n: Int) {
+            guard let s = calloc(n, 1) else { return nil }
+            guard let p = calloc(n, 1) else {
+                free(s)
+                return nil
+            }
+            straight = s.assumingMemoryBound(to: UInt8.self)
+            premul = p.assumingMemoryBound(to: UInt8.self)
+        }
+
+        deinit {
+            free(straight)
+            free(premul)
+        }
+    }
+
     let width: Int, height: Int
-    let straight: UnsafeMutablePointer<UInt8>
-    let premul: UnsafeMutablePointer<UInt8>
+    private let pixels: Pixels
+    var straight: UnsafeMutablePointer<UInt8> { pixels.straight }
+    var premul: UnsafeMutablePointer<UInt8> { pixels.premul }
     private var scratch: UnsafeMutablePointer<UInt8>?
     private var scratchSize = 0
     private var cached: CGImage?
 
     init?(width: Int, height: Int) {
-        let n = width * height * 4
-        guard width > 0, height > 0, let s = calloc(n, 1), let p = calloc(n, 1) else { return nil }
+        guard width > 0, height > 0, let pixels = Pixels(count: width * height * 4) else { return nil }
         self.width = width
         self.height = height
-        straight = s.assumingMemoryBound(to: UInt8.self)
-        premul = p.assumingMemoryBound(to: UInt8.self)
+        self.pixels = pixels
     }
 
     deinit {
-        free(straight)
-        free(premul)
         scratch.map { free($0) }
     }
 
@@ -64,13 +83,13 @@ final class FrameBuffer {
     /// keeps showing stale pixels.
     var image: CGImage? {
         if let cached { return cached }
-        let info = Unmanaged.passRetained(self).toOpaque()
+        let info = Unmanaged.passRetained(pixels).toOpaque()
         guard let provider = CGDataProvider(dataInfo: info, data: premul, size: width * height * 4,
                                             releaseData: { info, _, _ in
-                                                if let info { Unmanaged<FrameBuffer>.fromOpaque(info).release() }
+                                                if let info { Unmanaged<Pixels>.fromOpaque(info).release() }
                                             })
         else {
-            Unmanaged<FrameBuffer>.fromOpaque(info).release()
+            Unmanaged<Pixels>.fromOpaque(info).release()
             return nil
         }
         cached = CGImage(
