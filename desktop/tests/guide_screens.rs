@@ -753,6 +753,30 @@ fn new_tile_mode_pixels(app: &mut PixmithApp) {
     new_auto_tiles(app);
 }
 
+/// Drawing over stamped tiles: one brick of the wall painted with Auto Tiles on. It got its own tile, so hovering a
+/// plain brick outlines every copy except the painted one.
+fn new_tile_draw_over(app: &mut PixmithApp) {
+    new_auto_tiles(app);
+    app.tilemap.set_auto_tiles(true);
+    let tab = &mut app.tabs[0];
+    let moss = 0x3E8948FF;
+    tab.doc.begin_edit("Moss");
+    for pts in [[(50, 37), (53, 35), (56, 37)], [(52, 39), (55, 38), (58, 40)], [(51, 42), (54, 41), (57, 43)]] {
+        tab.doc.stroke_begin(0, 0, pts[0].0, pts[0].1, moss, 1, 0);
+        for p in &pts[1..] {
+            tab.doc.stroke_to(p.0, p.1);
+        }
+        tab.doc.stroke_end();
+    }
+    tab.changed();
+}
+
+/// Tiles mode after two stamps that changed nothing: the hint at the bottom of the canvas.
+fn new_tile_hint(app: &mut PixmithApp) {
+    new_tile_mode_tiles(app);
+    app.tilemap.hint_until = Some(1.0e9);
+}
+
 /// A layered campfire animation: the preview docked in the inspector shows the frame being edited.
 fn new_preview_docked(app: &mut PixmithApp) {
     let doc = Doc::open(&showcase("campfire.aseprite")).expect("campfire");
@@ -826,6 +850,8 @@ fn guide_screens() {
         Shot { region: Region::WithTimeline, ..shot("new-timeline", new_timeline) },
         Shot { hover: Some((72, 40)), ..shot("new-tile-mode-tiles", new_tile_mode_tiles) },
         Shot { hover: Some((40, 52)), ..shot("new-tile-mode-pixels", new_tile_mode_pixels) },
+        Shot { hover: Some((88, 22)), ..shot("new-tile-draw-over", new_tile_draw_over) },
+        Shot { hover: Some((72, 40)), ..shot("new-tile-hint", new_tile_hint) },
     ];
     let only: Vec<String> = std::env::var("GUIDE_ONLY")
         .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
@@ -846,6 +872,7 @@ fn guide_screens() {
         Doc::set_brush_circle(false);
         Doc::brush_reset();
         pixmith_core::paint::shapes::set_mirror_axes(None, None);
+        pixmith_core::document::tilemap::set_auto_tiles(false);
     }
     assert!(failed.is_empty(), "scenes that panicked: {failed:?}");
 }
